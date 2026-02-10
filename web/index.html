@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <!--
+    Navigation App - Google Maps Web Application
+    
+    ISTRUZIONE PER LA API KEY:
+    Sostituire YOUR_API_KEY_HERE con la tua Google Maps API Key
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Navigation App - Web app di navigazione stile Google Maps">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Navigation App">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png" />
+
+  <title>Navigation App</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- ============================================================
+       GOOGLE MAPS JAVASCRIPT API
+       
+       IMPORTANTE: Sostituisci YOUR_API_KEY_HERE con la tua API Key
+       
+       Come ottenere una API Key:
+       1. Vai su https://console.cloud.google.com/
+       2. Crea un progetto o selezionane uno esistente
+       3. Vai su APIs & Services > Credentials
+       4. Clicca Create Credentials > API Key
+       5. Abilita in APIs & Services > Library:
+          - Maps JavaScript API
+          - Directions API
+       ============================================================ -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_API_KEY_HERE&libraries=geometry"></script>
+
+  <!-- Script per gestione mappa Google -->
+  <script>
+    // Variabile globale per la mappa
+    var map = null;
+    // Variabile per i marker
+    var markers = [];
+    // Variabile per la polyline del percorso
+    var routePolyline = null;
+
+    /**
+     * Inizializza la mappa Google Maps
+     * @param {string} mapId - ID del div contenitore
+     * @param {number} lat - Latitudine centro mappa
+     * @param {number} lng - Longitudine centro mappa
+     * @param {number} zoom - Livello di zoom iniziale
+     */
+    function initMap(mapId, lat, lng, zoom) {
+      // Trova l'elemento div della mappa
+      var mapElement = document.getElementById(mapId);
+
+      // Se l'elemento non esiste, prova dopo un breve delay
+      if (!mapElement) {
+        setTimeout(function () {
+          initMap(mapId, lat, lng, zoom);
+        }, 100);
+        return;
+      }
+
+      // Configura le opzioni della mappa
+      var mapOptions = {
+        center: { lat: lat, lng: lng },
+        zoom: zoom,
+        mapTypeControl: true,
+        streetViewControl: false,
+        fullscreenControl: true,
+        zoomControl: true
+      };
+
+      // Crea la mappa
+      map = new google.maps.Map(mapElement, mapOptions);
+    }
+
+    /**
+     * Aggiorna la mappa con il percorso calcolato
+     * @param {number} originLat - Latitudine partenza
+     * @param {number} originLng - Longitudine partenza
+     * @param {number} destLat - Latitudine destinazione
+     * @param {number} destLng - Longitudine destinazione
+     * @param {string} encodedPolyline - Polyline codificata del percorso
+     */
+    function updateRoute(originLat, originLng, destLat, destLng, encodedPolyline) {
+      // Controlla che la mappa sia inizializzata
+      if (!map) {
+        console.warn('Mappa non inizializzata');
+        return;
+      }
+
+      // Rimuove i marker esistenti
+      markers.forEach(function (marker) {
+        marker.setMap(null);
+      });
+      markers = [];
+
+      // Rimuove la polyline esistente
+      if (routePolyline) {
+        routePolyline.setMap(null);
+      }
+
+      // Crea marker per la partenza (verde)
+      var originMarker = new google.maps.Marker({
+        position: { lat: originLat, lng: originLng },
+        map: map,
+        title: 'Partenza',
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: '#4CAF50',
+          fillOpacity: 1,
+          strokeColor: '#ffffff',
+          strokeWeight: 3
+        }
+      });
+      markers.push(originMarker);
+
+      // Crea marker per la destinazione (rosso)
+      var destMarker = new google.maps.Marker({
+        position: { lat: destLat, lng: destLng },
+        map: map,
+        title: 'Destinazione',
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: '#F44336',
+          fillOpacity: 1,
+          strokeColor: '#ffffff',
+          strokeWeight: 3
+        }
+      });
+      markers.push(destMarker);
+
+      // Decodifica la polyline
+      var path = google.maps.geometry.encoding.decodePath(encodedPolyline);
+
+      // Crea la polyline del percorso
+      routePolyline = new google.maps.Polyline({
+        path: path,
+        geodesic: true,
+        strokeColor: '#4285F4',  // Blu Google
+        strokeOpacity: 1.0,
+        strokeWeight: 5
+      });
+      routePolyline.setMap(map);
+
+      // Adatta la vista per mostrare tutto il percorso
+      var bounds = new google.maps.LatLngBounds();
+      bounds.extend({ lat: originLat, lng: originLng });
+      bounds.extend({ lat: destLat, lng: destLng });
+      path.forEach(function (point) {
+        bounds.extend(point);
+      });
+      map.fitBounds(bounds);
+    }
+  </script>
+</head>
+
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+
+</html>
