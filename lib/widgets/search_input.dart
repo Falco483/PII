@@ -2,6 +2,7 @@
 ///
 /// Fornisce due campi di testo per inserire l'indirizzo di partenza
 /// e destinazione, più un pulsante per calcolare il percorso.
+library;
 
 import 'package:flutter/material.dart';
 

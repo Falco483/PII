@@ -5,7 +5,7 @@ Implementazione di: bearing affidabile (`direction`), trigger velocità-zero con
 ## User Review Required
 
 > [!IMPORTANT]
-> **API Key** — Il progetto usa `'YOUR_API_KEY_HERE'` in `DirectionsService`. La stessa chiave sarà usata anche per la Roads API. L'utente deve assicurarsi che la chiave Google Cloud abbia abilitati sia **Directions API** sia **Roads API**.
+> **API Key** — Il progetto usa `'YOUR_API_KEY_HERE'` in [DirectionsService](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#75-153). La stessa chiave sarà usata anche per la Roads API. L'utente deve assicurarsi che la chiave Google Cloud abbia abilitati sia **Directions API** sia **Roads API**.
 
 > [!WARNING]
 > **Roads API Costo** — La Roads API ha un costo per chiamata. Ogni volta che l'utente è fermo per 10 secondi (e non si trova su un waypoint di svolta) viene effettuata una chiamata con 10 punti. L'implementazione è progettata per evitare falsi positivi, ma l'utente dovrebbe monitorare l'uso in produzione.
@@ -44,7 +44,7 @@ Ogni funzione avrà commenti esaustivi (formula, motivazione, edge case).
 
 #### [MODIFY] [directions_service.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart)
 
-- Aggiungere campo `String? maneuver` al modello `DirectionStep`
+- Aggiungere campo `String? maneuver` al modello [DirectionStep](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#11-50)
 - Nel `fromJson`, estrarre `json['maneuver']` (campo opzionale della Directions API)
 - Necessario per mostrare l'istruzione corretta se l'utente è fermo su un waypoint di svolta (Step 2.3)
 
@@ -82,7 +82,7 @@ Output della logica: un callback / `ValueNotifier<NavigationOverlayState?>` che 
 #### [MODIFY] [navigation_screen.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart)
 
 - Salvare `currentLocation` (lat/lng) e `rawBearing` nel listener GPS (già esiste il listener, manca il salvataggio di lat/lng e heading)
-- Istanziare `NavigationMonitor` in `initState`, passare `currentSpeed`, `currentLocation`, `rawBearing`, e gli `steps` del percorso calcolato
+- Istanziare `NavigationMonitor` in [initState](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart#40-44), passare `currentSpeed`, `currentLocation`, `rawBearing`, e gli `steps` del percorso calcolato
 - Avviare/fermare il timer del bearing tramite `NavigationMonitor`
 - Osservare l'output di `NavigationMonitor` per mostrare/nascondere l'overlay
 - Dispose corretto di tutti i timer

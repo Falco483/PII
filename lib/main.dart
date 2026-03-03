@@ -1,6 +1,7 @@
 /// main.dart - Entry point dell'applicazione Navigation App
 ///
 /// Questo file configura il tema dell'app e avvia la NavigationScreen.
+library;
 
 import 'package:flutter/material.dart';
 import 'screens/navigation_screen.dart';

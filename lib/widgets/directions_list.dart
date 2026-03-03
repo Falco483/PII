@@ -2,6 +2,7 @@
 ///
 /// Mostra una lista scrollabile delle indicazioni con icone,
 /// distanza e durata per ogni step.
+library;
 
 import 'package:flutter/material.dart';
 import '../services/directions_service.dart';

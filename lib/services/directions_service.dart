@@ -2,19 +2,41 @@
 ///
 /// Questo servizio gestisce le chiamate HTTP a Google Directions API e
 /// parsifica la risposta JSON per estrarre il percorso e le indicazioni.
+library;
 
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 /// Modello per un singolo step delle indicazioni
+///
+/// Ogni step rappresenta un segmento del percorso con una singola istruzione
+/// di navigazione (es. "Svolta a destra su Via Roma").
+///
+/// CAMPI IMPORTANTI:
+/// - [instruction]: testo leggibile dall'utente, estratto da `html_instructions`
+///   del JSON della Directions API. Questo è il testo che viene mostrato
+///   sull'overlay quando l'utente è fermo su un waypoint di svolta.
+/// - [maneuver]: identificatore programmatico della manovra (es. "turn-left",
+///   "roundabout-right"). NON usare per il testo visivo (è un codice, non
+///   una frase). Usare invece per la logica dell'app (es. decidere quale
+///   icona mostrare). Può essere null perché non tutti gli step hanno una
+///   manovra (es. il primo step "Procedi verso nord" spesso non ha maneuver).
 class DirectionStep {
-  final String instruction; // Istruzione testuale (es. "Svolta a destra")
+  final String
+  instruction; // Testo da html_instructions (es. "Svolta a destra")
   final String distance; // Distanza (es. "500 m")
   final String duration; // Durata (es. "2 min")
   final double startLat; // Latitudine punto di partenza step
   final double startLng; // Longitudine punto di partenza step
   final double endLat; // Latitudine punto di arrivo step
   final double endLng; // Longitudine punto di arrivo step
+
+  /// Codice della manovra, stabile e indipendente dalla lingua.
+  /// Valori possibili: "turn-left", "turn-right", "turn-slight-left",
+  /// "turn-sharp-right", "uturn-left", "roundabout-right", "merge",
+  /// "ramp-left", "fork-right", "straight", "keep-left", "keep-right", ecc.
+  /// Può essere null se lo step non ha una manovra specifica.
+  final String? maneuver;
 
   DirectionStep({
     required this.instruction,
@@ -24,12 +46,24 @@ class DirectionStep {
     required this.startLng,
     required this.endLat,
     required this.endLng,
+    this.maneuver,
   });
 
   /// Crea un DirectionStep dal JSON della risposta API
+  ///
+  /// Struttura JSON di uno step dalla Directions API:
+  /// {
+  ///   "html_instructions": "Svolta a <b>destra</b> su <b>Via Roma</b>",
+  ///   "maneuver": "turn-right",           ← può essere assente
+  ///   "distance": { "text": "500 m", "value": 500 },
+  ///   "duration": { "text": "2 min", "value": 120 },
+  ///   "start_location": { "lat": 45.123, "lng": 9.456 },
+  ///   "end_location": { "lat": 45.124, "lng": 9.457 }
+  /// }
   factory DirectionStep.fromJson(Map<String, dynamic> json) {
     return DirectionStep(
       // Rimuove i tag HTML dalle istruzioni (la API restituisce HTML)
+      // Il testo pulito è quello che verrà mostrato sull'overlay
       instruction: _removeHtmlTags(json['html_instructions'] ?? ''),
       distance: json['distance']['text'] ?? '',
       duration: json['duration']['text'] ?? '',
@@ -37,6 +71,8 @@ class DirectionStep {
       startLng: json['start_location']['lng'].toDouble(),
       endLat: json['end_location']['lat'].toDouble(),
       endLng: json['end_location']['lng'].toDouble(),
+      // Il campo maneuver è opzionale nel JSON: se assente, resta null
+      maneuver: json['maneuver'] as String?,
     );
   }
 

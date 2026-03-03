@@ -1,54 +1,38 @@
-# Navigation App - Flutter Android
+# GPS Navigation Features — Walkthrough
 
-App di navigazione stile Google Maps per **Android** in Flutter/Dart.
+## Changes Made
 
----
+### New Files (4)
 
-## Struttura File
+| File | Lines | Purpose |
+|---|---|---|
+| [geo_utils.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart) | 249 | Costanti configurabili + formule geodetiche (Haversine, destination point, lateral points) |
+| [roads_service.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/roads_service.dart) | 193 | Client HTTP per Roads API (nearestRoads) con retry logic |
+| [navigation_monitor.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart) | 375 | Logica di business: `direction`, timer bearing 5s, trigger velocità-zero 10s, analisi laterale |
+| [navigation_overlay.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/navigation_overlay.dart) | 243 | Widget overlay animato (fade in/out, auto-dismiss, tap-to-dismiss) |
 
-```
-lib/
-├── main.dart                    # Entry point
-├── screens/
-│   └── navigation_screen.dart   # Schermata principale
-├── services/
-│   └── directions_service.dart  # Servizio API Directions
-└── widgets/
-    ├── map_widget.dart          # Widget mappa Google
-    ├── search_input.dart        # Input partenza/destinazione
-    └── directions_list.dart     # Lista indicazioni
-```
+### Modified Files (2)
 
----
+| File | Change |
+|---|---|
+| [directions_service.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart) | Aggiunto campo `maneuver` a `DirectionStep` |
+| [navigation_screen.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart) | Integrazione completa: salva lat/lng/bearing, istanzia `NavigationMonitor`, mostra overlay |
 
-## Come Avviare
+### Documentation
 
-### 1. Inserire la API Key
+| File | Purpose |
+|---|---|
+| [implementation_plan.md](file:///c:/Users/Antonio/Desktop/pii2/docs/implementation_plan.md) | Piano di implementazione salvato in `docs/` |
 
-**File `android/app/src/main/AndroidManifest.xml`:**
-```xml
-<meta-data
-    android:name="com.google.android.geo.API_KEY"
-    android:value="LA_TUA_API_KEY"/>
-```
+## Verification
 
-**File `lib/services/directions_service.dart`:**
-```dart
-static const String apiKey = 'LA_TUA_API_KEY';
-```
+### Static Analysis (`flutter analyze`)
+- ✅ **0 errori** di compilazione
+- ℹ️ 10 info/warning (tutti pre-esistenti: `print`, `withOpacity` deprecato, dangling doc comment in `map_widget.dart`)
 
-### 2. Avviare l'app
-
-```bash
-flutter pub get
-flutter run
-```
-
----
-
-## API Google Richieste
-
-In [Google Cloud Console](https://console.cloud.google.com/apis/library):
-
-1. **Maps SDK for Android**
-2. **Directions API**
+### Flusso Logico
+1. GPS emette posizione/velocità/bearing → `navigation_screen.dart` li salva e li inoltra a `NavigationMonitor`
+2. `NavigationMonitor` aggiorna `direction` ogni 5s (solo se velocità > 4 km/h)
+3. Quando velocità < 1 km/h → avvia countdown 10s
+4. Se countdown scade → snapshot posizione/direction → controlla waypoint svolta → se no, calcola 10 punti laterali → chiama Roads API → mostra overlay
+5. Overlay mostra `html_instructions` (se su waypoint) o "vai diritto stronzo" (se strada laterale)

@@ -1,0 +1,51 @@
+Poiché stai sviluppando un'app per persone con disabilità cognitive, l'affidabilità è tutto. Non usare MAI il campo html_instructions per far scattare la logica della tua app (ovvero per decidere quando mostrare l'overlay).
+
+Leggere il testo (parsing) è pericoloso: se l'utente cambia la lingua del telefono in inglese, il tuo codice che cerca la parola "destra" smetterà di funzionare e l'utente si perderà. Il campo html_instructions serve solo se vuoi stamparlo a schermo così com'è.
+
+Per far capire al tuo codice cosa sta succedendo, devi usare esclusivamente il campo maneuver. A differenza del testo, i valori di maneuver sono costanti, immutabili e uguali in tutto il mondo.
+
+Ecco l'elenco esatto e completo dei comandi maneuver che l'API può restituirti. Questa è la vera lista che ti serve per programmare i tuoi "punti decisionali":
+
+Svolte:
+
+	turn-slight-left (svolta leggermente a sinistra)
+
+	turn-sharp-left (svolta netta a sinistra)
+
+	turn-left (svolta a sinistra)
+
+	turn-slight-right (svolta leggermente a destra)
+
+	turn-sharp-right (svolta netta a destra)
+
+	turn-right (svolta a destra)
+
+	uturn-left (inversione a U a sinistra)
+
+	uturn-right (inversione a U a destra)
+
+Continuità:
+
+	straight (vai dritto)
+
+	keep-left (mantieni la sinistra)
+
+	keep-right (mantieni la destra)
+
+Svincoli e Rotonde:
+
+	merge (immettiti / confluisci)
+
+	ramp-left (prendi la rampa a sinistra)
+
+	ramp-right (prendi la rampa a destra)
+
+	fork-left (al bivio tieni la sinistra)
+
+	fork-right (al bivio tieni la destra)
+
+	roundabout-left (rotonda verso sinistra)
+
+	roundabout-right (rotonda verso destra)
+
+Invece di cercare la parola "rotonda" nel testo HTML, il tuo codice dovrà semplicemente dire: se la manovra attuale contiene la parola "roundabout", allora prepara l'interfaccia grafica per le rotonde.

@@ -211,8 +211,8 @@ class _MapWidgetState extends State<MapWidget> {
       polylines: _polylines,
       // Abilita zoom e rotazione
       zoomControlsEnabled: true,
-      myLocationEnabled: false,
-      myLocationButtonEnabled: false,
+      myLocationEnabled: true,
+      myLocationButtonEnabled: true,
       // Tipo di mappa
       mapType: MapType.normal,
     );
