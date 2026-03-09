@@ -1,0 +1,72 @@
+# Implementazione Places Autocomplete, Selezione Mappa e Calcolo Percorso
+
+## Stato Attuale
+
+| TASK | Stato |
+|------|-------|
+| TASK 1 — Places Autocomplete + session token + debounce | ❌ Mancante |
+| TASK 2 — Flusso ricerca completo | ❌ Mancante |
+| TASK 3 — Selezione punto sulla mappa (POI + punto generico) | ❌ Mancante |
+| TASK 4 — Calcolo percorso con alternatives | ✅ Già implementato |
+| TASK 5 — Monitoraggio posizione + deviazione + ricalcolo | ✅ Già implementato |
+
+## Proposed Changes
+
+### PlacesService (Nuovo servizio API)
+
+#### [NEW] [places_service.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/places_service.dart)
+
+Nuovo servizio che incapsula:
+- **Session Token**: genera UUID v4, lo riutilizza per autocomplete+details, lo rinnova dopo la selezione
+- **`getAutocompleteSuggestions(input, sessionToken)`**: chiama Places Autocomplete (`/place/autocomplete/json`) con `input`, `sessiontoken`, `language=it`
+- **`getPlaceDetails(placeId, sessionToken)`**: chiama Places Details (`/place/details/json`) con `place_id`, `sessiontoken`, `fields=geometry` per ottenere lat/lng
+- Modelli: `PlaceSuggestion` (description + placeId), `PlaceDetails` (lat, lng, name, address)
+
+---
+
+### SearchInput (Riscrittura completa)
+
+#### [MODIFY] [search_input.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/search_input.dart)
+
+Trasformare da `StatelessWidget` a `StatefulWidget` con autocomplete:
+- **Debounce 300ms**: Timer interno, richiesta API solo dopo 300ms di inattività
+- **Minimum 3 caratteri**: Se `input.length < 3` → nessuna chiamata, svuota i suggerimenti
+- **Session Token**: genera token all'inizio della digitazione, lo passa a autocomplete + details, lo rinnova dopo la selezione
+- **Dropdown suggerimenti**: `ListView` posizionato sotto il campo di testo con i risultati
+- **Selezione**: al tap su un suggerimento → chiama Places Details con lo stesso token → restituisce coordinate al parent via callback `onDestinationSelected(lat, lng, address)`
+- Mantiene il campo "Partenza" come testo semplice (la partenza sarà la posizione GPS corrente — TASK 4)
+
+---
+
+### MapWidget (Aggiunta tap handlers)
+
+#### [MODIFY] [map_widget.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/map_widget.dart)
+
+Aggiungere:
+- **Parametro callback `onMapTap(LatLng)`**: per click su punto generico → coordinate dirette
+- **Parametro callback `onPoiTap(PoiTapEvent)`**: per click su POI → `placeId` disponibile
+- Configurare `GoogleMap` con `onTap:` e `onPoiTap:` per catturare entrambi i tipi di selezione
+
+---
+
+### NavigationScreen (Coordinazione flusso)
+
+#### [MODIFY] [navigation_screen.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart)
+
+Aggiornare:
+- **Nuovo metodo `_calculateRouteFromCoordinates(lat, lng)`**: usa posizione GPS come origine (`"$_currentLat,$_currentLng"`) e coordinate destinazione come stringa per la Directions API
+- **Handler per selezione da SearchInput**: callback `onDestinationSelected` che riceve lat/lng e avvia il calcolo percorso
+- **Handler per tap su mappa (punto generico)**: riceve `LatLng`, nessuna chiamata Places Details, usa direttamente le coordinate
+- **Handler per tap su POI mappa**: riceve `placeId`, chiama Places Details per ottenere coordinate, poi calcola percorso
+- Rimuovere il campo "Partenza" dall'UI (la partenza è sempre la posizione GPS corrente)
+
+## Verification Plan
+
+### Automated
+- `flutter analyze` per verificare compilazione senza errori
+
+### Manual
+- Test su dispositivo: digitare indirizzo → verificare suggerimenti autocomplete
+- Selezionare suggerimento → verificare che il percorso venga calcolato
+- Tap su mappa (punto generico) → verificare calcolo percorso da posizione GPS
+- Tap su POI → verificare chiamata Places Details + calcolo percorso

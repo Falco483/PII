@@ -103,6 +103,36 @@ const int kOverlayAutoDismissSeconds = 8;
 /// Usato nelle formule geodetiche.
 const double kEarthRadiusMeters = 6371000.0;
 
+/// Soglia di deviazione dal percorso in metri (TASK 2).
+///
+/// Se la distanza minima tra la posizione dell'utente e la polyline del
+/// percorso attivo è MAGGIORE di questa soglia, l'utente è considerato
+/// "fuori percorso" (ha deviato).
+///
+/// PERCHÉ 40 METRI:
+/// - La precisione tipica del GPS su smartphone è 3-10 m in condizioni normali
+/// - In ambienti urbani (edifici alti, gallerie) può peggiorare a 15-30 m
+/// - Una corsia autostradale è larga ~3.5 m, una strada urbana ~6-7 m
+/// - 40 m è abbastanza ampio da coprire l'imprecisione GPS + la larghezza
+///   della strada, evitando falsi ricalcoli quando l'utente è sul percorso
+///   ma il GPS è leggermente impreciso
+/// - Allo stesso tempo, 40 m è abbastanza stretto da rilevare una vera
+///   deviazione (es. svolta su una strada laterale)
+const double kRouteDeviationThresholdMeters = 40.0;
+
+/// Intervallo in secondi tra un controllo e l'altro della posizione
+/// rispetto al percorso attivo (TASK 2).
+///
+/// PERCHÉ 2 SECONDI:
+/// - A 50 km/h (~14 m/s) l'utente percorre ~28 m in 2 secondi
+/// - A 100 km/h (~28 m/s) percorre ~56 m in 2 secondi
+/// - 2 secondi è un buon compromesso tra reattività (rilevare rapidamente
+///   una deviazione) e consumo di risorse (non eseguire calcoli inutili)
+/// - Se controllassimo ogni 100 ms sarebbe troppo frequente (spreco CPU)
+/// - Se controllassimo ogni 10 s potremmo accorgerci della deviazione
+///   troppo tardi (l'utente ha già percorso 280 m fuori percorso)
+const int kRouteCheckIntervalSec = 2;
+
 // =============================================================================
 // FUNZIONI GEODETICHE
 // =============================================================================
@@ -151,6 +181,108 @@ double haversineDistance(double lat1, double lng1, double lat2, double lng2) {
 
   // Moltiplica per il raggio della Terra per ottenere la distanza in metri
   return kEarthRadiusMeters * c;
+}
+
+/// distanceBetween — Wrapper nominale per haversineDistance (TASK 2).
+///
+/// Questa funzione è un alias di haversineDistance con il nome richiesto
+/// dalle specifiche del progetto. Rende il codice più leggibile nei
+/// contesti dove si parla di "distanza tra due punti" senza entrare
+/// nei dettagli dell'algoritmo usato.
+///
+/// PARAMETRI:
+/// - [lat1], [lon1]: latitudine e longitudine del primo punto
+/// - [lat2], [lon2]: latitudine e longitudine del secondo punto
+///
+/// RETURN: distanza in metri (double, sempre >= 0)
+double distanceBetween(double lat1, double lon1, double lat2, double lon2) {
+  // Delega il calcolo effettivo alla formula di Haversine
+  return haversineDistance(lat1, lon1, lat2, lon2);
+}
+
+/// minDistanceToPolyline — Calcola la distanza MINIMA tra un punto GPS e
+/// una polyline (lista di coordinate) di un percorso (TASK 2).
+///
+/// COME FUNZIONA:
+/// 1. Itera su OGNI punto della polyline decodificata
+/// 2. Per ciascun punto, calcola la distanza dal punto GPS dell'utente
+/// 3. Tiene traccia della distanza minima trovata
+/// 4. Restituisce la distanza minima alla fine dell'iterazione
+///
+/// PERCHÉ CONFRONTARE CON OGNI PUNTO DELLA POLYLINE:
+/// La polyline è una serie di segmenti retti che approssimano il percorso
+/// stradale. Per sapere se l'utente è "sul percorso", dobbiamo trovare
+/// il punto della polyline più vicino alla sua posizione GPS. Se quel
+/// punto è entro la soglia (40 m), l'utente è considerato sul percorso.
+///
+/// NOTA SULLE PERFORMANCE:
+/// Una polyline tipica ha 100-500 punti. Iterare su tutti ha costo O(n),
+/// che per 500 punti richiede microsecondi — trascurabile. Non serve
+/// ottimizzare con strutture dati spaziali (quadtree, R-tree) per
+/// questo numero di punti.
+///
+/// PARAMETRI:
+/// - [lat], [lng]: posizione GPS corrente dell'utente
+/// - [polyline]: lista di punti del percorso, ogni punto come [lat, lng]
+///
+/// RETURN: distanza minima in metri. Se la polyline è vuota, restituisce
+///   double.infinity (infinito) per indicare "nessun punto trovato".
+double minDistanceToPolyline(
+  double lat,
+  double lng,
+  List<List<double>> polyline,
+) {
+  // Se la polyline è vuota, non c'è nessun punto con cui confrontare.
+  // Restituiamo infinito per indicare che la distanza è "indefinita".
+  if (polyline.isEmpty) return double.infinity;
+
+  // Inizializziamo la distanza minima al valore più grande possibile.
+  // Qualsiasi distanza reale sarà minore di infinity.
+  double minDist = double.infinity;
+
+  // Iteriamo su ogni punto della polyline
+  for (final point in polyline) {
+    // Calcola la distanza tra la posizione dell'utente e questo
+    // punto della polyline usando la funzione distanceBetween
+    final double dist = distanceBetween(lat, lng, point[0], point[1]);
+
+    // Se questa distanza è minore della minima trovata finora,
+    // aggiorna il valore minimo
+    if (dist < minDist) {
+      minDist = dist;
+    }
+  }
+
+  // Restituisce la distanza minima trovata tra tutti i punti
+  return minDist;
+}
+
+/// isOnRoute — Verifica se l'utente è "sul percorso" (TASK 2a/2b).
+///
+/// Questa funzione combina minDistanceToPolyline con un confronto
+/// a soglia per restituire un semplice booleano: true/false.
+///
+/// PARAMETRI:
+/// - [lat], [lng]: posizione GPS corrente dell'utente
+/// - [polyline]: polyline decodificata del percorso da controllare
+/// - [thresholdMeters]: soglia in metri (default: kRouteDeviationThresholdMeters)
+///
+/// RETURN:
+/// - true se la distanza minima dalla polyline è ≤ thresholdMeters
+///   (l'utente è SUL percorso)
+/// - false se la distanza è > thresholdMeters
+///   (l'utente ha DEVIATO dal percorso)
+bool isOnRoute(
+  double lat,
+  double lng,
+  List<List<double>> polyline, {
+  double thresholdMeters = kRouteDeviationThresholdMeters,
+}) {
+  // Calcola la distanza minima tra la posizione e la polyline
+  final double minDist = minDistanceToPolyline(lat, lng, polyline);
+
+  // Confronta con la soglia: se la distanza è ≤ soglia, l'utente è sul percorso
+  return minDist <= thresholdMeters;
 }
 
 /// Calcola le coordinate di un punto di destinazione dato:

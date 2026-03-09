@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>Prima Implementazione — App di Navigazione</title>
+  <style>
+    /* === STILE DOCUMENTO PDF === */
+    @page {
+      size: A4;
+      margin: 2cm;
+    }
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      font-size: 11pt;
+      line-height: 1.6;
+      color: #222;
+      max-width: 700px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    h1 {
+      font-size: 22pt;
+      color: #1a73e8;
+      border-bottom: 3px solid #1a73e8;
+      padding-bottom: 8px;
+      margin-top: 0;
+    }
+    h2 {
+      font-size: 15pt;
+      color: #1a73e8;
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 4px;
+      margin-top: 28px;
+    }
+    h3 {
+      font-size: 12pt;
+      color: #333;
+      margin-top: 18px;
+    }
+    code {
+      background: #f0f4f8;
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-size: 10pt;
+      font-family: 'Consolas', 'Courier New', monospace;
+    }
+    .highlight-box {
+      background: #e8f0fe;
+      border-left: 4px solid #1a73e8;
+      padding: 12px 16px;
+      margin: 12px 0;
+      border-radius: 0 6px 6px 0;
+    }
+    .warning-box {
+      background: #fef7e0;
+      border-left: 4px solid #f9ab00;
+      padding: 12px 16px;
+      margin: 12px 0;
+      border-radius: 0 6px 6px 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 10pt;
+    }
+    th {
+      background: #1a73e8;
+      color: white;
+      padding: 8px 12px;
+      text-align: left;
+    }
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #eee;
+    }
+    tr:nth-child(even) td {
+      background: #f8f9fa;
+    }
+    .flow-step {
+      display: flex;
+      align-items: flex-start;
+      margin: 8px 0;
+    }
+    .flow-num {
+      background: #1a73e8;
+      color: white;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 10pt;
+      margin-right: 12px;
+      flex-shrink: 0;
+    }
+    .arrow {
+      text-align: center;
+      color: #1a73e8;
+      font-size: 18pt;
+      margin: 4px 0;
+    }
+    ul { margin: 8px 0; }
+    li { margin: 4px 0; }
+    .page-break { page-break-before: always; }
+  </style>
+</head>
+<body>
+
+<h1>📱 Prima Implementazione — App di Navigazione</h1>
+
+<p>Questo documento descrive tutte le funzionalità implementate nell'app di navigazione e il flusso generale di interazione per l'utente.</p>
+
+<!-- ======================================================= -->
+<h2>1. Panoramica delle Funzionalità</h2>
+
+<p>L'app di navigazione offre cinque macro-funzionalità integrate:</p>
+
+<table>
+  <tr>
+    <th>#</th>
+    <th>Funzionalità</th>
+    <th>Descrizione</th>
+  </tr>
+  <tr>
+    <td><strong>TASK 1</strong></td>
+    <td>Ricerca con Places Autocomplete</td>
+    <td>Ricerca testuale con suggerimenti in tempo reale, debounce e session token per ottimizzazione costi</td>
+  </tr>
+  <tr>
+    <td><strong>TASK 2</strong></td>
+    <td>Flusso ricerca testuale</td>
+    <td>Flusso completo: digitazione → suggerimenti → selezione → coordinate</td>
+  </tr>
+  <tr>
+    <td><strong>TASK 3</strong></td>
+    <td>Selezione punto sulla mappa</td>
+    <td>Tap diretto sulla mappa per selezionare una destinazione (POI o punto generico)</td>
+  </tr>
+  <tr>
+    <td><strong>TASK 4</strong></td>
+    <td>Calcolo percorso con alternative</td>
+    <td>Calcolo percorso da posizione GPS con percorsi alternativi, selezione del più veloce</td>
+  </tr>
+  <tr>
+    <td><strong>TASK 5</strong></td>
+    <td>Monitoraggio e ricalcolo</td>
+    <td>Controllo continuo posizione ogni 2s, switch su alternativo o ricalcolo API se deviazione</td>
+  </tr>
+</table>
+
+<!-- ======================================================= -->
+<h2>2. Struttura dei File</h2>
+
+<table>
+  <tr>
+    <th>File</th>
+    <th>Ruolo</th>
+  </tr>
+  <tr>
+    <td><code>lib/services/places_service.dart</code></td>
+    <td>Servizio Places API: autocomplete + details + session token</td>
+  </tr>
+  <tr>
+    <td><code>lib/services/directions_service.dart</code></td>
+    <td>Servizio Directions API: calcolo percorso + percorsi alternativi</td>
+  </tr>
+  <tr>
+    <td><code>lib/services/roads_service.dart</code></td>
+    <td>Servizio Roads API: verifica strade laterali</td>
+  </tr>
+  <tr>
+    <td><code>lib/services/navigation_monitor.dart</code></td>
+    <td>Logica di business: monitoraggio posizione, bearing, deviazione</td>
+  </tr>
+  <tr>
+    <td><code>lib/services/geo_utils.dart</code></td>
+    <td>Funzioni geometriche: distanza, punto-su-polyline, soglie</td>
+  </tr>
+  <tr>
+    <td><code>lib/screens/navigation_screen.dart</code></td>
+    <td>Schermata principale: coordina UI e logica</td>
+  </tr>
+  <tr>
+    <td><code>lib/widgets/search_input.dart</code></td>
+    <td>Widget ricerca con autocomplete e debounce</td>
+  </tr>
+  <tr>
+    <td><code>lib/widgets/map_widget.dart</code></td>
+    <td>Mappa Google con polyline, marker e tap handler</td>
+  </tr>
+  <tr>
+    <td><code>lib/widgets/directions_list.dart</code></td>
+    <td>Lista indicazioni stradali passo-passo</td>
+  </tr>
+  <tr>
+    <td><code>lib/widgets/navigation_overlay.dart</code></td>
+    <td>Overlay navigazione: istruzioni svolta, "vai dritto"</td>
+  </tr>
+</table>
+
+<!-- ======================================================= -->
+<div class="page-break"></div>
+<h2>3. TASK 1 — Ricerca con Places Autocomplete</h2>
+
+<h3>3.1 Session Token</h3>
+<p>Il session token è un identificatore univoco (UUID v4) che raggruppa tutte le richieste di una singola sessione di ricerca.</p>
+
+<div class="highlight-box">
+  <strong>Ciclo di vita del token:</strong><br>
+  1. L'utente inizia a digitare → <strong>genera</strong> un nuovo token<br>
+  2. Ogni richiesta Autocomplete usa lo <strong>stesso</strong> token<br>
+  3. L'utente seleziona un risultato → Places Details usa lo <strong>stesso</strong> token<br>
+  4. Dopo la selezione → token <strong>invalidato</strong>, ne viene generato uno nuovo
+</div>
+
+<div class="warning-box">
+  <strong>⚠️ Perché è importante:</strong> Senza session token, Google fattura ogni singola richiesta Autocomplete separatamente. Con il token, tutte le Autocomplete + la Details vengono raggruppate in un'unica sessione fatturabile, <strong>riducendo drasticamente i costi</strong>.
+</div>
+
+<h3>3.2 Debounce (300ms)</h3>
+<p>Non viene inviata una richiesta per ogni carattere digitato. Un timer di 300ms si avvia dopo ogni battitura:</p>
+<ul>
+  <li>Se l'utente digita un altro carattere prima dei 300ms → il timer viene <strong>annullato e ricreato</strong></li>
+  <li>Se l'utente smette di digitare per 300ms → la richiesta viene <strong>inviata</strong></li>
+</ul>
+<p><strong>Risultato:</strong> digitando "Duomo di Milano" velocemente, vengono inviate ~2-3 richieste invece di 15.</p>
+
+<h3>3.3 Minimo 3 Caratteri</h3>
+<p>Nessuna richiesta API viene inviata se il testo digitato ha meno di 3 caratteri. Sotto questa soglia i risultati sarebbero troppo generici e sprecherebbero chiamate API senza beneficio per l'utente.</p>
+
+<!-- ======================================================= -->
+<h2>4. TASK 2 — Flusso Ricerca Testuale Completo</h2>
+
+<div class="flow-step"><span class="flow-num">1</span> L'utente digita nella barra di ricerca</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">2</span> Se <code>input.length &lt; 3</code> → nessuna richiesta (lista vuota)</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">3</span> Se <code>input.length &ge; 3</code> → attende il debounce (300ms)</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">4</span> Chiama <strong>Places Autocomplete API</strong> con il session token</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">5</span> Mostra la lista di suggerimenti sotto il campo di testo</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">6</span> L'utente seleziona un suggerimento</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">7</span> Chiama <strong>Places Details API</strong> con lo stesso session token → ottiene coordinate (lat/lng)</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">8</span> Termina la sessione → genera un <strong>nuovo</strong> session token</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">9</span> Passa le coordinate al calcolo percorso (TASK 4)</div>
+
+<!-- ======================================================= -->
+<div class="page-break"></div>
+<h2>5. TASK 3 — Selezione Punto sulla Mappa</h2>
+
+<h3>Caso 1 — Tap su un POI (negozio, ristorante, luogo registrato)</h3>
+<p>Se l'utente tocca un POI riconosciuto da Google Maps, la mappa restituisce le coordinate del POI. Le coordinate vengono usate direttamente per calcolare il percorso, senza chiamate API aggiuntive.</p>
+
+<h3>Caso 2 — Tap su un punto generico</h3>
+<p>Se l'utente tocca un punto qualsiasi della mappa che non è un POI:</p>
+<ul>
+  <li>Le coordinate lat/lng vengono ottenute direttamente dall'evento tap</li>
+  <li><strong>Nessuna chiamata</strong> a Places Details API (le coordinate sono sufficienti)</li>
+  <li>Il campo di testo della destinazione mostra le coordinate selezionate</li>
+  <li>Si procede direttamente al calcolo del percorso (TASK 4)</li>
+</ul>
+
+<div class="highlight-box">
+  <strong>Ottimizzazione:</strong> Per i punti generici non viene chiamata nessuna API aggiuntiva. Le coordinate lat/lng sono sufficienti per la Directions API.
+</div>
+
+<!-- ======================================================= -->
+<h2>6. TASK 4 — Calcolo del Percorso</h2>
+
+<p>Dopo aver ottenuto la destinazione (da ricerca testuale o da selezione mappa), il sistema:</p>
+
+<div class="flow-step"><span class="flow-num">1</span> Ottiene la <strong>posizione GPS corrente</strong> del dispositivo (usata come origine)</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">2</span> Chiama la <strong>Directions API</strong> con <code>alternatives: true</code></div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">3</span> Riceve tutti i percorsi (principale + alternativi)</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">4</span> <strong>Confronta la durata</strong> di ogni percorso e seleziona il più veloce</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">5</span> <strong>Salva tutti i percorsi</strong> con le polyline decodificate in memoria</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">6</span> <strong>Disegna la polyline</strong> del percorso attivo sulla mappa</div>
+<div class="arrow">↓</div>
+<div class="flow-step"><span class="flow-num">7</span> Mostra le indicazioni stradali passo-passo nella lista</div>
+
+<div class="highlight-box">
+  <strong>Modelli dati:</strong>
+  <ul>
+    <li><code>RouteData</code> — un singolo percorso (polyline decodificata, durata in secondi, steps, distanza)</li>
+    <li><code>AllRoutesResult</code> — risultato completo (bestRoute + lista di tutti i percorsi alternativi)</li>
+  </ul>
+</div>
+
+<!-- ======================================================= -->
+<div class="page-break"></div>
+<h2>7. TASK 5 — Monitoraggio Posizione e Ricalcolo Automatico</h2>
+
+<p>Una volta avviata la navigazione, il sistema esegue un controllo automatico <strong>ogni 2 secondi</strong>:</p>
+
+<h3>Step 2a — L'utente è sul percorso?</h3>
+<p>Confronta la posizione GPS corrente con la polyline del percorso attivo. Se la distanza minima dalla polyline è <strong>≤ 40 metri</strong>, l'utente è considerato "sul percorso" → nessuna azione.</p>
+
+<h3>Step 2b — È su un percorso alternativo?</h3>
+<p>Se l'utente è a più di 40m dal percorso attivo, il sistema verifica se la posizione corrente è entro 40m dalla polyline di uno dei <strong>percorsi alternativi salvati</strong> in memoria:</p>
+<ul>
+  <li><strong>Se sì:</strong> il percorso alternativo diventa il nuovo percorso attivo. <strong>Nessuna chiamata API</strong> — lo switch è istantaneo.</li>
+  <li><strong>Se no:</strong> passa allo Step 2c.</li>
+</ul>
+
+<h3>Step 2c — Ricalcolo via API</h3>
+<p>Se nessun percorso alternativo è compatibile, il sistema:</p>
+<ul>
+  <li>Usa la <strong>posizione GPS corrente come nuova origine</strong></li>
+  <li>Mantiene la <strong>stessa destinazione finale</strong></li>
+  <li>Chiama la <strong>Directions API con <code>alternatives: true</code></strong></li>
+  <li>Aggiorna il percorso attivo e tutti gli alternativi</li>
+  <li>Aggiorna la mappa e le indicazioni</li>
+</ul>
+
+<div class="warning-box">
+  <strong>⚠️ Anti-flood:</strong> Un flag <code>_isRerouting</code> impedisce che vengano inviate chiamate API concorrenti. Se un ricalcolo è già in corso, i tick successivi del timer vengono ignorati fino al completamento.
+</div>
+
+<!-- ======================================================= -->
+<h2>8. Flusso Generale di Interazione</h2>
+
+<p>Il flusso completo dell'app, dalla selezione della destinazione alla navigazione attiva, si sviluppa così:</p>
+
+<table>
+  <tr>
+    <th>Fase</th>
+    <th>Azione Utente</th>
+    <th>Comportamento App</th>
+  </tr>
+  <tr>
+    <td><strong>Ingresso</strong></td>
+    <td>Apre l'app</td>
+    <td>Mostra mappa centrata sull'Italia, avvia GPS</td>
+  </tr>
+  <tr>
+    <td><strong>Destinazione (testo)</strong></td>
+    <td>Digita un indirizzo</td>
+    <td>Debounce 300ms → Autocomplete → dropdown suggerimenti</td>
+  </tr>
+  <tr>
+    <td><strong>Destinazione (mappa)</strong></td>
+    <td>Tocca un punto sulla mappa</td>
+    <td>Prende coordinate direttamente, nessuna API aggiuntiva</td>
+  </tr>
+  <tr>
+    <td><strong>Selezione</strong></td>
+    <td>Sceglie suggerimento / conferma punto</td>
+    <td>Places Details → coordinate → calcolo percorso</td>
+  </tr>
+  <tr>
+    <td><strong>Percorso</strong></td>
+    <td>—</td>
+    <td>Directions API, seleziona più veloce, disegna polyline</td>
+  </tr>
+  <tr>
+    <td><strong>Navigazione</strong></td>
+    <td>Segue il percorso</td>
+    <td>Monitoraggio ogni 2s, overlay con indicazioni</td>
+  </tr>
+  <tr>
+    <td><strong>Deviazione</strong></td>
+    <td>Prende una strada diversa</td>
+    <td>Switch su alternativo o ricalcolo API automatico</td>
+  </tr>
+</table>
+
+</body>
+</html>

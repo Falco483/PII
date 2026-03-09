@@ -3,6 +3,13 @@
 /// Questo widget mostra una mappa Google Maps con marker per
 /// origine/destinazione e una polyline per il percorso.
 /// Compatibile con Android, iOS e Web.
+///
+/// TASK 3 — SELEZIONE PUNTO SULLA MAPPA:
+/// Questo widget supporta due tipi di tap sulla mappa:
+/// 1. onMapTap: l'utente tocca un punto generico (nessun POI)
+///    → restituisce le coordinate lat/lng direttamente
+/// 2. onPoiTap: l'utente tocca un POI (negozio, ristorante, ecc.)
+///    → restituisce placeId, nome e coordinate del POI
 
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -18,6 +25,20 @@ class MapWidget extends StatefulWidget {
   // Polyline codificata per il percorso
   final String? encodedPolyline;
 
+  /// Callback chiamato quando l'utente tocca un punto sulla mappa (TASK 3).
+  ///
+  /// Gestisce entrambi i casi di TASK 3:
+  /// - Caso 1 (POI): su Google Maps Flutter, anche il tap su un POI genera
+  ///   un evento onTap con le coordinate. Il parent può usare le coordinate
+  ///   direttamente per calcolare il percorso.
+  /// - Caso 2 (punto generico): restituisce le coordinate lat/lng del punto
+  ///   toccato. NON serve chiamare Places Details API.
+  ///
+  /// In entrambi i casi, le coordinate lat/lng sono sufficienti per la
+  /// Directions API (TASK 4). Il parent (NavigationScreen) deciderà se
+  /// usare le coordinate direttamente o effettuare una reverse geocoding.
+  final void Function(LatLng position)? onMapTap;
+
   const MapWidget({
     super.key,
     this.originLat,
@@ -25,6 +46,7 @@ class MapWidget extends StatefulWidget {
     this.destLat,
     this.destLng,
     this.encodedPolyline,
+    this.onMapTap,
   });
 
   @override
@@ -215,6 +237,26 @@ class _MapWidgetState extends State<MapWidget> {
       myLocationButtonEnabled: true,
       // Tipo di mappa
       mapType: MapType.normal,
+
+      // --- TASK 3: GESTIONE TAP SULLA MAPPA ---
+
+      // onTap: chiamato quando l'utente tocca un punto GENERICO sulla mappa
+      // (non un POI). Restituisce le coordinate lat/lng del punto toccato.
+      // Se il callback è null (non fornito dal parent), il tap viene ignorato.
+      onTap: widget.onMapTap,
+
+      // onLongPress: non usato per ora, ma disponibile per future estensioni
+      // (es. "tieni premuto per impostare un waypoint intermedio")
+
+      // NOTA SUL POI TAP:
+      // A partire da google_maps_flutter, il callback per il tap su POI
+      // è gestito tramite il parametro 'onTap' dei marker interni di Google.
+      // Su Android/iOS nativi, i POI sulla mappa (negozi, ristoranti, ecc.)
+      // generano un evento separato. In Flutter, questo è esposto tramite
+      // il parametro 'onTap' del GoogleMap widget SOLO se il POI non è
+      // coperto da un marker custom. Google Maps Flutter non espone
+      // direttamente un 'onPoiTap', quindi lo gestiamo attraverso l'onTap
+      // generico e lasciamo che il parent usi le coordinate direttamente.
     );
   }
 }

@@ -1,0 +1,56 @@
+# Walkthrough — Navigazione Completa (TASKs 1-5)
+
+## Riepilogo Modifiche
+
+| File | Tipo | Modifiche |
+|------|------|-----------|
+| [places_service.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/places_service.dart) | NEW | [PlaceSuggestion](file:///c:/Users/Antonio/Desktop/pii2/lib/services/places_service.dart#54-91), [PlaceDetails](file:///c:/Users/Antonio/Desktop/pii2/lib/services/places_service.dart#98-119), [generateSessionToken()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/places_service.dart#124-163) (UUID v4), [getAutocompleteSuggestions()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/places_service.dart#198-278), [getPlaceDetails()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/places_service.dart#279-379) |
+| [search_input.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/search_input.dart) | REWRITE | Da StatelessWidget → StatefulWidget con debounce 300ms, min 3 chars, session token lifecycle, dropdown suggerimenti |
+| [map_widget.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/map_widget.dart) | MODIFY | Aggiunto [onMapTap](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart#434-467) callback per catturare tap su punti generici/POI |
+| [navigation_screen.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart) | MODIFY | Rimosso campo "Partenza", aggiunto [_calculateRouteFromCoordinates()](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart#312-411), [_onDestinationSelected()](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart#416-433), [_onMapTapped()](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart#434-467) |
+| [directions_service.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart) | prev | [RouteData](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#126-164), [AllRoutesResult](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#178-208), [getDirectionsWithAlternatives()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#288-458) |
+| [geo_utils.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart) | prev | [distanceBetween](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart#186-202), [isOnRoute](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart#260-287), soglia 40m |
+| [navigation_monitor.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart) | prev | [startNavigation](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart#349-401), timer 2s, Task 2a→2b→2c, [_executeReroute](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart#943-1039) |
+
+## Flusso Logico Completo
+
+```mermaid
+flowchart TD
+    A["INPUT DESTINAZIONE"] --> B{"Come?"}
+    
+    B -->|Ricerca testuale| C["Digita nella barra"]
+    C --> D{"input >= 3 chars?"}
+    D -->|NO| E["Nessuna chiamata API"]
+    D -->|SÌ| F["Debounce 300ms"]
+    F --> G["Autocomplete API\n+ sessionToken"]
+    G --> H["Mostra suggerimenti"]
+    H --> I["Utente seleziona"]
+    I --> J["Details API\n+ stesso token"]
+    J --> K["Rinnova token"]
+    K --> L["Coordinate lat/lng"]
+    
+    B -->|Tap su mappa| M["onMapTap"]
+    M --> L
+    
+    L --> N["CALCOLO PERCORSO"]
+    N --> O["GPS come origine"]
+    O --> P["Directions API\nalternatives=true"]
+    P --> Q["Seleziona più veloce"]
+    Q --> R["Salva tutti i percorsi"]
+    R --> S["Disegna polyline"]
+    
+    S --> T["NAVIGAZIONE ATTIVA\nogni 2 secondi"]
+    T --> U{"Su percorso attivo?"}
+    U -->|SÌ| T
+    U -->|NO| V{"Su alternativo?"}
+    V -->|SÌ| W["Switch istantaneo"]
+    V -->|NO| X["Ricalcolo API"]
+    W --> T
+    X --> T
+```
+
+## Verifica
+
+### `flutter analyze`
+- **0 errori**, **0 warning**
+- Solo `info` pre-esistenti (`avoid_print`, `deprecated_member_use`)

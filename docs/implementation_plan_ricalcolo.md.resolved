@@ -1,0 +1,104 @@
+# Percorsi Alternativi + Monitoraggio Deviazione + Ricalcolo Automatico
+
+Implementazione della gestione dei percorsi alternativi dalla Directions API, monitoraggio continuo della posizione dell'utente rispetto al percorso attivo, e ricalcolo automatico in caso di deviazione.
+
+## Proposed Changes
+
+### Servizio Directions — Percorsi Alternativi
+
+#### [MODIFY] [directions_service.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart)
+
+1. **Aggiungere `alternatives: 'true'`** ai parametri della richiesta API (`queryParameters`) per ricevere più percorsi.
+2. **Nuovo modello `RouteData`**: struttura dati che contiene, per ogni percorso restituito:
+   - `List<List<double>> decodedPolyline` — polyline decodificata in punti `[lat, lng]`
+   - `int durationSeconds` — durata in secondi (da `legs[0].duration.value`)
+   - `String totalDuration` / `String totalDistance` — testi leggibili
+   - `List<DirectionStep> steps` — istruzioni passo-passo
+   - `String encodedPolyline` — polyline codificata originale (per la mappa)
+3. **Nuovo modello `AllRoutesResult`**: wrapper che contiene:
+   - `RouteData bestRoute` — percorso con durata minore
+   - `List<RouteData> allRoutes` — tutti i percorsi (incluso il best)
+   - Coordinate origin/destination (invariate)
+4. **Nuovo metodo `getDirectionsWithAlternatives()`** che:
+   - Chiama l'API con `alternatives: 'true'`
+   - Itera su `data['routes']` (non solo `routes[0]`)
+   - Per ogni route: crea un `RouteData` decodificando la polyline e estraendo la durata
+   - Ordina per `durationSeconds`, seleziona il migliore
+   - Restituisce `AllRoutesResult`
+5. Il vecchio [getDirections()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#118-187) viene mantenuto per retrocompatibilità ma non usato dal flusso principale.
+
+---
+
+### Utilità Geodetiche — Nuove Costanti e Funzioni
+
+#### [MODIFY] [geo_utils.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart)
+
+1. **Nuove costanti**:
+   - `kRouteDeviationThresholdMeters = 40.0` — soglia di deviazione dal percorso
+   - `kRouteCheckIntervalSec = 2` — intervallo di checking in secondi
+2. **`distanceBetween(lat1, lng1, lat2, lng2)`** — wrapper nominale di [haversineDistance](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart#110-155) con il nome richiesto dalle specifiche.
+3. **`minDistanceToPolyline(lat, lng, polyline)`** — calcola la distanza minima tra un punto e tutti i punti di una polyline. Restituisce la distanza minima in metri.
+4. **`isOnRoute(lat, lng, polyline, threshold)`** — restituisce `true` se la distanza minima è ≤ threshold.
+
+---
+
+### Navigation Monitor — Monitoraggio Deviazione
+
+#### [MODIFY] [navigation_monitor.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart)
+
+1. **Nuovi campi di stato**:
+   - `RouteData? _activeRoute` — percorso attualmente attivo
+   - `List<RouteData> _alternativeRoutes` — percorsi alternativi salvati
+   - `String? _originalDestination` — destinazione originale (per ricalcolo)
+   - `Timer? _routeCheckTimer` — timer periodico a 2 secondi
+   - `bool _isNavigating` — flag che indica se la navigazione è attiva
+2. **`startNavigation(AllRoutesResult, destination)`** — inizializza la navigazione:
+   - Salva il best route come attivo
+   - Salva tutti i percorsi alternativi
+   - Salva la destinazione originale
+   - Avvia il timer periodico a 2 secondi
+3. **`_onRouteCheckTick()`** — callback del timer ogni 2 secondi:
+   - **Task 2a**: Chiama `isOnRoute()` con la polyline del percorso attivo
+     - Se sì → nessuna azione
+     - Se no → procedi al Task 2b
+   - **Task 2b**: Itera sui percorsi alternativi, chiama `isOnRoute()` per ciascuno
+     - Se trova match → sostituisce il percorso attivo, emette notifica via `ValueNotifier`
+   - **Task 2c**: Se nessun alternativo è compatibile, chiama `DirectionsService.getDirectionsWithAlternatives()` con posizione corrente + destinazione originale, aggiorna tutti i percorsi
+4. **`ValueNotifier<RouteData?> activeRouteNotifier`** — notifica la UI quando il percorso attivo cambia (sia per switch ad alternativo, sia per ricalcolo API)
+5. **Aggiornamento [dispose()](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/navigation_overlay.dart#133-137)** per cancellare il `_routeCheckTimer`.
+
+---
+
+### Schermata di Navigazione — Coordinazione UI
+
+#### [MODIFY] [navigation_screen.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart)
+
+1. **Aggiornamento [_calculateRoute()](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart#249-301)**: chiama il nuovo `getDirectionsWithAlternatives()` e passa il risultato a `_navigationMonitor.startNavigation()`.
+2. **Nuovo listener `_onActiveRouteChanged()`**: quando il monitor cambia percorso attivo, aggiorna `_directionsResult` (o l'equivalente) per riflettere il nuovo percorso sulla UI. Questo include aggiornamento di:
+   - Polyline sulla mappa
+   - Lista delle indicazioni
+   - Durata/distanza totale
+3. **Registrazione/rimozione listener** in [initState()](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart#112-126) / [dispose()](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/navigation_overlay.dart#133-137).
+
+---
+
+### Widget Mappa — Aggiornamento Polyline
+
+#### [MODIFY] [map_widget.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/map_widget.dart)
+
+Nessuna modifica strutturale necessaria. Il widget già riceve `encodedPolyline` come parametro e lo renderizza. Quando [navigation_screen.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart) aggiorna lo stato con la nuova polyline, il widget si ricostruisce automaticamente.
+
+---
+
+## Verification Plan
+
+### Automated Tests
+- `flutter build apk --debug` nella directory del progetto per verificare che il codice compili senza errori.
+
+### Manual Verification
+Dato che questa app richiede un GPS reale e connettività alle API Google, la verifica completa deve avvenire su dispositivo fisico. Ti chiedo di:
+1. Installare l'APK su un dispositivo Android
+2. Calcolare un percorso tra due localit che abbia percorsi alternativi (es. due città connesse da autostrada e strada statale)
+3. Verificare che nel log appaia il numero di percorsi ricevuti
+4. Iniziare a guidare seguendo il percorso, poi deviare intenzionalmente su una strada diversa
+5. Verificare che la mappa si aggiorni con il nuovo percorso (o con un percorso alternativo, o con un ricalcolo via API)

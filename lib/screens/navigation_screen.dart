@@ -18,6 +18,7 @@ library;
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../services/directions_service.dart';
 import '../services/navigation_monitor.dart';
 import '../widgets/map_widget.dart';
@@ -38,8 +39,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
   // CONTROLLER E SERVIZI
   // ===========================================================================
 
-  /// Controller per i campi di testo (partenza e destinazione)
-  final TextEditingController _originController = TextEditingController();
+  /// Controller per il campo di testo della destinazione.
+  /// Viene passato al SearchInput e usato per mostrare/leggere l'indirizzo.
   final TextEditingController _destinationController = TextEditingController();
 
   /// Servizio per le direzioni (Directions API)
@@ -54,8 +55,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
   // STATO DELL'APP
   // ===========================================================================
 
-  /// Risultato del calcolo percorso dalla Directions API
+  /// Risultato del calcolo percorso dalla Directions API.
+  /// Mantenuto per compatibilità con i widget che usano DirectionsResult
+  /// (MapWidget, DirectionsList).
   DirectionsResult? _directionsResult;
+
+  /// Risultato completo con tutti i percorsi alternativi (TASK 1).
+  /// Usato per passare i percorsi al NavigationMonitor.
+  AllRoutesResult? _allRoutesResult;
 
   /// Flag di caricamento per il calcolo del percorso
   bool _isLoading = false;
@@ -120,6 +127,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // aggiorniamo la UI per mostrare l'overlay corrispondente.
     _navigationMonitor.overlayNotifier.addListener(_onOverlayChanged);
 
+    // Ascolta i cambiamenti del percorso attivo (TASK 2).
+    // Quando il monitor cambia percorso (Task 2b: switch ad alternativo,
+    // Task 2c: ricalcolo API), questo listener aggiorna la UI.
+    _navigationMonitor.activeRouteNotifier.addListener(_onActiveRouteChanged);
+
     // Avvia il monitoraggio della posizione GPS
     _initLocationMonitoring();
   }
@@ -133,6 +145,53 @@ class _NavigationScreenState extends State<NavigationScreen> {
     setState(() {
       _overlayState = _navigationMonitor.overlayNotifier.value;
     });
+  }
+
+  /// Callback chiamato quando il NavigationMonitor cambia il percorso attivo (TASK 2).
+  ///
+  /// Questo listener viene invocato in tre scenari:
+  /// 1. startNavigation(): imposta il percorso iniziale (best route)
+  /// 2. Task 2b: l'utente ha deviato su un percorso alternativo
+  /// 3. Task 2c: il percorso è stato ricalcolato via API
+  ///
+  /// In tutti e tre i casi, aggiorniamo la UI con i dati del nuovo percorso:
+  /// - Polyline sulla mappa (tramite encodedPolyline)
+  /// - Lista delle indicazioni (tramite steps)
+  /// - Durata e distanza totale (tramite totalDuration/totalDistance)
+  void _onActiveRouteChanged() {
+    // Legge il nuovo percorso attivo dal notifier del monitor
+    final RouteData? newRoute = _navigationMonitor.activeRouteNotifier.value;
+
+    // Se il nuovo percorso è null (navigazione fermata), non facciamo nulla.
+    // La UI manterrà l'ultimo stato visualizzato.
+    if (newRoute == null) return;
+
+    // Aggiorna lo stato della UI con i dati del nuovo percorso.
+    // Creiamo un nuovo DirectionsResult per compatibilità con i widget
+    // esistenti (MapWidget e DirectionsList) che si aspettano questo formato.
+    setState(() {
+      _directionsResult = DirectionsResult(
+        steps: newRoute.steps,
+        totalDistance: newRoute.totalDistance,
+        totalDuration: newRoute.totalDuration,
+        encodedPolyline: newRoute.encodedPolyline,
+        // Le coordinate di origine e destinazione vengono prese dal
+        // risultato completo se disponibile, altrimenti manteniamo
+        // le coordinate attuali (la destinazione non cambia mai)
+        originLat:
+            _allRoutesResult?.originLat ?? _directionsResult?.originLat ?? 0,
+        originLng:
+            _allRoutesResult?.originLng ?? _directionsResult?.originLng ?? 0,
+        destLat: _allRoutesResult?.destLat ?? _directionsResult?.destLat ?? 0,
+        destLng: _allRoutesResult?.destLng ?? _directionsResult?.destLng ?? 0,
+      );
+    });
+
+    // Log per debugging: segnala alla console che la UI è stata aggiornata
+    print(
+      'UI aggiornata con nuovo percorso: ${newRoute.totalDuration} '
+      '(${newRoute.totalDistance})',
+    );
   }
 
   /// Inizializza il monitoraggio della posizione GPS per aggiornare
@@ -229,14 +288,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Cancella lo stream GPS per evitare memory leak e consumo batteria
     _positionStream?.cancel();
 
-    // Rimuove il listener prima di distruggere il monitor
+    // Rimuove i listener prima di distruggere il monitor
     _navigationMonitor.overlayNotifier.removeListener(_onOverlayChanged);
+
+    // Rimuove il listener del percorso attivo (TASK 2)
+    _navigationMonitor.activeRouteNotifier.removeListener(
+      _onActiveRouteChanged,
+    );
 
     // Distrugge il NavigationMonitor (cancella tutti i timer interni)
     _navigationMonitor.dispose();
 
-    // Distrugge i controller dei campi di testo
-    _originController.dispose();
+    // Distrugge il controller del campo di testo
     _destinationController.dispose();
 
     super.dispose();
@@ -246,16 +309,36 @@ class _NavigationScreenState extends State<NavigationScreen> {
   // LOGICA CALCOLO PERCORSO
   // ===========================================================================
 
-  /// Calcola il percorso chiamando la Directions API.
+  /// Calcola il percorso da coordinate GPS (TASK 4).
   ///
-  /// Dopo aver ricevuto il risultato, aggiorna anche il NavigationMonitor
-  /// con gli step del percorso, in modo che possa verificare la vicinanza
-  /// ai waypoint di svolta (Step 2.3).
-  Future<void> _calculateRoute() async {
-    // Valida gli input
-    if (_originController.text.isEmpty || _destinationController.text.isEmpty) {
+  /// Questo metodo è il punto d'ingresso unificato per il calcolo del percorso,
+  /// chiamato sia dalla ricerca testuale (TASK 2) che dalla selezione mappa (TASK 3).
+  ///
+  /// FLUSSO:
+  /// 1. Usa la posizione GPS corrente come ORIGINE
+  /// 2. Usa le coordinate passate come DESTINAZIONE
+  /// 3. Chiama Directions API con alternatives=true
+  /// 4. Seleziona il percorso più veloce
+  /// 5. Salva tutti i percorsi per il monitoraggio (TASK 5)
+  /// 6. Avvia il timer di monitoraggio ogni 2 secondi
+  ///
+  /// PARAMETRI:
+  /// - [destLat]: latitudine della destinazione
+  /// - [destLng]: longitudine della destinazione
+  /// - [destAddress]: indirizzo leggibile della destinazione (per display e ricalcolo)
+  Future<void> _calculateRouteFromCoordinates(
+    double destLat,
+    double destLng,
+    String destAddress,
+  ) async {
+    // Verifica che la posizione GPS sia disponibile.
+    // Senza la posizione dell'utente, non possiamo calcolare un percorso
+    // perché non sappiamo da dove partire.
+    if (_currentLat == null || _currentLng == null) {
       setState(() {
-        _errorMessage = 'Inserisci sia la partenza che la destinazione';
+        _errorMessage =
+            'Posizione GPS non disponibile. '
+            'Attendi il fix GPS e riprova.';
       });
       return;
     }
@@ -267,27 +350,54 @@ class _NavigationScreenState extends State<NavigationScreen> {
     });
 
     try {
-      // Chiama l'API per ottenere le direzioni
-      final result = await _directionsService.getDirections(
-        origin: _originController.text,
-        destination: _destinationController.text,
+      // Costruisce la stringa di origine come coordinate GPS.
+      // Il formato "lat,lng" è accettato dalla Directions API.
+      final String origin = '$_currentLat,$_currentLng';
+
+      // Costruisce la stringa di destinazione come coordinate GPS.
+      // Usiamo le coordinate esatte anziché l'indirizzo testuale perché:
+      // 1. È più preciso (nessuna ambiguità di geocoding)
+      // 2. Funziona anche per punti sulla mappa senza indirizzo
+      final String destination = '$destLat,$destLng';
+
+      // Chiama l'API con percorsi alternativi (TASK 4).
+      // Questo metodo:
+      // 1. Invia la richiesta con alternatives=true
+      // 2. Parsifica TUTTI i percorsi dalla risposta
+      // 3. Ordina per durata e seleziona il migliore
+      // 4. Restituisce AllRoutesResult con bestRoute + allRoutes
+      final result = await _directionsService.getDirectionsWithAlternatives(
+        origin: origin,
+        destination: destination,
       );
 
       // Aggiorna lo stato con il risultato
       setState(() {
         _isLoading = false;
         if (result != null) {
-          _directionsResult = result;
+          // Salva il risultato completo con tutti i percorsi (TASK 4)
+          _allRoutesResult = result;
+
+          // Crea un DirectionsResult dal percorso migliore per compatibilità
+          // con i widget esistenti (MapWidget, DirectionsList)
+          _directionsResult = DirectionsResult(
+            steps: result.bestRoute.steps,
+            totalDistance: result.bestRoute.totalDistance,
+            totalDuration: result.bestRoute.totalDuration,
+            encodedPolyline: result.bestRoute.encodedPolyline,
+            originLat: result.originLat,
+            originLng: result.originLng,
+            destLat: result.destLat,
+            destLng: result.destLng,
+          );
           _errorMessage = null;
 
-          // IMPORTANTE: aggiorna il NavigationMonitor con gli step del
-          // nuovo percorso. Senza questo passaggio, il monitor non saprebbe
-          // dove sono i waypoint di svolta e non potrebbe eseguire il
-          // Step 2.3 (verifica vicinanza).
-          _navigationMonitor.updateRouteSteps(result.steps);
+          // TASK 5: Avvia la navigazione nel monitor.
+          // Usa destAddress per il ricalcolo futuro (Task 2c del monitor)
+          // perché se l'utente devia, la destinazione deve restare la stessa.
+          _navigationMonitor.startNavigation(result, destAddress);
         } else {
-          _errorMessage =
-              'Impossibile calcolare il percorso. Verifica gli indirizzi inseriti.';
+          _errorMessage = 'Impossibile calcolare il percorso. Riprova.';
         }
       });
     } catch (e) {
@@ -297,6 +407,62 @@ class _NavigationScreenState extends State<NavigationScreen> {
         _errorMessage = 'Errore: $e';
       });
     }
+  }
+
+  // ===========================================================================
+  // HANDLERS SELEZIONE DESTINAZIONE
+  // ===========================================================================
+
+  /// Callback chiamato quando l'utente seleziona un indirizzo dall'autocomplete (TASK 2).
+  ///
+  /// Questo è il punto finale del flusso TASK 2:
+  /// digitazione → debounce → autocomplete → selezione → details → QUI
+  ///
+  /// PARAMETRI:
+  /// - [lat]: latitudine del luogo selezionato (da Places Details API)
+  /// - [lng]: longitudine del luogo selezionato
+  /// - [address]: indirizzo formattato del luogo
+  void _onDestinationSelected(double lat, double lng, String address) {
+    // Log per debugging
+    print('Destinazione selezionata da ricerca: $address ($lat, $lng)');
+
+    // Avvia il calcolo del percorso con le coordinate ricevute.
+    // L'origine sarà la posizione GPS corrente (gestita internamente).
+    _calculateRouteFromCoordinates(lat, lng, address);
+  }
+
+  /// Callback chiamato quando l'utente tocca un punto sulla mappa (TASK 3).
+  ///
+  /// Gestisce il TASK 3 Caso 2 (punto generico):
+  /// L'utente tocca un punto qualsiasi della mappa → usiamo le coordinate
+  /// direttamente come destinazione, senza chiamare Places Details API.
+  ///
+  /// PERCHÉ NON CHIAMIAMO PLACES DETAILS:
+  /// Per un punto generico non c'è un place_id disponibile. Le coordinate
+  /// lat/lng sono sufficienti per la Directions API (TASK 4).
+  ///
+  /// PARAMETRI:
+  /// - [position]: coordinate del punto toccato sulla mappa
+  void _onMapTapped(LatLng position) {
+    // Costruisce una stringa descrittiva con le coordinate
+    final String coordsText =
+        '${position.latitude.toStringAsFixed(5)}, '
+        '${position.longitude.toStringAsFixed(5)}';
+
+    // Aggiorna il campo di testo con le coordinate per feedback visivo.
+    // L'utente vede cosa ha selezionato.
+    _destinationController.text = coordsText;
+
+    // Log per debugging
+    print('Punto mappa selezionato: $coordsText');
+
+    // Avvia il calcolo del percorso direttamente con le coordinate.
+    // Nessuna chiamata a Places Details API necessaria.
+    _calculateRouteFromCoordinates(
+      position.latitude,
+      position.longitude,
+      coordsText, // Usa le coordinate come "indirizzo" per il ricalcolo
+    );
   }
 
   // ===========================================================================
@@ -331,9 +497,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
         Padding(
           padding: const EdgeInsets.all(8.0),
           child: SearchInput(
-            originController: _originController,
             destinationController: _destinationController,
-            onSearch: _calculateRoute,
+            onDestinationSelected: _onDestinationSelected,
             isLoading: _isLoading,
           ),
         ),
@@ -358,6 +523,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
                       destLat: _directionsResult?.destLat,
                       destLng: _directionsResult?.destLng,
                       encodedPolyline: _directionsResult?.encodedPolyline,
+                      // TASK 3: callback per tap sulla mappa
+                      onMapTap: _onMapTapped,
                     ),
                   ),
 
@@ -417,9 +584,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
               Padding(
                 padding: const EdgeInsets.all(12.0),
                 child: SearchInput(
-                  originController: _originController,
                   destinationController: _destinationController,
-                  onSearch: _calculateRoute,
+                  onDestinationSelected: _onDestinationSelected,
                   isLoading: _isLoading,
                 ),
               ),
@@ -463,6 +629,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
                       destLat: _directionsResult?.destLat,
                       destLng: _directionsResult?.destLng,
                       encodedPolyline: _directionsResult?.encodedPolyline,
+                      // TASK 3: callback per tap sulla mappa
+                      onMapTap: _onMapTapped,
                     ),
                   ),
 

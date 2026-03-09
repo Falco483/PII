@@ -6,6 +6,9 @@
 /// 3. Controlla se l'utente è su un waypoint di svolta del percorso
 /// 4. Calcola i punti laterali e interroga la Roads API
 /// 5. Emette eventi per l'overlay visivo
+/// 6. [TASK 2] Monitora la posizione rispetto al percorso attivo ogni 2 secondi
+/// 7. [TASK 2] Gestisce il cambio automatico a percorsi alternativi
+/// 8. [TASK 2] Ricalcola il percorso via API se nessun alternativo è compatibile
 ///
 /// SEPARAZIONE DELLE RESPONSABILITÀ:
 /// Questo file contiene SOLO la logica di business. Non contiene:
@@ -124,6 +127,39 @@ class NavigationMonitor {
   List<DirectionStep> _routeSteps = [];
 
   // ===========================================================================
+  // STATO PERCORSI — TASK 2
+  // ===========================================================================
+
+  /// Percorso attualmente attivo (quello mostrato all'utente sulla mappa).
+  /// Quando l'utente devia, questo campo viene sostituito con un percorso
+  /// alternativo (Task 2b) o con il risultato di un ricalcolo API (Task 2c).
+  /// È null se la navigazione non è ancora stata avviata.
+  RouteData? _activeRoute;
+
+  /// Lista di TUTTI i percorsi alternativi ricevuti dall'ultima chiamata API.
+  /// Include anche il percorso attivo. Quando l'utente devia, iteriamo su
+  /// questa lista per cercare un percorso alternativo compatibile (Task 2b)
+  /// prima di fare una nuova chiamata API.
+  List<RouteData> _alternativeRoutes = [];
+
+  /// Destinazione originale dell'utente (testo dell'indirizzo o coordinate).
+  /// Salvata al momento del calcolo iniziale del percorso e usata per il
+  /// ricalcolo API nel Task 2c: la destinazione non cambia mai, solo la
+  /// posizione di partenza (che diventa la posizione GPS corrente).
+  String? _originalDestination;
+
+  /// Flag che indica se la navigazione è attiva.
+  /// La navigazione è attiva dopo che startNavigation() è stato chiamato
+  /// e fino a quando stopNavigation() o dispose() viene chiamato.
+  /// Il timer di controllo percorso (ogni 2s) gira solo quando questo è true.
+  bool _isNavigating = false;
+
+  /// Flag che indica se un ricalcolo del percorso via API è in corso (Task 2c).
+  /// Evita di lanciare ricalcoli concorrenti mentre il precedente è ancora
+  /// in attesa di risposta dalla API.
+  bool _isRerouting = false;
+
+  // ===========================================================================
   // TIMER
   // ===========================================================================
 
@@ -148,6 +184,18 @@ class NavigationMonitor {
   /// prima di interagire con esso, e lo settiamo a null dopo la cancellazione.
   Timer? _zeroSpeedTimer;
 
+  /// Timer periodico per il controllo della posizione rispetto al percorso
+  /// attivo ogni kRouteCheckIntervalSec secondi (TASK 2).
+  ///
+  /// Questo timer è SEPARATO dal bearingTimer perché ha una frequenza diversa:
+  /// - bearingTimer: ogni 5 secondi (campionamento bearing)
+  /// - routeCheckTimer: ogni 2 secondi (controllo deviazione)
+  ///
+  /// CICLO DI VITA:
+  /// - Avviato in startNavigation() quando l'utente inizia a navigare
+  /// - Cancellato in stopNavigation() o dispose()
+  Timer? _routeCheckTimer;
+
   /// Flag che indica se il blocco di analisi (steps 2.2→2.6) è in esecuzione.
   /// Evita che un secondo timer scada e lanci un'analisi concorrente mentre
   /// la prima è ancora in corso (la chiamata alla Roads API è asincrona).
@@ -170,12 +218,33 @@ class NavigationMonitor {
   final ValueNotifier<NavigationOverlayState?> overlayNotifier =
       ValueNotifier<NavigationOverlayState?>(null);
 
+  /// Notifier che emette il percorso attivo corrente (TASK 2).
+  ///
+  /// Questo notifier viene aggiornato ogni volta che il percorso attivo cambia:
+  /// - Quando startNavigation() imposta il percorso iniziale (best route)
+  /// - Quando Task 2b sostituisce il percorso con un alternativo
+  /// - Quando Task 2c ricalcola il percorso via API
+  ///
+  /// La UI (NavigationScreen) ascolta questo notifier per aggiornare:
+  /// - La polyline visualizzata sulla mappa
+  /// - Le indicazioni passo-passo
+  /// - Distanza e durata totale
+  ///
+  /// - value = null → nessun percorso attivo (navigazione non avviata)
+  /// - value = RouteData → percorso attivo con tutti i dati
+  final ValueNotifier<RouteData?> activeRouteNotifier =
+      ValueNotifier<RouteData?>(null);
+
   // ===========================================================================
   // SERVIZI
   // ===========================================================================
 
   /// Client per la Roads API. Iniettato nel costruttore per facilitare il testing.
   final RoadsService _roadsService;
+
+  /// Client per la Directions API. Usato nel Task 2c per ricalcolare il percorso
+  /// quando l'utente devia e nessun percorso alternativo è compatibile.
+  final DirectionsService _directionsService;
 
   // ===========================================================================
   // COSTRUTTORE
@@ -186,8 +255,14 @@ class NavigationMonitor {
   /// PARAMETRI:
   /// - [roadsService]: (opzionale) istanza di RoadsService. Se non fornita,
   ///   ne crea una nuova. Utile per il testing (si può iniettare un mock).
-  NavigationMonitor({RoadsService? roadsService})
-    : _roadsService = roadsService ?? RoadsService() {
+  /// - [directionsService]: (opzionale) istanza di DirectionsService. Se non
+  ///   fornita, ne crea una nuova. Usata per il ricalcolo percorso (Task 2c).
+  NavigationMonitor({
+    RoadsService? roadsService,
+    DirectionsService? directionsService,
+  }) : _roadsService = roadsService ?? RoadsService(),
+       _directionsService = directionsService ?? DirectionsService() {
+    // Avvia subito il timer periodico per il campionamento del bearing
     _startBearingTimer();
   }
 
@@ -271,16 +346,103 @@ class NavigationMonitor {
   /// Restituisce null se nessun bearing affidabile è stato ancora acquisito.
   double? get direction => _direction;
 
+  /// Avvia la navigazione con i percorsi ricevuti dalla Directions API (TASK 2).
+  ///
+  /// Questo metodo inizializza tutto il sistema di monitoraggio del percorso:
+  /// 1. Salva il percorso migliore come "attivo" (quello visualizzato sulla mappa)
+  /// 2. Salva tutti i percorsi alternativi per il confronto rapido (Task 2b)
+  /// 3. Salva la destinazione originale per i ricalcoli futuri (Task 2c)
+  /// 4. Aggiorna gli step del percorso per il check dei waypoint di svolta
+  /// 5. Avvia il timer periodico a 2 secondi per il monitoraggio
+  ///
+  /// PARAMETRI:
+  /// - [routesResult]: risultato dalla API con tutti i percorsi
+  /// - [destination]: testo della destinazione (indirizzo o coordinate)
+  ///
+  /// SIDE EFFECTS:
+  /// - Setta _isNavigating = true
+  /// - Avvia il timer _routeCheckTimer
+  /// - Notifica la UI tramite activeRouteNotifier
+  void startNavigation(AllRoutesResult routesResult, String destination) {
+    // Salva il percorso migliore (quello con durata minore) come attivo
+    _activeRoute = routesResult.bestRoute;
+
+    // Salva TUTTI i percorsi (compreso quello attivo) per il check Task 2b.
+    // Quando l'utente devia, itereremo su questa lista per cercare un
+    // percorso alternativo a cui "agganciare" la posizione dell'utente.
+    _alternativeRoutes = List<RouteData>.from(routesResult.allRoutes);
+
+    // Salva la destinazione originale per il ricalcolo API (Task 2c).
+    // La destinazione non cambia MAI durante la navigazione: se l'utente
+    // devia, ricalcoliamo da "posizione attuale" a "stessa destinazione".
+    _originalDestination = destination;
+
+    // Aggiorna gli step per la logica di check waypoint di svolta (Step 2.3)
+    _routeSteps = routesResult.bestRoute.steps;
+
+    // Imposta il flag di navigazione attiva
+    _isNavigating = true;
+
+    // Notifica la UI che il percorso attivo è stato impostato.
+    // La UI aggiornerà la polyline sulla mappa e le indicazioni.
+    activeRouteNotifier.value = _activeRoute;
+
+    // Avvia il timer periodico che ogni 2 secondi controlla se l'utente
+    // è ancora sul percorso attivo (Task 2a → 2b → 2c)
+    _startRouteCheckTimer();
+
+    // Log per debugging
+    print(
+      'Navigazione avviata. Percorsi disponibili: '
+      '${_alternativeRoutes.length}. '
+      'Percorso attivo: ${_activeRoute!.totalDuration}',
+    );
+  }
+
+  /// Ferma la navigazione e cancella il timer di controllo percorso.
+  ///
+  /// Chiamato quando l'utente vuole interrompere la navigazione
+  /// o quando la navigazione raggiunge la destinazione.
+  void stopNavigation() {
+    // Imposta il flag a false per fermare la logica di controllo
+    _isNavigating = false;
+
+    // Cancella il timer di controllo percorso se attivo
+    _routeCheckTimer?.cancel();
+    _routeCheckTimer = null;
+
+    // Resetta lo stato dei percorsi
+    _activeRoute = null;
+    _alternativeRoutes = [];
+    _originalDestination = null;
+
+    // Notifica la UI che non c'è più un percorso attivo
+    activeRouteNotifier.value = null;
+
+    // Log per debugging
+    print('Navigazione fermata.');
+  }
+
   /// Rilascia tutte le risorse (timer, listener).
   ///
   /// DEVE essere chiamato in NavigationScreen.dispose() per evitare
   /// memory leak e timer orfani che continuano a girare dopo la
   /// distruzione del widget.
   void dispose() {
+    // Cancella il timer di campionamento del bearing
     _bearingTimer?.cancel();
     _bearingTimer = null;
+
+    // Cancella il timer di controllo percorso (TASK 2)
+    _routeCheckTimer?.cancel();
+    _routeCheckTimer = null;
+
+    // Cancella il countdown velocità zero
     _cancelZeroSpeedCountdown();
+
+    // Distrugge i notifier per evitare memory leak
     overlayNotifier.dispose();
+    activeRouteNotifier.dispose();
   }
 
   // ===========================================================================
@@ -580,5 +742,298 @@ class NavigationMonitor {
 
     // Nessun waypoint di svolta è abbastanza vicino
     return null;
+  }
+
+  // ===========================================================================
+  // METODI PRIVATI — MONITORAGGIO PERCORSO (TASK 2)
+  // ===========================================================================
+
+  /// Avvia il timer periodico che ogni 2 secondi verifica se l'utente
+  /// è ancora sul percorso attivo (TASK 2).
+  ///
+  /// Questo è il cuore del sistema di monitoraggio:
+  /// ogni tick del timer esegue la catena di controllo Task 2a → 2b → 2c.
+  ///
+  /// SICUREZZA:
+  /// Se il timer precedente è ancora attivo (es. startNavigation() viene
+  /// chiamato due volte), lo cancelliamo prima di crearne uno nuovo
+  /// per evitare timer duplicati.
+  void _startRouteCheckTimer() {
+    // Cancella un eventuale timer precedente per evitare duplicati
+    _routeCheckTimer?.cancel();
+
+    // Crea un nuovo timer periodico che scatta ogni kRouteCheckIntervalSec secondi
+    _routeCheckTimer = Timer.periodic(Duration(seconds: kRouteCheckIntervalSec), (
+      timer,
+    ) {
+      // Esegue il controllo solo se la navigazione è attiva.
+      // Questo check è ridondante (il timer viene cancellato in stopNavigation),
+      // ma aggiunge un livello di sicurezza extra.
+      if (_isNavigating) {
+        _onRouteCheckTick();
+      }
+    });
+  }
+
+  /// Callback eseguito ogni 2 secondi dal timer di controllo percorso.
+  ///
+  /// Implementa la logica a cascata descritta nelle specifiche:
+  ///
+  /// OGNI 2 SECONDI:
+  /// │
+  /// ├─ Posizione utente entro 40m dalla polyline attiva?
+  /// │   ├─ SÌ → nessuna azione
+  /// │   └─ NO → utente ha deviato
+  /// │           │
+  /// │           ├─ È entro 40m da un percorso alternativo?
+  /// │           │   ├─ SÌ → cambia percorso attivo con quell'alternativo
+  /// │           │   └─ NO → chiama API Google
+  /// │           │               → salva tutti i nuovi percorsi
+  /// │           │               → imposta come attivo quello con durata minore
+  ///
+  /// SIDE EFFECTS:
+  /// - Può cambiare il percorso attivo (Task 2b)
+  /// - Può effettuare una chiamata HTTP asincrona (Task 2c)
+  /// - Notifica la UI tramite activeRouteNotifier se il percorso cambia
+  void _onRouteCheckTick() {
+    // --- PREREQUISITI ---
+    // Verifica che abbiamo tutti i dati necessari prima di procedere.
+    // Senza posizione o percorso attivo, non possiamo fare nessun confronto.
+
+    // Se la posizione GPS non è ancora disponibile, saltiamo questo tick.
+    // All'avvio dell'app il GPS potrebbe impiegare qualche secondo per
+    // ottenere un fix.
+    if (_currentLat == null || _currentLng == null) return;
+
+    // Se non c'è un percorso attivo, non c'è nulla da controllare.
+    // Questo non dovrebbe accadere se _isNavigating è true, ma è un
+    // controllo di sicurezza.
+    if (_activeRoute == null) return;
+
+    // Se è già in corso un ricalcolo API (Task 2c), non lanciamo un
+    // secondo controllo. Il ricalcolo è asincrono e potrebbe richiedere
+    // diversi secondi.
+    if (_isRerouting) return;
+
+    // Cattura uno snapshot delle coordinate ATTUALI.
+    // Questo è importante per coerenza: durante il controllo (che potrebbe
+    // essere asincrono se si arriva al Task 2c), la posizione GPS continua
+    // ad aggiornarsi. Usiamo lo snapshot per tutti i calcoli.
+    final double lat = _currentLat!;
+    final double lng = _currentLng!;
+
+    // =========================================================================
+    // TASK 2a — CONFRONTO POSIZIONE CON PERCORSO ATTIVO
+    // =========================================================================
+    //
+    // Verifica se la posizione dell'utente è entro 40 metri dalla polyline
+    // del percorso attivo. Se sì, l'utente sta seguendo il percorso
+    // correttamente → non facciamo nulla e aspettiamo il prossimo tick.
+
+    // Chiama isOnRoute() che internamente:
+    // 1. Calcola la distanza tra (lat, lng) e ogni punto della polyline
+    // 2. Trova la distanza minima
+    // 3. Confronta con la soglia di 40 metri
+    final bool onActiveRoute = isOnRoute(
+      lat,
+      lng,
+      _activeRoute!.decodedPolyline,
+    );
+
+    // Se l'utente è sul percorso, tutto OK. Nessuna azione necessaria.
+    if (onActiveRoute) {
+      return; // ← L'utente segue il percorso, aspettiamo il prossimo tick
+    }
+
+    // =========================================================================
+    // L'UTENTE HA DEVIATO DAL PERCORSO ATTIVO!
+    // =========================================================================
+    //
+    // La distanza minima dalla polyline attiva è > 40 metri.
+    // Ora controlliamo se è finito su uno dei percorsi alternativi.
+
+    // Log per debugging: segnala la deviazione
+    print('⚠️ Deviazione rilevata! L\'utente è fuori dal percorso attivo.');
+
+    // =========================================================================
+    // TASK 2b — CONTROLLO PERCORSI ALTERNATIVI
+    // =========================================================================
+    //
+    // Iteriamo su tutti i percorsi alternativi salvati al TASK 1.
+    // Per ciascuno, verifichiamo se la posizione dell'utente è entro 40 metri
+    // dalla polyline di quel percorso.
+    //
+    // VANTAGGI DI QUESTO APPROCCIO:
+    // - Nessuna chiamata API necessaria → risparmio tempo e quota
+    // - Risposta istantanea → l'utente vede subito il nuovo percorso
+    // - Zero latenza di rete → funziona anche offline (con percorsi in memoria)
+
+    for (final alternativeRoute in _alternativeRoutes) {
+      // Salta il percorso attivo: lo abbiamo già controllato sopra
+      // e sappiamo che l'utente NON è su di esso.
+      if (alternativeRoute == _activeRoute) continue;
+
+      // Verifica se l'utente è entro 40m dalla polyline di questo alternativo
+      final bool onAlternative = isOnRoute(
+        lat,
+        lng,
+        alternativeRoute.decodedPolyline,
+      );
+
+      if (onAlternative) {
+        // =====================================================================
+        // TROVATO! L'utente è su un percorso alternativo.
+        // =====================================================================
+        //
+        // Sostituiamo il percorso attivo con questo alternativo.
+        // Non effettuiamo nessuna nuova chiamata API: abbiamo già tutti
+        // i dati necessari in memoria (polyline, steps, durata).
+
+        // Log per debugging
+        print(
+          '✅ Percorso alternativo trovato! '
+          'Durata: ${alternativeRoute.totalDuration}. '
+          'Cambio percorso attivo.',
+        );
+
+        // Sostituisce il percorso attivo con l'alternativo
+        _activeRoute = alternativeRoute;
+
+        // Aggiorna gli step del percorso per il check dei waypoint di svolta
+        _routeSteps = alternativeRoute.steps;
+
+        // Notifica la UI che il percorso attivo è cambiato.
+        // La NavigationScreen si occuperà di aggiornare:
+        // - La polyline disegnata sulla mappa
+        // - Le indicazioni passo-passo
+        // - Distanza e durata totale nell'header
+        activeRouteNotifier.value = _activeRoute;
+
+        // Usciamo dalla funzione: abbiamo trovato un percorso compatibile,
+        // non serve controllare gli altri né fare chiamate API.
+        return;
+      }
+    }
+
+    // =========================================================================
+    // TASK 2c — RICALCOLO PERCORSO VIA API GOOGLE
+    // =========================================================================
+    //
+    // Se siamo arrivati qui, significa che:
+    // 1. L'utente NON è sul percorso attivo (Task 2a fallito)
+    // 2. L'utente NON è su nessun percorso alternativo (Task 2b fallito)
+    //
+    // L'unica opzione rimasta è ricalcolare il percorso:
+    // - Partenza: posizione GPS ATTUALE dell'utente
+    // - Destinazione: la STESSA destinazione originale (non cambia mai)
+    // - alternatives: true (per ricevere di nuovo percorsi alternativi)
+
+    // Log per debugging
+    print(
+      '❌ Nessun percorso alternativo compatibile. '
+      'Ricalcolo via API Google...',
+    );
+
+    // Lancia il ricalcolo asincrono. Non usiamo await perché siamo in un
+    // callback del timer (non è async). _executeReroute() gestisce
+    // internamente il flag _isRerouting per evitare ricalcoli concorrenti.
+    _executeReroute(lat, lng);
+  }
+
+  /// Esegue il ricalcolo del percorso via API Google (Task 2c).
+  ///
+  /// Questo metodo è asincrono perché effettua una chiamata HTTP alla
+  /// Directions API di Google.
+  ///
+  /// PARAMETRI:
+  /// - [lat], [lng]: coordinate GPS dell'utente al momento della richiesta.
+  ///   Queste diventano la nuova "partenza" del percorso.
+  ///
+  /// FLUSSO:
+  /// 1. Setta _isRerouting = true per bloccare tick concorrenti
+  /// 2. Chiama getDirectionsWithAlternatives() con posizione corrente
+  /// 3. Se successo: aggiorna tutti i percorsi e il percorso attivo
+  /// 4. Se fallimento: log dell'errore, nessuna azione (fallback silenzioso)
+  /// 5. Setta _isRerouting = false
+  ///
+  /// SIDE EFFECTS:
+  /// - Effettua una chiamata HTTP
+  /// - Può aggiornare _activeRoute, _alternativeRoutes, _routeSteps
+  /// - Può notificare la UI tramite activeRouteNotifier
+  Future<void> _executeReroute(double lat, double lng) async {
+    // Evita ricalcoli concorrenti: se un ricalcolo è già in corso,
+    // non ne lanciamo un altro.
+    if (_isRerouting) return;
+
+    // Setta il flag di ricalcolo in corso
+    _isRerouting = true;
+
+    try {
+      // Verifica che abbiamo la destinazione originale.
+      // Senza destinazione non possiamo ricalcolare il percorso.
+      if (_originalDestination == null) {
+        print('Ricalcolo impossibile: destinazione originale mancante');
+        return;
+      }
+
+      // Costruisce la stringa di partenza come coordinate GPS.
+      // Il formato "lat,lng" è accettato dalla Directions API come
+      // alternativa a un indirizzo testuale.
+      final String currentOrigin = '$lat,$lng';
+
+      // Chiama la Directions API con:
+      // - origin: posizione GPS ATTUALE (dove si trova l'utente ORA)
+      // - destination: la destinazione ORIGINALE (invariata)
+      // - alternatives: true (incluso nel metodo)
+      //
+      // Questa è la STESSA logica del TASK 1: la API restituisce più
+      // percorsi, li ordiniamo per durata, e selezioniamo il migliore.
+      final AllRoutesResult? newResult = await _directionsService
+          .getDirectionsWithAlternatives(
+            origin: currentOrigin,
+            destination: _originalDestination!,
+          );
+
+      // --- GESTIONE RISULTATO ---
+
+      // Se la chiamata è fallita (errore di rete, API, ecc.),
+      // non facciamo nulla. L'utente continuerà a navigare con il
+      // vecchio percorso (anche se fuori rotta). Al prossimo tick
+      // il sistema riproverà.
+      if (newResult == null) {
+        print('⚠️ Ricalcolo fallito. Riproverò al prossimo ciclo.');
+        return;
+      }
+
+      // --- AGGIORNAMENTO PERCORSI (stessa logica del TASK 1) ---
+
+      // Il percorso migliore (durata minore) diventa il nuovo attivo
+      _activeRoute = newResult.bestRoute;
+
+      // Salva tutti i nuovi percorsi per futuri check (Task 2b)
+      _alternativeRoutes = List<RouteData>.from(newResult.allRoutes);
+
+      // Aggiorna gli step per il check dei waypoint di svolta
+      _routeSteps = newResult.bestRoute.steps;
+
+      // Notifica la UI che il percorso è cambiato.
+      // La NavigationScreen aggiornerà mappa, indicazioni, ecc.
+      activeRouteNotifier.value = _activeRoute;
+
+      // Log per debugging
+      print(
+        '✅ Ricalcolo completato! '
+        'Nuovi percorsi: ${_alternativeRoutes.length}. '
+        'Percorso attivo: ${_activeRoute!.totalDuration}',
+      );
+    } catch (e) {
+      // Gestisce eccezioni non previste (parsing, rete, ecc.)
+      print('❌ Eccezione durante il ricalcolo: $e');
+    } finally {
+      // Resetta SEMPRE il flag, anche in caso di errore.
+      // Senza questo reset, il sistema resterebbe bloccato per sempre
+      // (nessun nuovo ricalcolo verrebbe mai avviato).
+      _isRerouting = false;
+    }
   }
 }

@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="it">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Chiamate alle API — App di Navigazione</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 2cm;
+        }
+
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 11pt;
+            line-height: 1.6;
+            color: #222;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        h1 {
+            font-size: 22pt;
+            color: #d93025;
+            border-bottom: 3px solid #d93025;
+            padding-bottom: 8px;
+            margin-top: 0;
+        }
+
+        h2 {
+            font-size: 15pt;
+            color: #d93025;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 4px;
+            margin-top: 28px;
+        }
+
+        h3 {
+            font-size: 12pt;
+            color: #333;
+            margin-top: 18px;
+        }
+
+        code {
+            background: #fce8e6;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-size: 10pt;
+            font-family: 'Consolas', 'Courier New', monospace;
+        }
+
+        .api-box {
+            background: #f8f9fa;
+            border: 1px solid #dadce0;
+            border-left: 4px solid #d93025;
+            padding: 14px 18px;
+            margin: 12px 0;
+            border-radius: 0 6px 6px 0;
+        }
+
+        .api-box h4 {
+            margin: 0 0 6px 0;
+            color: #d93025;
+            font-size: 11pt;
+        }
+
+        .api-box .url {
+            font-family: 'Consolas', monospace;
+            font-size: 9pt;
+            color: #555;
+            word-break: break-all;
+        }
+
+        .cost-box {
+            background: #e8f5e9;
+            border-left: 4px solid #34a853;
+            padding: 12px 16px;
+            margin: 12px 0;
+            border-radius: 0 6px 6px 0;
+        }
+
+        .warning-box {
+            background: #fef7e0;
+            border-left: 4px solid #f9ab00;
+            padding: 12px 16px;
+            margin: 12px 0;
+            border-radius: 0 6px 6px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 12px 0;
+            font-size: 10pt;
+        }
+
+        th {
+            background: #d93025;
+            color: white;
+            padding: 8px 12px;
+            text-align: left;
+        }
+
+        td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+        }
+
+        tr:nth-child(even) td {
+            background: #f8f9fa;
+        }
+
+        .flow-container {
+            background: #f8f9fa;
+            border: 1px solid #dadce0;
+            border-radius: 8px;
+            padding: 16px;
+            margin: 16px 0;
+        }
+
+        .flow-step {
+            display: flex;
+            align-items: flex-start;
+            margin: 6px 0;
+        }
+
+        .flow-num {
+            background: #d93025;
+            color: white;
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 10pt;
+            margin-right: 10px;
+            flex-shrink: 0;
+        }
+
+        .flow-num.green {
+            background: #34a853;
+        }
+
+        .flow-num.blue {
+            background: #1a73e8;
+        }
+
+        .flow-num.orange {
+            background: #f9ab00;
+        }
+
+        .arrow {
+            text-align: center;
+            color: #d93025;
+            font-size: 16pt;
+            margin: 2px 0;
+        }
+
+        .api-tag {
+            display: inline-block;
+            background: #d93025;
+            color: white;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 9pt;
+            font-weight: bold;
+            margin-left: 6px;
+        }
+
+        .no-api-tag {
+            display: inline-block;
+            background: #34a853;
+            color: white;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 9pt;
+            font-weight: bold;
+            margin-left: 6px;
+        }
+
+        ul {
+            margin: 8px 0;
+        }
+
+        li {
+            margin: 4px 0;
+        }
+
+        .page-break {
+            page-break-before: always;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>🔌 Chiamate alle API — Documentazione</h1>
+
+    <p>Questo documento elenca tutte le API di Google utilizzate nell'app, specifica <strong>dove</strong> e
+        <strong>quando</strong> vengono chiamate, e fornisce un flusso di interazione standard con le rispettive
+        chiamate API indicate.</p>
+
+    <!-- ======================================================= -->
+    <h2>1. Elenco delle API Utilizzate</h2>
+
+    <table>
+        <tr>
+            <th>API</th>
+            <th>File che la chiama</th>
+            <th>Quando viene chiamata</th>
+        </tr>
+        <tr>
+            <td><strong>Places Autocomplete</strong></td>
+            <td><code>places_service.dart</code></td>
+            <td>Ogni volta che l'utente digita (dopo debounce 300ms, se ≥ 3 caratteri)</td>
+        </tr>
+        <tr>
+            <td><strong>Places Details</strong></td>
+            <td><code>places_service.dart</code></td>
+            <td>Quando l'utente seleziona un suggerimento dall'autocomplete</td>
+        </tr>
+        <tr>
+            <td><strong>Directions</strong></td>
+            <td><code>directions_service.dart</code></td>
+            <td>Quando si calcola un percorso (iniziale o ricalcolo per deviazione)</td>
+        </tr>
+        <tr>
+            <td><strong>Roads (Nearest Roads)</strong></td>
+            <td><code>roads_service.dart</code></td>
+            <td>Quando l'utente è fermo (velocità zero per 10s) per rilevare strade laterali</td>
+        </tr>
+    </table>
+
+    <!-- ======================================================= -->
+    <h2>2. Dettaglio di Ogni API</h2>
+
+    <!-- --- AUTOCOMPLETE --- -->
+    <div class="api-box">
+        <h4>📍 Places Autocomplete API</h4>
+        <p class="url">GET https://maps.googleapis.com/maps/api/place/autocomplete/json</p>
+        <table>
+            <tr>
+                <th>Parametro</th>
+                <th>Valore</th>
+                <th>Descrizione</th>
+            </tr>
+            <tr>
+                <td><code>input</code></td>
+                <td>testo digitato</td>
+                <td>Query di ricerca (min. 3 caratteri)</td>
+            </tr>
+            <tr>
+                <td><code>key</code></td>
+                <td>API_KEY</td>
+                <td>Chiave API Google</td>
+            </tr>
+            <tr>
+                <td><code>language</code></td>
+                <td><code>it</code></td>
+                <td>Risultati in italiano</td>
+            </tr>
+            <tr>
+                <td><code>sessiontoken</code></td>
+                <td>UUID v4</td>
+                <td>Raggruppa richieste in una sessione</td>
+            </tr>
+        </table>
+        <p><strong>Dove:</strong> <code>PlacesService.getAutocompleteSuggestions()</code><br>
+            <strong>Quando:</strong> Dopo debounce (300ms) e se <code>input.length ≥ 3</code><br>
+            <strong>Risposta:</strong> Array di predictions con <code>description</code> e <code>place_id</code>
+        </p>
+    </div>
+
+    <!-- --- DETAILS --- -->
+    <div class="api-box">
+        <h4>📋 Places Details API</h4>
+        <p class="url">GET https://maps.googleapis.com/maps/api/place/details/json</p>
+        <table>
+            <tr>
+                <th>Parametro</th>
+                <th>Valore</th>
+                <th>Descrizione</th>
+            </tr>
+            <tr>
+                <td><code>place_id</code></td>
+                <td>ID del suggerimento</td>
+                <td>Identificatore univoco del luogo</td>
+            </tr>
+            <tr>
+                <td><code>key</code></td>
+                <td>API_KEY</td>
+                <td>Chiave API Google</td>
+            </tr>
+            <tr>
+                <td><code>language</code></td>
+                <td><code>it</code></td>
+                <td>Risultati in italiano</td>
+            </tr>
+            <tr>
+                <td><code>fields</code></td>
+                <td><code>geometry,name,formatted_address</code></td>
+                <td>Solo campi necessari (ottimizzazione costi)</td>
+            </tr>
+            <tr>
+                <td><code>sessiontoken</code></td>
+                <td>UUID v4</td>
+                <td><strong>Stesso token</strong> dell'autocomplete</td>
+            </tr>
+        </table>
+        <p><strong>Dove:</strong> <code>PlacesService.getPlaceDetails()</code><br>
+            <strong>Quando:</strong> L'utente seleziona un suggerimento dall'autocomplete<br>
+            <strong>Risposta:</strong> <code>geometry.location.lat</code>, <code>geometry.location.lng</code>,
+            <code>name</code>, <code>formatted_address</code>
+        </p>
+    </div>
+
+    <!-- --- DIRECTIONS --- -->
+    <div class="api-box">
+        <h4>🗺️ Directions API</h4>
+        <p class="url">GET https://maps.googleapis.com/maps/api/directions/json</p>
+        <table>
+            <tr>
+                <th>Parametro</th>
+                <th>Valore</th>
+                <th>Descrizione</th>
+            </tr>
+            <tr>
+                <td><code>origin</code></td>
+                <td><code>lat,lng</code> GPS</td>
+                <td>Posizione corrente del dispositivo</td>
+            </tr>
+            <tr>
+                <td><code>destination</code></td>
+                <td><code>lat,lng</code> destinazione</td>
+                <td>Coordinate della destinazione</td>
+            </tr>
+            <tr>
+                <td><code>alternatives</code></td>
+                <td><code>true</code></td>
+                <td>Richiede percorsi alternativi</td>
+            </tr>
+            <tr>
+                <td><code>key</code></td>
+                <td>API_KEY</td>
+                <td>Chiave API Google</td>
+            </tr>
+            <tr>
+                <td><code>language</code></td>
+                <td><code>it</code></td>
+                <td>Indicazioni in italiano</td>
+            </tr>
+        </table>
+        <p><strong>Dove:</strong> <code>DirectionsService.getDirectionsWithAlternatives()</code><br>
+            <strong>Quando:</strong><br>
+            &nbsp;&nbsp;• Alla selezione della destinazione (calcolo iniziale)<br>
+            &nbsp;&nbsp;• Quando l'utente devia dal percorso e nessun alternativo è compatibile (ricalcolo)<br>
+            <strong>Risposta:</strong> Array di routes con steps, polyline e durata
+        </p>
+    </div>
+
+    <!-- --- ROADS --- -->
+    <div class="api-box">
+        <h4>🛣️ Roads API (Nearest Roads)</h4>
+        <p class="url">GET https://roads.googleapis.com/v1/nearestRoads</p>
+        <table>
+            <tr>
+                <th>Parametro</th>
+                <th>Valore</th>
+                <th>Descrizione</th>
+            </tr>
+            <tr>
+                <td><code>points</code></td>
+                <td>punti laterali calcolati</td>
+                <td>Punti a 10m dal centro, a 90° rispetto alla direzione</td>
+            </tr>
+            <tr>
+                <td><code>key</code></td>
+                <td>API_KEY</td>
+                <td>Chiave API Google</td>
+            </tr>
+        </table>
+        <p><strong>Dove:</strong> <code>RoadsService.findNearestRoads()</code><br>
+            <strong>Quando:</strong> L'utente è fermo per 10 secondi e <strong>non</strong> si trova su un waypoint di
+            svolta<br>
+            <strong>Risposta:</strong> Array di strade vicine ai punti laterali
+        </p>
+    </div>
+
+    <!-- ======================================================= -->
+    <div class="page-break"></div>
+    <h2>3. Flusso di Interazione Standard con Chiamate API</h2>
+
+    <p>Di seguito il flusso completo di un'interazione tipica, con indicazione esatta di ogni chiamata API effettuata.
+    </p>
+
+    <h3>Scenario: L'utente cerca "Colosseo" e avvia la navigazione</h3>
+
+    <div class="flow-container">
+        <div class="flow-step"><span class="flow-num blue">1</span> <strong>L'utente apre l'app</strong> <span
+                class="no-api-tag">NESSUNA API</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">Il GPS si attiva. La mappa mostra la posizione
+            corrente.</p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num blue">2</span> <strong>L'utente digita "Co"</strong> <span
+                class="no-api-tag">NESSUNA API</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">Solo 2 caratteri → filtro minimo non superato. Nessuna
+            chiamata.</p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num blue">3</span> <strong>L'utente digita "Col"</strong> <span
+                class="no-api-tag">TIMER AVVIATO</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">3 caratteri → debounce 300ms avviato. Non ancora
+            inviata alcuna richiesta.</p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num blue">4</span> <strong>L'utente digita "Colo" (dopo 100ms)</strong>
+            <span class="no-api-tag">TIMER RESETTATO</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">Timer precedente cancellato, nuovo timer 300ms da
+            "Colo".</p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num blue">5</span> <strong>L'utente digita "Colos" (dopo 80ms)</strong>
+            <span class="no-api-tag">TIMER RESETTATO</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">Timer precedente cancellato, nuovo timer 300ms da
+            "Colos".</p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num">6</span> <strong>300ms senza digitazione</strong> <span
+                class="api-tag">PLACES AUTOCOMPLETE</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">
+            Timer scaduto → prima chiamata API della sessione.<br>
+            <code>GET /place/autocomplete/json?input=Colos&sessiontoken=abc-123&key=...&language=it</code><br>
+            Genera un nuovo <strong>sessionToken</strong> (UUID v4) per questa sessione di ricerca.<br>
+            Risposta: ["Colosseo, Roma", "Colosseo Metro, Roma", "Via del Colosseo, Roma", ...]
+        </p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num blue">7</span> <strong>Suggerimenti visualizzati</strong> <span
+                class="no-api-tag">NESSUNA API</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">La lista appare sotto il campo di testo con i risultati
+            dell'autocomplete.</p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num">8</span> <strong>L'utente tocca "Colosseo, Roma"</strong> <span
+                class="api-tag">PLACES DETAILS</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">
+            Usa il <code>place_id</code> del suggerimento con lo <strong>stesso sessionToken</strong>.<br>
+            <code>GET /place/details/json?place_id=ChIJ...&sessiontoken=abc-123&fields=geometry,name,formatted_address&key=...</code><br>
+            Risposta: lat=41.8902, lng=12.4922, name="Colosseo"<br>
+            <strong>→ Sessione terminata.</strong> Nuovo token generato per la prossima ricerca.
+        </p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num">9</span> <strong>Calcolo percorso</strong> <span
+                class="api-tag">DIRECTIONS API</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">
+            Origine: posizione GPS corrente. Destinazione: 41.8902, 12.4922<br>
+            <code>GET /directions/json?origin=41.90,12.50&destination=41.8902,12.4922&alternatives=true&key=...&language=it</code><br>
+            Risposta: 3 percorsi. Il più veloce (12 min) selezionato come attivo. Tutti salvati in memoria.
+        </p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num green">10</span> <strong>Navigazione avviata</strong> <span
+                class="no-api-tag">TIMER 2s ATTIVATO</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">Polyline disegnata. Lista indicazioni visualizzata.
+            Timer di monitoraggio ogni 2 secondi avviato.</p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num green">11</span> <strong>Tick 2s — l'utente è sul percorso</strong>
+            <span class="no-api-tag">NESSUNA API</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">
+            <code>isOnRoute()</code> → distanza dalla polyline ≤ 40m → OK, nessuna azione.
+        </p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num orange">12</span> <strong>Tick 2s — deviazione rilevata!</strong>
+            <span class="no-api-tag">CHECK ALTERNATIVI</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">
+            Distanza dalla polyline attiva > 40m.<br>
+            Controlla i percorsi alternativi salvati: l'utente è entro 40m dall'alternativo #2.<br>
+            <strong>Switch istantaneo</strong> al percorso #2. <strong>Nessuna chiamata API!</strong>
+        </p>
+        <div class="arrow">↓</div>
+
+        <div class="flow-step"><span class="flow-num">13</span> <strong>Tick 2s — deviazione senza alternativo</strong>
+            <span class="api-tag">DIRECTIONS API</span></div>
+        <p style="margin-left:38px; color:#666; font-size:10pt;">
+            L'utente è a > 40m da tutti i percorsi → ricalcolo necessario.<br>
+            <code>GET /directions/json?origin=41.89,12.49&destination=41.8902,12.4922&alternatives=true&key=...</code><br>
+            Nuovi percorsi calcolati. Il più veloce diventa il percorso attivo.
+        </p>
+    </div>
+
+    <!-- ======================================================= -->
+    <h2>4. Riepilogo Chiamate nel Flusso Standard</h2>
+
+    <div class="cost-box">
+        <strong>✅ Bilancio chiamate per una navigazione tipica:</strong>
+
+        <table>
+            <tr>
+                <th>Fase</th>
+                <th>API</th>
+                <th>N° Chiamate</th>
+                <th>Note</th>
+            </tr>
+            <tr>
+                <td>Ricerca "Colos"</td>
+                <td>Autocomplete</td>
+                <td>1</td>
+                <td>Grazie a debounce + min 3 chars</td>
+            </tr>
+            <tr>
+                <td>Selezione suggerimento</td>
+                <td>Details</td>
+                <td>1</td>
+                <td>Raggruppata con session token</td>
+            </tr>
+            <tr>
+                <td>Calcolo percorso</td>
+                <td>Directions</td>
+                <td>1</td>
+                <td>Include alternatives</td>
+            </tr>
+            <tr>
+                <td>Navigazione (10 min)</td>
+                <td>—</td>
+                <td>0</td>
+                <td>Solo controlli locali ogni 2s</td>
+            </tr>
+            <tr>
+                <td>Deviazione su alternativo</td>
+                <td>—</td>
+                <td>0</td>
+                <td>Switch locale, nessuna API</td>
+            </tr>
+            <tr>
+                <td>Deviazione senza alternativo</td>
+                <td>Directions</td>
+                <td>1</td>
+                <td>Solo se necessario</td>
+            </tr>
+            <tr style="background: #e8f5e9;">
+                <td colspan="2"><strong>TOTALE (caso tipico)</strong></td>
+                <td><strong>3</strong></td>
+                <td><strong>Autocomplete + Details + Directions</strong></td>
+            </tr>
+        </table>
+    </div>
+
+    <h2>5. Dove NON Vengono Fatte Chiamate API</h2>
+
+    <table>
+        <tr>
+            <th>Situazione</th>
+            <th>Motivo</th>
+        </tr>
+        <tr>
+            <td>Digitazione con &lt; 3 caratteri</td>
+            <td>Filtro minimo: risultati troppo generici</td>
+        </tr>
+        <tr>
+            <td>Digitazione rapida (tra un debounce e l'altro)</td>
+            <td>Timer 300ms non ancora scaduto</td>
+        </tr>
+        <tr>
+            <td>Tap su punto generico della mappa</td>
+            <td>Coordinate disponibili direttamente, no place_id</td>
+        </tr>
+        <tr>
+            <td>Check posizione ogni 2s (se sul percorso)</td>
+            <td>Calcolo geometrico locale con <code>isOnRoute()</code></td>
+        </tr>
+        <tr>
+            <td>Switch su percorso alternativo</td>
+            <td>I percorsi alternativi sono già in memoria</td>
+        </tr>
+    </table>
+
+</body>
+
+</html>

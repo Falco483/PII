@@ -106,6 +106,106 @@ class DirectionsResult {
   });
 }
 
+// =============================================================================
+// MODELLI PER PERCORSI ALTERNATIVI (TASK 1)
+// =============================================================================
+
+/// RouteData — Rappresenta un singolo percorso con tutti i suoi dati.
+///
+/// Ogni percorso restituito dalla Directions API viene convertito in un
+/// oggetto RouteData. La differenza rispetto a DirectionsResult è che
+/// RouteData include anche la polyline DECODIFICATA (lista di coordinate)
+/// e la durata in SECONDI (per confronto numerico tra percorsi).
+///
+/// PERCHÉ SERVE QUESTO MODELLO SEPARATO:
+/// DirectionsResult era pensato per un singolo percorso. Ora che gestiamo
+/// percorsi alternativi, abbiamo bisogno di:
+/// 1. Polyline decodificata → per il confronto posizione-vs-percorso (Task 2)
+/// 2. Durata in secondi → per confrontare numericamente i percorsi
+/// 3. Tutti i dati in un unico oggetto → per scambiare facilmente il percorso attivo
+class RouteData {
+  /// Lista di punti [latitudine, longitudine] della polyline decodificata.
+  /// Usata nel Task 2 per calcolare la distanza tra l'utente e il percorso.
+  final List<List<double>> decodedPolyline;
+
+  /// Durata stimata del percorso in SECONDI (valore numerico).
+  /// Estratta da `legs[0].duration.value` nel JSON della Directions API.
+  /// Usata per confrontare i percorsi e scegliere il più veloce.
+  final int durationSeconds;
+
+  /// Durata totale leggibile (es. "1 ora 23 min").
+  /// Estratta da `legs[0].duration.text` nel JSON.
+  final String totalDuration;
+
+  /// Distanza totale leggibile (es. "120 km").
+  /// Estratta da `legs[0].distance.text` nel JSON.
+  final String totalDistance;
+
+  /// Polyline codificata originale (stringa compressa di Google).
+  /// Serve per passarla al MapWidget che la decodifica internamente
+  /// per disegnarla sulla mappa.
+  final String encodedPolyline;
+
+  /// Lista degli step di navigazione (indicazioni passo-passo).
+  /// Ogni step contiene istruzione, distanza, durata, coordinate, manovra.
+  final List<DirectionStep> steps;
+
+  /// Costruttore — tutti i campi sono obbligatori perché un percorso
+  /// senza uno qualsiasi di questi dati è inutilizzabile.
+  RouteData({
+    required this.decodedPolyline,
+    required this.durationSeconds,
+    required this.totalDuration,
+    required this.totalDistance,
+    required this.encodedPolyline,
+    required this.steps,
+  });
+}
+
+/// AllRoutesResult — Wrapper che contiene il percorso migliore e tutti
+/// i percorsi alternativi restituiti dalla Directions API.
+///
+/// STRUTTURA:
+/// - bestRoute: il percorso con la durata minore (selezionato automaticamente)
+/// - allRoutes: TUTTI i percorsi (compreso il bestRoute), salvati per poter
+///   "switchare" a un alternativo se l'utente devia (Task 2b)
+/// - originLat/Lng, destLat/Lng: coordinate di partenza e arrivo
+///
+/// PERCHÉ SALVARE TUTTI I PERCORSI:
+/// Quando l'utente devia dal percorso attivo, prima di fare una nuova
+/// chiamata API (costosa e lenta), controlliamo se è finito su uno dei
+/// percorsi alternativi già in memoria. Questo risparmia tempo e quota API.
+class AllRoutesResult {
+  /// Il percorso con la durata più breve tra tutti quelli restituiti.
+  final RouteData bestRoute;
+
+  /// Tutti i percorsi restituiti dall'API (incluso il bestRoute).
+  /// Ordinati per durata crescente (il primo è il più veloce).
+  final List<RouteData> allRoutes;
+
+  /// Latitudine del punto di partenza (uguale per tutti i percorsi).
+  final double originLat;
+
+  /// Longitudine del punto di partenza.
+  final double originLng;
+
+  /// Latitudine della destinazione (uguale per tutti i percorsi).
+  final double destLat;
+
+  /// Longitudine della destinazione.
+  final double destLng;
+
+  /// Costruttore — richiede tutti i campi.
+  AllRoutesResult({
+    required this.bestRoute,
+    required this.allRoutes,
+    required this.originLat,
+    required this.originLng,
+    required this.destLat,
+    required this.destLng,
+  });
+}
+
 /// Servizio principale per le Directions
 class DirectionsService {
   // Placeholder per la API Key - va sostituita con la chiave reale
@@ -181,6 +281,177 @@ class DirectionsService {
     } catch (e) {
       // Gestisce eventuali errori
       print('Eccezione in getDirections: $e');
+      return null;
+    }
+  }
+
+  /// Calcola il percorso con PERCORSI ALTERNATIVI (TASK 1).
+  ///
+  /// Questa è la versione evoluta di getDirections() che:
+  /// 1. Richiede esplicitamente percorsi alternativi (alternatives=true)
+  /// 2. Parsifica TUTTI i percorsi dalla risposta (non solo il primo)
+  /// 3. Confronta la durata di ciascun percorso
+  /// 4. Seleziona come "best" quello con durata minore
+  /// 5. Salva tutti i percorsi con le polyline decodificate
+  ///
+  /// PARAMETRI:
+  /// - [origin]: indirizzo o coordinate di partenza (es. "Roma, Italia"
+  ///   oppure "41.9028,12.4964" per coordinate)
+  /// - [destination]: indirizzo o coordinate di arrivo
+  ///
+  /// RETURN:
+  /// - AllRoutesResult con il percorso migliore + tutti gli alternativi
+  /// - null se si verifica un errore (rete, API, nessun percorso trovato)
+  ///
+  /// NOTA: la Directions API restituisce tipicamente 1-3 percorsi
+  /// alternativi, ma il numero non è garantito. A volte può restituire
+  /// solo il percorso principale se non esistono alternative ragionevoli.
+  Future<AllRoutesResult?> getDirectionsWithAlternatives({
+    required String origin,
+    required String destination,
+  }) async {
+    try {
+      // Costruisce l'URL con i parametri della richiesta.
+      // Il parametro 'alternatives': 'true' dice alla API di restituire
+      // più percorsi possibili oltre a quello principale.
+      final uri = Uri.parse(baseUrl).replace(
+        queryParameters: {
+          'origin': origin,
+          'destination': destination,
+          'key': apiKey,
+          'language': 'it', // Risposte in italiano
+          'mode': 'driving', // Modalità di viaggio: auto
+          'alternatives': 'true', // TASK 1: richiedi percorsi alternativi
+        },
+      );
+
+      // Esegue la chiamata HTTP GET alla Directions API
+      final response = await http.get(uri);
+
+      // Verifica che la risposta HTTP sia OK (status code 200)
+      if (response.statusCode != 200) {
+        // Log dell'errore HTTP per debugging
+        print('Errore HTTP: ${response.statusCode}');
+        return null;
+      }
+
+      // Parsifica il corpo della risposta da stringa JSON a Map Dart
+      final data = json.decode(response.body);
+
+      // Verifica lo status della risposta dell'API Google.
+      // Possibili valori: 'OK', 'NOT_FOUND', 'ZERO_RESULTS',
+      // 'MAX_WAYPOINTS_EXCEEDED', 'INVALID_REQUEST', ecc.
+      if (data['status'] != 'OK') {
+        // Log dell'errore API per debugging
+        print('Errore API: ${data["status"]}');
+        return null;
+      }
+
+      // Estrae l'array 'routes' dalla risposta JSON.
+      // Quando alternatives=true, questo array può contenere più elementi.
+      // Esempio: routes[0] = percorso principale, routes[1] = primo alternativo, ecc.
+      final List<dynamic> routes = data['routes'];
+
+      // Se l'API non ha restituito nessun percorso, usciamo.
+      // Questo è raro (di solito c'è almeno un percorso se status='OK'),
+      // ma è buona pratica verificare.
+      if (routes.isEmpty) {
+        print('Nessun percorso trovato nella risposta API');
+        return null;
+      }
+
+      // Log del numero di percorsi ricevuti (utile per debugging)
+      print('Percorsi ricevuti dalla API: ${routes.length}');
+
+      // Lista che conterrà tutti i RouteData parsificati
+      final List<RouteData> allRouteData = [];
+
+      // --- ITERAZIONE SU TUTTI I PERCORSI ---
+      // A differenza del vecchio getDirections() che prendeva solo routes[0],
+      // qui iteriamo su OGNI percorso restituito dall'API.
+      for (final route in routes) {
+        // Estrae la prima (e solitamente unica) "leg" del percorso.
+        // Una leg corrisponde a un segmento senza waypoint intermedi.
+        // Siccome non usiamo waypoint, c'è sempre una sola leg.
+        final leg = route['legs'][0];
+
+        // Estrae tutti gli step (istruzioni) di questa leg
+        final List<DirectionStep> steps = [];
+        for (var step in leg['steps']) {
+          // Converte ogni step JSON in un oggetto DirectionStep
+          steps.add(DirectionStep.fromJson(step));
+        }
+
+        // Estrae la polyline codificata dal campo overview_polyline.
+        // La overview_polyline è una versione semplificata della polyline
+        // che copre l'intero percorso (non i singoli step).
+        final String encodedPoly = route['overview_polyline']['points'];
+
+        // Decodifica la polyline in una lista di punti [lat, lng].
+        // Questo serve per il confronto posizione-vs-percorso nel Task 2:
+        // confronteremo la posizione GPS dell'utente con ciascun punto
+        // della polyline decodificata per verificare se è sul percorso.
+        final List<List<double>> decodedPoly = decodePolyline(encodedPoly);
+
+        // Estrae la durata in SECONDI dal campo 'value' della duration.
+        // La API restituisce sia 'text' ("1 ora 23 min") sia 'value' (4980 secondi).
+        // Usiamo 'value' per il confronto numerico tra percorsi.
+        final int durationSec = leg['duration']['value'] as int;
+
+        // Crea l'oggetto RouteData con tutti i dati di questo percorso
+        final routeData = RouteData(
+          decodedPolyline: decodedPoly,
+          durationSeconds: durationSec,
+          totalDuration: leg['duration']['text'] ?? '',
+          totalDistance: leg['distance']['text'] ?? '',
+          encodedPolyline: encodedPoly,
+          steps: steps,
+        );
+
+        // Aggiunge il percorso alla lista di tutti i percorsi
+        allRouteData.add(routeData);
+      }
+
+      // --- SELEZIONE DEL PERCORSO MIGLIORE (Task 1) ---
+      // Ordina tutti i percorsi per durata crescente (il più veloce prima).
+      // Il metodo sort() modifica la lista in-place.
+      allRouteData.sort(
+        (a, b) => a.durationSeconds.compareTo(b.durationSeconds),
+      );
+
+      // Il primo elemento dopo l'ordinamento è il percorso con durata minore.
+      // Questo diventerà il percorso "attivo" mostrato all'utente.
+      final RouteData bestRoute = allRouteData.first;
+
+      // Log per debugging: mostra la durata di ogni percorso
+      for (int i = 0; i < allRouteData.length; i++) {
+        print(
+          'Percorso ${i + 1}: durata ${allRouteData[i].durationSeconds}s '
+          '(${allRouteData[i].totalDuration})',
+        );
+      }
+      // Indica quale percorso è stato selezionato come migliore
+      print(
+        'Percorso migliore: ${bestRoute.totalDuration} '
+        '(${bestRoute.durationSeconds}s)',
+      );
+
+      // Estrae le coordinate di partenza e arrivo dalla prima leg.
+      // Sono uguali per tutti i percorsi (stessa origine e destinazione).
+      final firstLeg = routes[0]['legs'][0];
+
+      // Costruisce e restituisce il risultato finale con tutti i percorsi
+      return AllRoutesResult(
+        bestRoute: bestRoute,
+        allRoutes: allRouteData,
+        originLat: firstLeg['start_location']['lat'].toDouble(),
+        originLng: firstLeg['start_location']['lng'].toDouble(),
+        destLat: firstLeg['end_location']['lat'].toDouble(),
+        destLng: firstLeg['end_location']['lng'].toDouble(),
+      );
+    } catch (e) {
+      // Gestisce qualsiasi eccezione non prevista (parsing JSON, rete, ecc.)
+      print('Eccezione in getDirectionsWithAlternatives: $e');
       return null;
     }
   }

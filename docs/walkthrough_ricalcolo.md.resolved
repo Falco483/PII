@@ -1,0 +1,40 @@
+# Walkthrough — Percorsi Alternativi + Monitoraggio Deviazione
+
+## Riepilogo Modifiche
+
+### 4 file modificati, 0 file nuovi, 0 file eliminati
+
+| File | Modifiche |
+|------|-----------|
+| [directions_service.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart) | Nuovi modelli [RouteData](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#126-164) e [AllRoutesResult](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#178-208), nuovo metodo [getDirectionsWithAlternatives()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#288-458) con `alternatives: 'true'` |
+| [geo_utils.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart) | Costanti `kRouteDeviationThresholdMeters` (40m) e `kRouteCheckIntervalSec` (2s). Funzioni [distanceBetween()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart#186-202), [minDistanceToPolyline()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart#203-259), [isOnRoute()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/geo_utils.dart#260-287) |
+| [navigation_monitor.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart) | [startNavigation()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart#349-401), [stopNavigation()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart#402-425), `activeRouteNotifier`, timer 2s con logica Task 2a→2b→2c, [_executeReroute()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart#943-1039) |
+| [navigation_screen.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart) | Usa [getDirectionsWithAlternatives()](file:///c:/Users/Antonio/Desktop/pii2/lib/services/directions_service.dart#288-458), listener su `activeRouteNotifier`, [_onActiveRouteChanged()](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart#149-195) per aggiornare UI |
+
+## Flusso Logico Implementato
+
+```mermaid
+flowchart TD
+    A["Calcola Percorso"] --> B["API: alternatives=true"]
+    B --> C["Parsifica TUTTI i percorsi"]
+    C --> D["Ordina per durata, seleziona migliore"]
+    D --> E["startNavigation: salva tutti i percorsi"]
+    E --> F["Timer ogni 2 secondi"]
+    F --> G{"Utente entro 40m\ndal percorso attivo?"}
+    G -->|SÌ| F
+    G -->|NO| H{"Entro 40m da un\npercorso alternativo?"}
+    H -->|SÌ| I["Switch a percorso alternativo\nNessuna chiamata API"]
+    H -->|NO| J["Ricalcolo API\nPosizione attuale → stessa destinazione"]
+    I --> K["Notifica UI: aggiorna mappa"]
+    J --> K
+    K --> F
+```
+
+## Verifica
+
+### `flutter analyze`
+- **0 errori**, **0 warning**
+- Solo issue `info` pre-esistenti (`avoid_print`, `deprecated_member_use`)
+
+### Verifica manuale
+Da effettuare su dispositivo fisico con GPS reale.
