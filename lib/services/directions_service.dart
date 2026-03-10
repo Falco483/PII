@@ -209,7 +209,7 @@ class AllRoutesResult {
 /// Servizio principale per le Directions
 class DirectionsService {
   // Placeholder per la API Key - va sostituita con la chiave reale
-  static const String apiKey = 'YOUR_API_KEY_HERE';
+  static const String apiKey = 'AIzaSyDvmPBsr_i6UzCzl5Rt2d9Pnsg1yV4m5Ww';
 
   // URL base delle Google Directions API
   static const String baseUrl =
@@ -234,16 +234,22 @@ class DirectionsService {
           'destination': destination,
           'key': apiKey,
           'language': 'it', // Risposte in italiano
-          'mode': 'driving', // Modalità di viaggio: auto
+          'mode': 'walking', // Modalità di viaggio: a piedi
         },
       );
 
       // Esegue la chiamata HTTP GET
       final response = await http.get(uri);
 
+      // Log della richiesta per debugging
+      print('=== DIRECTIONS API REQUEST ===');
+      print('URL: $uri');
+      print('Status HTTP: ${response.statusCode}');
+
       // Verifica che la risposta sia OK (status 200)
       if (response.statusCode != 200) {
         print('Errore HTTP: ${response.statusCode}');
+        print('Body: ${response.body}');
         return null;
       }
 
@@ -253,6 +259,10 @@ class DirectionsService {
       // Verifica lo status della risposta API
       if (data['status'] != 'OK') {
         print('Errore API: ${data['status']}');
+        print('Error message: ${data['error_message'] ?? 'nessun messaggio'}');
+        print(
+          'Body completo: ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}',
+        );
         return null;
       }
 
@@ -320,7 +330,7 @@ class DirectionsService {
           'destination': destination,
           'key': apiKey,
           'language': 'it', // Risposte in italiano
-          'mode': 'driving', // Modalità di viaggio: auto
+          'mode': 'walking', // Modalità di viaggio: a piedi
           'alternatives': 'true', // TASK 1: richiedi percorsi alternativi
         },
       );
@@ -328,10 +338,16 @@ class DirectionsService {
       // Esegue la chiamata HTTP GET alla Directions API
       final response = await http.get(uri);
 
+      // Log della richiesta per debugging
+      print('=== DIRECTIONS WITH ALTERNATIVES API REQUEST ===');
+      print('URL: $uri');
+      print('Status HTTP: ${response.statusCode}');
+
       // Verifica che la risposta HTTP sia OK (status code 200)
       if (response.statusCode != 200) {
         // Log dell'errore HTTP per debugging
         print('Errore HTTP: ${response.statusCode}');
+        print('Body: ${response.body}');
         return null;
       }
 
@@ -344,6 +360,10 @@ class DirectionsService {
       if (data['status'] != 'OK') {
         // Log dell'errore API per debugging
         print('Errore API: ${data["status"]}');
+        print('Error message: ${data['error_message'] ?? 'nessun messaggio'}');
+        print(
+          'Body completo: ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}',
+        );
         return null;
       }
 

@@ -4,10 +4,31 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:google_maps_flutter_android/google_maps_flutter_android.dart';
+import 'package:google_maps_flutter_platform_interface/google_maps_flutter_platform_interface.dart';
 import 'screens/navigation_screen.dart';
 
 /// Entry point dell'applicazione
-void main() {
+void main() async {
+  // Necessario per inizializzare i binding prima di usare plugin
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Inizializza il renderer Google Maps su Android.
+  final GoogleMapsFlutterPlatform platform = GoogleMapsFlutterPlatform.instance;
+  if (platform is GoogleMapsFlutterAndroid) {
+    // Forza Hybrid Composition per compatibilità con Impeller (Vulkan).
+    // Senza questo, la PlatformView nativa di Google Maps non si inizializza
+    // su dispositivi che usano Impeller come rendering backend.
+    platform.useAndroidViewSurface = true;
+
+    // Usa il renderer LATEST (vettoriale), compatibile con Impeller.
+    // Il renderer LEGACY è deprecato e viene ignorato dall'SDK.
+    final AndroidMapRenderer renderer = await platform.initializeWithRenderer(
+      AndroidMapRenderer.latest,
+    );
+    print('=== Google Maps renderer inizializzato: $renderer ===');
+  }
+
   runApp(const NavigationApp());
 }
 

@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>First Implementation — Navigation App</title>
+    <style>
+        /* === STILE DOCUMENTO PDF === */
+        @page {
+            size: A4;
+            margin: 2cm;
+        }
+
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 11pt;
+            line-height: 1.6;
+            color: #222;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        h1 {
+            font-size: 22pt;
+            color: #1a73e8;
+            border-bottom: 3px solid #1a73e8;
+            padding-bottom: 8px;
+            margin-top: 0;
+        }
+
+        h2 {
+            font-size: 15pt;
+            color: #1a73e8;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 4px;
+            margin-top: 28px;
+        }
+
+        h3 {
+            font-size: 12pt;
+            color: #333;
+            margin-top: 18px;
+        }
+
+        code {
+            background: #f0f4f8;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-size: 10pt;
+            font-family: 'Consolas', 'Courier New', monospace;
+        }
+
+        .highlight-box {
+            background: #e8f0fe;
+            border-left: 4px solid #1a73e8;
+            padding: 12px 16px;
+            margin: 12px 0;
+            border-radius: 0 6px 6px 0;
+        }
+
+        .warning-box {
+            background: #fef7e0;
+            border-left: 4px solid #f9ab00;
+            padding: 12px 16px;
+            margin: 12px 0;
+            border-radius: 0 6px 6px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 12px 0;
+            font-size: 10pt;
+        }
+
+        th {
+            background: #1a73e8;
+            color: white;
+            padding: 8px 12px;
+            text-align: left;
+        }
+
+        td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+        }
+
+        tr:nth-child(even) td {
+            background: #f8f9fa;
+        }
+
+        .flow-step {
+            display: flex;
+            align-items: flex-start;
+            margin: 8px 0;
+        }
+
+        .flow-num {
+            background: #1a73e8;
+            color: white;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 10pt;
+            margin-right: 12px;
+            flex-shrink: 0;
+        }
+
+        .arrow {
+            text-align: center;
+            color: #1a73e8;
+            font-size: 18pt;
+            margin: 4px 0;
+        }
+
+        ul {
+            margin: 8px 0;
+        }
+
+        li {
+            margin: 4px 0;
+        }
+
+        .page-break {
+            page-break-before: always;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>📱 First Implementation — Navigation App</h1>
+
+    <p>This document describes all the implemented features in the navigation app and the general interaction flow for
+        the user.</p>
+
+    <!-- ======================================================= -->
+    <h2>1. Feature Overview</h2>
+
+    <p>The navigation app offers five integrated macro-features:</p>
+
+    <table>
+        <tr>
+            <th>#</th>
+            <th>Feature</th>
+            <th>Description</th>
+        </tr>
+        <tr>
+            <td><strong>TASK 1</strong></td>
+            <td>Search with Places Autocomplete</td>
+            <td>Text search with real-time suggestions, debounce, and session token to optimize costs</td>
+        </tr>
+        <tr>
+            <td><strong>TASK 2</strong></td>
+            <td>Text search flow</td>
+            <td>Complete flow: typing → suggestions → selection → coordinates</td>
+        </tr>
+        <tr>
+            <td><strong>TASK 3</strong></td>
+            <td>Map point selection</td>
+            <td>Direct tap on the map to select a destination (POI or generic point)</td>
+        </tr>
+        <tr>
+            <td><strong>TASK 4</strong></td>
+            <td>Route calculation with alternatives</td>
+            <td>Route calculation from GPS position with alternative routes, selecting the fastest</td>
+        </tr>
+        <tr>
+            <td><strong>TASK 5</strong></td>
+            <td>Monitoring and recalculation</td>
+            <td>Continuous position check every 2s, switch to alternative or API recalculation if deviated</td>
+        </tr>
+        <tr>
+            <td><strong>TASK 6</strong></td>
+            <td>Stop Detection and Overlay</td>
+            <td>Shows turn instructions at waypoints or detects lateral roads when the vehicle stops (10s analysis)</td>
+        </tr>
+    </table>
+
+    <!-- ======================================================= -->
+    <h2>2. File Structure</h2>
+
+    <table>
+        <tr>
+            <th>File</th>
+            <th>Role</th>
+        </tr>
+        <tr>
+            <td><code>lib/services/places_service.dart</code></td>
+            <td>Places API service: autocomplete + details + session token</td>
+        </tr>
+        <tr>
+            <td><code>lib/services/directions_service.dart</code></td>
+            <td>Directions API service: route calculation + alternative routes</td>
+        </tr>
+        <tr>
+            <td><code>lib/services/roads_service.dart</code></td>
+            <td>Roads API service: check for side roads</td>
+        </tr>
+        <tr>
+            <td><code>lib/services/navigation_monitor.dart</code></td>
+            <td>Business logic: position monitoring, bearing, deviation</td>
+        </tr>
+        <tr>
+            <td><code>lib/services/geo_utils.dart</code></td>
+            <td>Geometric functions: distance, point-on-polyline, thresholds</td>
+        </tr>
+        <tr>
+            <td><code>lib/screens/navigation_screen.dart</code></td>
+            <td>Main screen: coordinates UI and logic</td>
+        </tr>
+        <tr>
+            <td><code>lib/widgets/search_input.dart</code></td>
+            <td>Search widget with autocomplete and debounce</td>
+        </tr>
+        <tr>
+            <td><code>lib/widgets/map_widget.dart</code></td>
+            <td>Google Map with polyline, markers, and tap handler</td>
+        </tr>
+        <tr>
+            <td><code>lib/widgets/directions_list.dart</code></td>
+            <td>Step-by-step driving directions list</td>
+        </tr>
+        <tr>
+            <td><code>lib/widgets/navigation_overlay.dart</code></td>
+            <td>Navigation overlay: turn instructions, "go straight"</td>
+        </tr>
+    </table>
+
+    <!-- ======================================================= -->
+    <div class="page-break"></div>
+    <h2>3. TASK 1 — Search with Places Autocomplete</h2>
+
+    <h3>3.1 Session Token</h3>
+    <p>The session token is a unique identifier (UUID v4) that groups all queries of a single search session.</p>
+
+    <div class="highlight-box">
+        <strong>Token lifecycle:</strong><br>
+        1. User starts typing → <strong>generates</strong> a new token<br>
+        2. Each Autocomplete request uses the <strong>same</strong> token<br>
+        3. User selects a result → Places Details uses the <strong>same</strong> token<br>
+        4. After selection → token is <strong>invalidated</strong>, a new one is generated
+    </div>
+
+    <div class="warning-box">
+        <strong>⚠️ Why it's important:</strong> Without a session token, Google bills every single Autocomplete request
+        separately. With the token, all Autocomplete + Details are grouped into a single billable session,
+        <strong>drastically reducing costs</strong>.
+    </div>
+
+    <h3>3.2 Debounce (300ms)</h3>
+    <p>A request is not sent for every typed character. A 300ms timer starts after each keystroke:</p>
+    <ul>
+        <li>If the user types another character before 300ms → the timer is <strong>canceled and recreated</strong></li>
+        <li>If the user stops typing for 300ms → the request is <strong>sent</strong></li>
+    </ul>
+    <p><strong>Result:</strong> typing "Milan Cathedral" quickly sends ~2-3 requests instead of 15.</p>
+
+    <h3>3.3 Minimum 3 Characters</h3>
+    <p>No API request is sent if the typed text has fewer than 3 characters. Below this threshold, results would be too
+        generic and would waste API calls with no benefit to the user.</p>
+
+    <!-- ======================================================= -->
+    <h2>4. TASK 2 — Complete Text Search Flow</h2>
+
+    <div class="flow-step"><span class="flow-num">1</span> <span>User types in the search bar</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">2</span> <span>If <code>input.length &lt; 3</code> → no request (empty
+            list)</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">3</span> <span>If <code>input.length &ge; 3</code> → waits for the
+            debounce (300ms)</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">4</span> <span>Calls <strong>Places Autocomplete API</strong> with the
+            session token</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">5</span> <span>Shows the list of suggestions below the text
+            field</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">6</span> <span>User selects a suggestion</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">7</span> <span>Calls <strong>Places Details API</strong> with the same
+            session token → gets coordinates (lat/lng)</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">8</span> <span>Ends the session → generates a <strong>new</strong>
+            session token</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">9</span> <span>Passes the coordinates to route calculation (TASK
+            4)</span></div>
+
+    <!-- ======================================================= -->
+    <div class="page-break"></div>
+    <h2>5. TASK 3 — Map Point Selection</h2>
+
+    <h3>Case 1 — Tap on a POI (shop, restaurant, registered place)</h3>
+    <p>If the user taps a POI recognized by Google Maps, the map returns the POI coordinates. The coordinates are used
+        directly to calculate the route, without additional API calls.</p>
+
+    <h3>Case 2 — Tap on a generic point</h3>
+    <p>If the user taps any point on the map that is not a POI:</p>
+    <ul>
+        <li>The lat/lng coordinates are obtained directly from the tap event</li>
+        <li><strong>No call</strong> to Places Details API (coordinates are sufficient)</li>
+        <li>The destination text field shows the selected coordinates</li>
+        <li>Proceeds directly to route calculation (TASK 4)</li>
+    </ul>
+
+    <div class="highlight-box">
+        <strong>Optimization:</strong> No additional API is called for generic points. The lat/lng coordinates are
+        sufficient for the Directions API.
+    </div>
+
+    <!-- ======================================================= -->
+    <h2>6. TASK 4 — Route Calculation</h2>
+
+    <p>After getting the destination (from text search or map selection), the system:</p>
+
+    <div class="flow-step"><span class="flow-num">1</span> <span>Gets the <strong>current GPS position</strong> of the
+            device (used as origin)</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">2</span> <span>Calls the <strong>Directions API</strong> with
+            <code>alternatives: true</code></span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">3</span> <span>Receives all routes (main + alternatives)</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">4</span> <span><strong>Compares the duration</strong> of each route
+            and selects the fastest</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">5</span> <span><strong>Saves all routes</strong> with decoded
+            polylines in memory</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">6</span> <span><strong>Draws the active route polyline</strong> on the
+            map</span></div>
+    <div class="arrow">↓</div>
+    <div class="flow-step"><span class="flow-num">7</span> <span>Shows step-by-step driving directions in the
+            list</span></div>
+
+    <div class="highlight-box">
+        <strong>Data models:</strong>
+        <ul>
+            <li><code>RouteData</code> — a single route (decoded polyline, duration in seconds, steps, distance)</li>
+            <li><code>AllRoutesResult</code> — complete result (bestRoute + list of all alternative routes)</li>
+        </ul>
+    </div>
+
+    <!-- ======================================================= -->
+    <div class="page-break"></div>
+    <h2>7. TASK 5 — Position Monitoring and Automatic Recalculation</h2>
+
+    <p>Once navigation starts, the system performs an automatic check <strong>every 2 seconds</strong>:</p>
+
+    <h3>Step 2a — Is the user on the route?</h3>
+    <p>Compares the current GPS position with the active route's polyline. If the minimum distance from the polyline is
+        <strong>≤ 40 meters</strong>, the user is considered "on the route" → no action.
+    </p>
+
+    <h3>Step 2b — Is it on an alternative route?</h3>
+    <p>If the user is more than 40m from the active route, the system checks if the current position is within 40m of
+        the polyline of one of the <strong>saved alternative routes</strong> in memory:</p>
+    <ul>
+        <li><strong>If yes:</strong> the alternative route becomes the new active route. <strong>No API call</strong> —
+            the switch is instantaneous.</li>
+        <li><strong>If no:</strong> proceeds to Step 2c.</li>
+    </ul>
+
+    <h3>Step 2c — API Recalculation</h3>
+    <p>If no alternative route is compatible, the system:</p>
+    <ul>
+        <li>Uses the <strong>current GPS position as the new origin</strong></li>
+        <li>Keeps the <strong>same final destination</strong></li>
+        <li>Calls the <strong>Directions API with <code>alternatives: true</code></strong></li>
+        <li>Updates the active route and all alternatives</li>
+        <li>Updates the map and directions</li>
+    </ul>
+
+    <div class="warning-box">
+        <strong>⚠️ Anti-flood:</strong> An <code>_isRerouting</code> flag prevents concurrent API calls from being sent.
+        If a recalculation is already in progress, subsequent timer ticks are ignored until completion.
+    </div>
+
+    <!-- ======================================================= -->
+    <div class="page-break"></div>
+    <h2>8. TASK 6 — Stop Detection and Overlay</h2>
+
+    <p>During navigation, the system constantly monitors speed to provide contextual instructions via a
+        <strong>Navigation Overlay</strong>. When the speed drops below 1 km/h, a 10-second countdown activates to
+        prevent false positives. When the timer expires, an analysis is performed:
+    </p>
+
+    <h3>Case A — Stopped at an intersection (Waypoint)</h3>
+    <p>If the user is stopped within 5 meters of the route's next turn waypoint, the overlay appears showing the exact
+        navigation instruction from the Directions API (e.g., <em>"Turn right"</em>).</p>
+
+    <h3>Case B — Lateral Roads Detection (Roads API)</h3>
+    <p>If the user is stopped but is <strong>NOT</strong> on an expected intersection of the route, the system
+        calculates lateral points relative to the vehicle's bearing and queries the <strong>Roads API</strong>.
+        If a nearby lateral road is detected, a visual warning is shown to encourage the user to stay on the main route.
+    </p>
+
+    <div class="highlight-box">
+        <strong>Overlay Dismissal:</strong> The overlay disappears automatically as soon as the user resumes driving and
+        their speed exceeds the minimum threshold.
+    </div>
+
+    <!-- ======================================================= -->
+    <h2>9. General Interaction Flow</h2>
+
+    <p>The complete app flow, from destination selection to active navigation, develops as follows:</p>
+
+    <table>
+        <tr>
+            <th>Phase</th>
+            <th>User Action</th>
+            <th>App Behavior</th>
+        </tr>
+        <tr>
+            <td><strong>Entry</strong></td>
+            <td>Opens the app</td>
+            <td>Shows map centered on Italy, starts GPS</td>
+        </tr>
+        <tr>
+            <td><strong>Destination (text)</strong></td>
+            <td>Types an address</td>
+            <td>300ms Debounce → Autocomplete → suggestions dropdown</td>
+        </tr>
+        <tr>
+            <td><strong>Destination (map)</strong></td>
+            <td>Taps a point on the map</td>
+            <td>Takes coordinates directly, no additional API</td>
+        </tr>
+        <tr>
+            <td><strong>Selection</strong></td>
+            <td>Chooses suggestion / confirms point</td>
+            <td>Places Details → coordinates → route calculation</td>
+        </tr>
+        <tr>
+            <td><strong>Route</strong></td>
+            <td>—</td>
+            <td>Directions API, selects fastest, draws polyline</td>
+        </tr>
+        <tr>
+            <td><strong>Navigation</strong></td>
+            <td>Follows the route</td>
+            <td>Monitoring every 2s, overlay with instructions</td>
+        </tr>
+        <tr>
+            <td><strong>Deviation</strong></td>
+            <td>Takes a different road</td>
+            <td>Switch to alternative or automatic API recalculation</td>
+        </tr>
+    </table>
+
+</body>
+
+</html>

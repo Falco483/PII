@@ -75,7 +75,7 @@ class SnappedPoint {
 class RoadsService {
   /// API Key di Google — stessa usata per le Directions API.
   /// IMPORTANTE: La Roads API deve essere abilitata nel progetto Google Cloud.
-  static const String apiKey = 'YOUR_API_KEY_HERE';
+  static const String apiKey = 'AIzaSyDvmPBsr_i6UzCzl5Rt2d9Pnsg1yV4m5Ww';
 
   /// URL base dell'endpoint nearestRoads
   static const String _baseUrl = 'https://roads.googleapis.com/v1/nearestRoads';

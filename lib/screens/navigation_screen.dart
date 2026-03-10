@@ -514,9 +514,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(12),
               child: Stack(
+                fit: StackFit.expand,
                 children: [
                   // --- LAYER 1: Mappa Google ---
-                  Positioned.fill(
+                  SizedBox.expand(
                     child: MapWidget(
                       originLat: _directionsResult?.originLat,
                       originLng: _directionsResult?.originLng,
@@ -620,9 +621,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(12),
               child: Stack(
+                fit: StackFit.expand,
                 children: [
                   // --- LAYER 1: Mappa Google ---
-                  Positioned.fill(
+                  SizedBox.expand(
                     child: MapWidget(
                       originLat: _directionsResult?.originLat,
                       originLng: _directionsResult?.originLng,

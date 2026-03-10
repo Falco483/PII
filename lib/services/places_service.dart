@@ -185,7 +185,7 @@ String generateSessionToken() {
 class PlacesService {
   // Stessa API Key usata in DirectionsService e RoadsService.
   // Deve essere sostituita con una chiave reale valida.
-  static const String apiKey = 'YOUR_API_KEY_HERE';
+  static const String apiKey = 'AIzaSyDvmPBsr_i6UzCzl5Rt2d9Pnsg1yV4m5Ww';
 
   // URL base per la Places Autocomplete API
   static const String _autocompleteUrl =

@@ -64,8 +64,8 @@ class _MapWidgetState extends State<MapWidget> {
   Set<Polyline> _polylines = {};
 
   // Posizione iniziale: centro Italia
-  static const LatLng _initialPosition = LatLng(42.5, 12.5);
-  static const double _initialZoom = 6.0;
+  static const LatLng _initialPosition = LatLng(45.4836315, 9.2249375);
+  static const double _initialZoom = 10;
 
   @override
   void didUpdateWidget(MapWidget oldWidget) {
@@ -81,6 +81,7 @@ class _MapWidgetState extends State<MapWidget> {
   /// Callback quando la mappa è creata
   void _onMapCreated(GoogleMapController controller) {
     _mapController = controller;
+    print('=== GOOGLE MAP CREATED SUCCESSFULLY ===');
     // Se ci sono già dati del percorso, aggiorna la mappa
     if (widget.encodedPolyline != null) {
       _updateRoute();
@@ -220,6 +221,9 @@ class _MapWidgetState extends State<MapWidget> {
   @override
   Widget build(BuildContext context) {
     return GoogleMap(
+      // ID della mappa creata su Google Cloud Console.
+      // Collega questa mappa allo stile cloud-based "mappa_di_prova".
+      cloudMapId: '15a5f409195f86af602a6c32',
       // Callback quando la mappa è pronta
       onMapCreated: _onMapCreated,
       // Posizione iniziale della camera
