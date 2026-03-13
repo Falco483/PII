@@ -19,8 +19,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../models/search_history_item.dart';
 import '../services/directions_service.dart';
 import '../services/navigation_monitor.dart';
+import '../services/search_history_service.dart';
 import '../widgets/map_widget.dart';
 import '../widgets/search_input.dart';
 import '../widgets/directions_list.dart';
@@ -45,6 +47,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Servizio per le direzioni (Directions API)
   final DirectionsService _directionsService = DirectionsService();
+
+  /// Servizio per la memoria delle ultime ricerche.
+  final SearchHistoryService _searchHistoryService = SearchHistoryService();
 
   /// Monitor di navigazione — gestisce tutta la logica di business:
   /// bearing affidabile, trigger velocità zero, analisi strade laterali.
@@ -359,6 +364,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
       // 1. È più preciso (nessuna ambiguità di geocoding)
       // 2. Funziona anche per punti sulla mappa senza indirizzo
       final String destination = '$destLat,$destLng';
+
+      // Registra la ricerca prima della request API.
+      // Vale per qualsiasi sorgente (barra ricerca o tap mappa)
+      // indipendentemente dal successo della chiamata.
+      await _searchHistoryService.recordSearch(
+        SearchHistoryItem(
+          address: destAddress,
+          lat: destLat,
+          lng: destLng,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
 
       // Chiama l'API con percorsi alternativi (TASK 4).
       // Questo metodo:
