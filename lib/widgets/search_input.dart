@@ -28,7 +28,9 @@ library;
 
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../models/search_history_item.dart';
 import '../services/places_service.dart';
+import '../services/search_history_service.dart';
 
 /// Widget per la ricerca della destinazione con autocomplete
 class SearchInput extends StatefulWidget {
@@ -91,6 +93,12 @@ class _SearchInputState extends State<SearchInput> {
   /// Istanza del servizio Places API per le chiamate autocomplete e details
   final PlacesService _placesService = PlacesService();
 
+  /// Servizio per il caricamento della cronologia locale.
+  final SearchHistoryService _searchHistoryService = SearchHistoryService();
+
+  /// Focus node per mostrare la cronologia appena il campo riceve focus.
+  final FocusNode _searchFocusNode = FocusNode();
+
   /// Session token corrente per raggruppare le chiamate API.
   ///
   /// Viene generato alla prima digitazione dell'utente e riutilizzato
@@ -116,10 +124,17 @@ class _SearchInputState extends State<SearchInput> {
   /// richieste per "D", "Du", "Duo".
   Timer? _debounceTimer;
 
-  /// Lista dei suggerimenti ricevuti dall'API Autocomplete.
-  /// Vuota = nessun suggerimento da mostrare.
-  /// Quando l'utente seleziona un suggerimento, la lista viene svuotata.
-  List<PlaceSuggestion> _suggestions = [];
+  /// Lista suggerimenti da API Places.
+  List<PlaceSuggestion> _apiSuggestions = [];
+
+  /// Lista cronologia completa caricata da storage.
+  List<SearchHistoryItem> _historySuggestions = [];
+
+  /// Lista cronologia filtrata sul testo corrente.
+  List<SearchHistoryItem> _filteredHistorySuggestions = [];
+
+  /// Sorgente attuale dei suggerimenti mostrati nella UI.
+  _SuggestionSource _visibleSource = _SuggestionSource.none;
 
   /// Flag di caricamento per l'autocomplete (diverso da widget.isLoading
   /// che è per il calcolo del percorso).
@@ -130,15 +145,36 @@ class _SearchInputState extends State<SearchInput> {
   // ===========================================================================
 
   @override
+  void initState() {
+    super.initState();
+    _searchFocusNode.addListener(_onFocusChanged);
+  }
+
+  @override
   void dispose() {
     // Cancella il timer di debounce per evitare memory leak.
     // Se il timer è ancora attivo quando il widget viene distrutto,
     // il callback del timer tenterà di chiamare setState() su un widget
     // non più montato, causando un errore.
     _debounceTimer?.cancel();
+    _searchFocusNode.removeListener(_onFocusChanged);
+    _searchFocusNode.dispose();
 
     // Chiama il dispose del parent (StatefulWidget)
     super.dispose();
+  }
+
+  void _onFocusChanged() {
+    if (_searchFocusNode.hasFocus) {
+      _loadHistoryAndShow(widget.destinationController.text);
+    } else {
+      _debounceTimer?.cancel();
+      if (!mounted) return;
+      setState(() {
+        _visibleSource = _SuggestionSource.none;
+        _isLoadingSuggestions = false;
+      });
+    }
   }
 
   // ===========================================================================
@@ -157,16 +193,15 @@ class _SearchInputState extends State<SearchInput> {
     // lo cancelliamo per ricominciare il conteggio da zero.
     _debounceTimer?.cancel();
 
-    // --- STEP 2: Controlla il numero minimo di caratteri ---
-    // Se il testo è troppo corto, non inviamo nessuna richiesta.
-    // Svuotiamo anche la lista dei suggerimenti perché eventuali risultati
-    // precedenti non sono più pertinenti per un input così corto.
+    // Mostra cronologia quando l'input e' vuoto.
+    if (value.isEmpty) {
+      _loadHistoryAndShow(value);
+      return;
+    }
+
+    // Sotto soglia API: usa sempre suggerimenti da cronologia filtrata.
     if (value.length < _minInputLength) {
-      // Svuota i suggerimenti se il testo è troppo corto
-      setState(() {
-        _suggestions = [];
-      });
-      // Non creiamo nessun timer: non c'è nulla da cercare
+      _showHistoryForInput(value);
       return;
     }
 
@@ -224,11 +259,76 @@ class _SearchInputState extends State<SearchInput> {
     // Tra la chiamata API e la risposta, l'utente potrebbe aver navigato
     // via dalla schermata, e setState() su un widget non montato è un errore.
     if (mounted) {
+      if (widget.destinationController.text != input) {
+        // Risposta obsoleta: ignora per evitare overwrite della UI corrente.
+        setState(() {
+          _isLoadingSuggestions = false;
+        });
+        return;
+      }
+
       setState(() {
-        _suggestions = suggestions;
         _isLoadingSuggestions = false;
+        if (suggestions.isNotEmpty) {
+          _apiSuggestions = suggestions;
+          _visibleSource = _SuggestionSource.api;
+        } else {
+          _showHistoryForInput(input);
+        }
       });
     }
+  }
+
+  Future<void> _loadHistoryAndShow(String input) async {
+    final history = await _searchHistoryService.loadHistory();
+    if (!mounted) return;
+
+    final filtered = _filterHistory(history, input);
+    setState(() {
+      _historySuggestions = history;
+      _filteredHistorySuggestions = filtered;
+      _apiSuggestions = [];
+      _visibleSource = _searchFocusNode.hasFocus && filtered.isNotEmpty
+          ? _SuggestionSource.history
+          : _SuggestionSource.none;
+      _isLoadingSuggestions = false;
+    });
+  }
+
+  void _showHistoryForInput(String input) {
+    final filtered = _filterHistory(_historySuggestions, input);
+    setState(() {
+      _filteredHistorySuggestions = filtered;
+      _apiSuggestions = [];
+      _visibleSource = _searchFocusNode.hasFocus && filtered.isNotEmpty
+          ? _SuggestionSource.history
+          : _SuggestionSource.none;
+      _isLoadingSuggestions = false;
+    });
+  }
+
+  Future<void> _clearHistorySuggestions() async {
+    await _searchHistoryService.clearHistory();
+
+    if (!mounted) return;
+
+    // Dopo la pulizia ricarichiamo per sincronizzare lista e UI.
+    await _loadHistoryAndShow(widget.destinationController.text);
+  }
+
+  List<SearchHistoryItem> _filterHistory(
+    List<SearchHistoryItem> history,
+    String input,
+  ) {
+    final normalized = input.trim().toLowerCase();
+    final filtered = normalized.isEmpty
+        ? List<SearchHistoryItem>.from(history)
+        : history
+              .where((item) => item.address.toLowerCase().contains(normalized))
+              .toList();
+
+    filtered.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    return filtered;
   }
 
   /// Gestisce la selezione di un suggerimento dall'elenco.
@@ -249,7 +349,8 @@ class _SearchInputState extends State<SearchInput> {
     setState(() {
       _isLoadingSuggestions = true;
       // Chiude immediatamente la lista dei suggerimenti per feedback visivo
-      _suggestions = [];
+      _apiSuggestions = [];
+      _visibleSource = _SuggestionSource.none;
     });
 
     // Imposta il testo del campo con la descrizione del luogo selezionato.
@@ -295,6 +396,33 @@ class _SearchInputState extends State<SearchInput> {
     }
   }
 
+  void _onHistorySuggestionSelected(SearchHistoryItem historyItem) {
+    widget.destinationController.text = historyItem.address;
+
+    _hasActiveSession = false;
+    setState(() {
+      _visibleSource = _SuggestionSource.none;
+      _apiSuggestions = [];
+      _filteredHistorySuggestions = [];
+    });
+
+    widget.onDestinationSelected(
+      historyItem.lat,
+      historyItem.lng,
+      historyItem.address,
+    );
+  }
+
+  bool get _hasVisibleSuggestions {
+    if (_visibleSource == _SuggestionSource.api) {
+      return _apiSuggestions.isNotEmpty;
+    }
+    if (_visibleSource == _SuggestionSource.history) {
+      return _filteredHistorySuggestions.isNotEmpty;
+    }
+    return false;
+  }
+
   // ===========================================================================
   // BUILD UI
   // ===========================================================================
@@ -338,6 +466,9 @@ class _SearchInputState extends State<SearchInput> {
           TextField(
             // Controller passato dal parent per leggere/scrivere il testo
             controller: widget.destinationController,
+            focusNode: _searchFocusNode,
+            // Tap fuori dal campo: rimuove focus, cursore e tastiera.
+            onTapOutside: (_) => FocusScope.of(context).unfocus(),
             // Callback chiamato ad ogni modifica del testo (ogni battitura)
             onChanged: _onTextChanged,
             // Decorazione del campo di testo
@@ -368,10 +499,8 @@ class _SearchInputState extends State<SearchInput> {
                       onPressed: () {
                         // Svuota il campo di testo
                         widget.destinationController.clear();
-                        // Svuota la lista dei suggerimenti
-                        setState(() {
-                          _suggestions = [];
-                        });
+                        // Torna alla cronologia completa se il campo e' attivo.
+                        _loadHistoryAndShow('');
                       },
                     )
                   : null,
@@ -390,10 +519,20 @@ class _SearchInputState extends State<SearchInput> {
             ),
           ),
 
+          // Azione esplicita per svuotare la cronologia locale.
+          if (_historySuggestions.isNotEmpty && _hasVisibleSuggestions)
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: _clearHistorySuggestions,
+                child: const Text('Cancella cronologia'),
+              ),
+            ),
+
           // --- LISTA SUGGERIMENTI ---
           // Mostrata solo se ci sono suggerimenti disponibili.
           // La lista appare direttamente sotto il campo di testo.
-          if (_suggestions.isNotEmpty)
+          if (_hasVisibleSuggestions)
             Container(
               // Margine sopra per separare dal campo di testo
               margin: const EdgeInsets.only(top: 4),
@@ -427,11 +566,16 @@ class _SearchInputState extends State<SearchInput> {
                   // Padding zero per allineare con il campo di testo
                   padding: EdgeInsets.zero,
                   // Numero di suggerimenti da visualizzare
-                  itemCount: _suggestions.length,
+                  itemCount: _visibleSource == _SuggestionSource.api
+                      ? _apiSuggestions.length
+                      : _filteredHistorySuggestions.length,
                   // Builder per ogni elemento della lista
                   itemBuilder: (context, index) {
-                    // Recupera il suggerimento corrente
-                    final suggestion = _suggestions[index];
+                    final bool isApi = _visibleSource == _SuggestionSource.api;
+                    final String title = isApi
+                        ? _apiSuggestions[index].description
+                        : _filteredHistorySuggestions[index].address;
+
                     return ListTile(
                       // Icona posizione a sinistra di ogni suggerimento
                       leading: const Icon(
@@ -440,7 +584,7 @@ class _SearchInputState extends State<SearchInput> {
                       ),
                       // Testo del suggerimento (descrizione del luogo)
                       title: Text(
-                        suggestion.description,
+                        title,
                         style: const TextStyle(fontSize: 14),
                         // Limita a 2 righe e tronca con "..." se troppo lungo
                         maxLines: 2,
@@ -449,7 +593,11 @@ class _SearchInputState extends State<SearchInput> {
                       // Densità compatta per mostrare più suggerimenti
                       dense: true,
                       // Al tap, seleziona questo suggerimento
-                      onTap: () => _onSuggestionSelected(suggestion),
+                      onTap: isApi
+                          ? () => _onSuggestionSelected(_apiSuggestions[index])
+                          : () => _onHistorySuggestionSelected(
+                              _filteredHistorySuggestions[index],
+                            ),
                     );
                   },
                 ),
@@ -479,3 +627,5 @@ class _SearchInputState extends State<SearchInput> {
     );
   }
 }
+
+enum _SuggestionSource { none, history, api }
