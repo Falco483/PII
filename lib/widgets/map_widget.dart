@@ -65,7 +65,7 @@ class _MapWidgetState extends State<MapWidget> {
 
   // Posizione iniziale: centro Italia
   static const LatLng _initialPosition = LatLng(45.4836315, 9.2249375);
-  static const double _initialZoom = 10;
+  static const double _initialZoom = 15;
 
   @override
   void didUpdateWidget(MapWidget oldWidget) {
@@ -90,16 +90,19 @@ class _MapWidgetState extends State<MapWidget> {
 
   /// Aggiorna marker e polyline sulla mappa
   void _updateRoute() {
+    // TASK 5: State Synchronization e Memory Leaks
+    // Ripuliamo esplicitamente le vecchie risorse per forzare lo smaltimento
+    // dei renderer sul layer nativo di Google Maps prima di ricalcolare.
+    _markers.clear();
+    _polylines.clear();
+
     if (widget.originLat == null ||
         widget.originLng == null ||
         widget.destLat == null ||
         widget.destLng == null ||
         widget.encodedPolyline == null) {
-      // Se non ci sono tutti i dati, resetta la mappa
-      setState(() {
-        _markers = {};
-        _polylines = {};
-      });
+      // Se non ci sono tutti i dati, aggiorna la UI vuota
+      setState(() {});
       return;
     }
 
@@ -132,7 +135,11 @@ class _MapWidgetState extends State<MapWidget> {
         polylineId: const PolylineId('route'),
         points: polylinePoints,
         color: Colors.blue,
-        width: 5,
+        width: 6,
+        geodesic: true,
+        jointType: JointType.round,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
       ),
     };
 
@@ -146,35 +153,20 @@ class _MapWidgetState extends State<MapWidget> {
     _fitBounds();
   }
 
-  /// Adatta la vista della mappa per mostrare tutto il percorso
+  /// Centra la vista della mappa sul punto di partenza (anziché allargare a tutto il percorso) con zoom a 15
   void _fitBounds() {
-    if (_mapController == null ||
-        widget.originLat == null ||
-        widget.destLat == null) {
+    if (_mapController == null || widget.originLat == null || widget.originLng == null) {
       return;
     }
 
-    // Calcola i bounds
-    final double swLat = widget.originLat! < widget.destLat!
-        ? widget.originLat!
-        : widget.destLat!;
-    final double swLng = widget.originLng! < widget.destLng!
-        ? widget.originLng!
-        : widget.destLng!;
-    final double neLat = widget.originLat! > widget.destLat!
-        ? widget.originLat!
-        : widget.destLat!;
-    final double neLng = widget.originLng! > widget.destLng!
-        ? widget.originLng!
-        : widget.destLng!;
-
-    final bounds = LatLngBounds(
-      southwest: LatLng(swLat - 0.1, swLng - 0.1),
-      northeast: LatLng(neLat + 0.1, neLng + 0.1),
+    _mapController!.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(
+          target: LatLng(widget.originLat!, widget.originLng!),
+          zoom: _initialZoom,
+        ),
+      ),
     );
-
-    // Anima la camera
-    _mapController!.animateCamera(CameraUpdate.newLatLngBounds(bounds, 50));
   }
 
   /// Decodifica una polyline codificata nel formato di Google

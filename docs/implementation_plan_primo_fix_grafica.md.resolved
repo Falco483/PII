@@ -1,0 +1,39 @@
+# Piano di Ristrutturazione UI Navigazione
+
+L'obiettivo è aggiornare l'interfaccia utente (UI) dell'app di navigazione per farla corrispondere agli screenshot forniti, introducendo tre stati distinti per i pannelli inferiori e superiori.
+
+## Modifiche Proposte
+
+### 1. Definizione degli Stati UI
+In [navigation_screen.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart), introdurremo un enum per gestire lo stato dell'interfaccia utente:
+```dart
+enum NavigationAppState {
+  search,       // Stato iniziale: barra di ricerca, mappa vuota
+  placeSelected,// Luogo selezionato (tap o ricerca): bottom sheet con Indicazioni / Avvia
+  routePreview, // Tap su Indicazioni: percorso mostrato, sheet scorrevole con gli step (icona pedone)
+  navigating    // Tap su Avvia: banner verde in alto persistente, bottom sheet minimo (icona pedone, tempi)
+}
+```
+
+### 2. Aggiornamento Layout in [NavigationScreen](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart#30-36)
+- Modificheremo il layout principale in uno `Stack` a tutto schermo contenente il [MapWidget](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/map_widget.dart#18-55).
+- Gli overlay (Barra di ricerca, Bottom Sheet, Banner in alto per la navigazione) saranno posizionati sopra la mappa in base allo stato corrente.
+- **SearchInput**: Sempre in alto, tranne quando in stato `navigating` (nascosta per fare spazio alle indicazioni).
+- **Pannelli Inferiori (Bottom Sheets)**:
+  - `PlaceSelected`: Un contenitore alla base con le coordinate/info del luogo e i due pulsanti ("Indicazioni" / "Avvia"). Corrisponde alla foto "post_ricerca_luogo".
+  - `RoutePreview`: Uno `DraggableScrollableSheet` contenente il riepilogo e la lista delle indicazioni, un pulsante "Avvia" e l'icona del pedone. Corrisponde alla foto "primo_over". Potrà essere trascinato verso l'alto per vedere tutte le info.
+  - `Navigating`: Un contenitore inferiore con il riepilogo temporale (ETA e distanza) e l'icona del pedone, ma *senza i pulsanti*.
+- **Banner di Navigazione Superiore**: Aggiunto nello stato `Navigating`, che mostra l'istruzione/manovra corrente su uno sfondo verde (sopra in scorrimento). Corrisponde alla foto "in_avvia".
+
+### 3. Refactor dei Widget
+#### [MODIFY] [lib/widgets/directions_list.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/widgets/directions_list.dart)
+- Cambiare l'icona principale da auto (`Icons.directions_car`) a pedone (`Icons.directions_walk`).
+- Adattare il layout (es. rimuovendo l'`Expanded` rigido) in modo che possa essere usato perfettamente all'interno di uno `DraggableScrollableSheet`.
+- Inserire il pulsante "Avvia" integrato nella preview o immediatamente sopra la lista per consentirne l'avvio ("se clicco su indicazioni... aggiungi un pulsante avvia").
+
+#### [MODIFY] [lib/screens/navigation_screen.dart](file:///c:/Users/Antonio/Desktop/pii2/lib/screens/navigation_screen.dart)
+- Implementare il cambio di stato:
+  - Dal set della destinazione -> Vai a `placeSelected`.
+  - Da tap su "Indicazioni" -> Esegui in calcolo percorso se non fatto, mostra path, vai a `routePreview`.
+  - Da tap su "Avvia" -> Avvia navigazione con [NavigationMonitor](file:///c:/Users/Antonio/Desktop/pii2/lib/services/navigation_monitor.dart#98-1040), vai a `navigating`.
+- Gestire il nuovo banner testuale in alto per la navigazione che prende le istruzioni correnti.

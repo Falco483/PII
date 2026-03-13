@@ -15,12 +15,21 @@ class DirectionsList extends StatelessWidget {
   final String totalDistance;
   // Durata totale del percorso
   final String totalDuration;
+  // Se true, non usa Expanded e disabilita lo scroll interno
+  final bool shrinkWrap;
+  // Gestisce lo scroll (es. dentro DraggableScrollableSheet - obsoleto se shrinkWrap=true, ma lo teniamo)
+  final ScrollController? scrollController;
+  // Azione al click del tasto "Avvia"
+  final VoidCallback? onStartPressed;
 
   const DirectionsList({
     super.key,
     required this.steps,
     required this.totalDistance,
     required this.totalDuration,
+    this.shrinkWrap = false,
+    this.scrollController,
+    this.onStartPressed,
   });
 
   @override
@@ -40,22 +49,28 @@ class DirectionsList extends StatelessWidget {
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: shrinkWrap ? MainAxisSize.min : MainAxisSize.max,
         children: [
           // Header con riepilogo totale
           _buildHeader(),
 
           // Lista degli step
-          Expanded(
-            child: ListView.separated(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              itemCount: steps.length,
-              // Separatore tra gli step
-              separatorBuilder: (context, index) => const Divider(height: 1),
-              itemBuilder: (context, index) => _buildStepTile(index),
-            ),
-          ),
+          if (shrinkWrap) _buildList() else Expanded(child: _buildList()),
         ],
       ),
+    );
+  }
+
+  Widget _buildList() {
+    return ListView.separated(
+      controller: scrollController,
+      shrinkWrap: shrinkWrap,
+      physics: shrinkWrap ? const NeverScrollableScrollPhysics() : null,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: steps.length,
+      // Separatore tra gli step
+      separatorBuilder: (context, index) => const Divider(height: 1),
+      itemBuilder: (context, index) => _buildStepTile(index),
     );
   }
 
@@ -69,27 +84,43 @@ class DirectionsList extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Icona auto
-          Icon(Icons.directions_car, color: Colors.blue.shade700, size: 32),
+          // Icona pedone
+          const Icon(Icons.directions_walk, color: Colors.blue, size: 36),
           const SizedBox(width: 12),
           // Informazioni percorso
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                totalDuration,
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.blue.shade900,
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  totalDuration,
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blue.shade900,
+                  ),
+                ),
+                Text(
+                  totalDistance,
+                  style: TextStyle(fontSize: 14, color: Colors.blue.shade700),
+                ),
+              ],
+            ),
+          ),
+          // Pulsante Avvia
+          if (onStartPressed != null)
+            ElevatedButton.icon(
+              onPressed: onStartPressed,
+              icon: const Icon(Icons.navigation),
+              label: const Text('Avvia'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue.shade600,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20),
                 ),
               ),
-              Text(
-                totalDistance,
-                style: TextStyle(fontSize: 14, color: Colors.blue.shade700),
-              ),
-            ],
-          ),
+            ),
         ],
       ),
     );

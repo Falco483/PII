@@ -119,12 +119,44 @@ class NavigationMonitor {
   /// Velocità corrente dell'utente in km/h.
   double _currentSpeed = 0.0;
 
+  /// Accuratezza GPS in metri (Confidence level).
+  double _currentAccuracy = 0.0;
+
+  /// Counter dei tick per il polling dinamico (Adaptive Polling).
+  int _routeCheckTicks = 0;
+
+  /// Counter delle deviazioni consecutive (Strikes).
+  int _consecutiveOffRouteDetects = 0;
+
   /// Bearing raw corrente dal GPS (può essere inaffidabile a basse velocità).
   double _rawBearing = 0.0;
 
   /// Lista degli step del percorso calcolato dalla Directions API.
   /// Viene aggiornata ogni volta che l'utente calcola un nuovo percorso.
   List<DirectionStep> _routeSteps = [];
+
+  // ===========================================================================
+  // STATO PROGRESSIONE PERCORSO — DYNAMIC INSTRUCTIONS
+  // ===========================================================================
+
+  /// Indice dello step attualmente attivo (cioè quello in cui l'utente si
+  /// trova fisicamente). Al calcolo del percorso (o al ricalcolo) parte
+  /// sempre da 0 (il primo step del percorso).
+  ///
+  /// Questo indice viene aumentato man mano che l'utente raggiunge il
+  /// punto finale (`endLocation`) dello step corrente.
+  int _currentStepIndex = 0;
+
+  /// Contatore degli aggiornamenti GPS consecutivi in cui l'utente risulta
+  /// vicino (< 15 metri) all'incrocio di destinazione dello step corrente.
+  /// 
+  /// PERCHÉ SERVE QUESTO CONTATORE:
+  /// Il GPS non è perfetto. Un singolo sbalzo temporaneo del segnale (es. 
+  /// riflesso su un palazzo) potrebbe porre falsamente l'utente a 5m 
+  /// dall'incrocio per un solo istante. Per evitare che l'interfaccia 
+  /// avanzi prematuramente d'istruzione, richiediamo che la vicinanza sia
+  /// "confermata" per almeno N aggiornamenti GPS consecutivi (noi usiamo 2).
+  int _consecutiveCloseUpdates = 0;
 
   // ===========================================================================
   // STATO PERCORSI — TASK 2
@@ -235,6 +267,18 @@ class NavigationMonitor {
   final ValueNotifier<RouteData?> activeRouteNotifier =
       ValueNotifier<RouteData?>(null);
 
+  /// Notifier che comunica in tempo reale alla UI l'indice dello step corrente.
+  ///
+  /// Questo notifier emette solo un numero intero (`int`), che rappresenta 
+  /// quale passo (step) l'utente sta percorrendo. Viene usato dal NavigationScreen
+  /// per cambiare l'istruzione in alto (es. "Svolta a destra tra 50m") 
+  /// man mano che l'utente si sposta fisicamente.
+  ///
+  /// Usiamo un notifier separato (anziché forzare un setState enorme di tutto 
+  /// lo schermo) per migliorare le performance. Solo il banner in alto 
+  /// ascolterà questo valore per aggiornarsi fluidamente.
+  final ValueNotifier<int> currentStepNotifier = ValueNotifier<int>(0);
+
   // ===========================================================================
   // SERVIZI
   // ===========================================================================
@@ -290,14 +334,16 @@ class NavigationMonitor {
     double lat,
     double lng,
     double speedKmH,
-    double rawBearing,
-  ) {
+    double rawBearing, [
+    double accuracy = 0.0,
+  ]) {
     // Salva i valori correnti. Queste variabili sono usate dal timer del
     // bearing (ogni 5s) e dallo snapshot (quando il timer 10s scade).
     _currentLat = lat;
     _currentLng = lng;
     _currentSpeed = speedKmH;
     _rawBearing = rawBearing;
+    _currentAccuracy = accuracy;
 
     // --- LOGICA TRIGGER VELOCITÀ ZERO (Step 2.1) ---
     //
@@ -321,12 +367,76 @@ class NavigationMonitor {
         _startZeroSpeedCountdown();
       }
     } else {
-      // L'utente si è rimesso in moto. Cancella il countdown se era attivo.
+      // Se l'utente si è rimesso in moto. Cancella il countdown se era attivo.
       // Questo gestisce il caso classico: l'utente si ferma al semaforo,
       // il semaforo diventa verde dopo 5 secondi, l'utente riparte.
       // Senza questa cancellazione, il timer continuerebbe a contare e
       // l'analisi partirebbe anche se l'utente è in movimento.
       _cancelZeroSpeedCountdown();
+    }
+
+    // --- LOGICA AVANZAMENTO STEP DINAMICO ---
+    //
+    // Questa procedura controlla se l'utente sta raggiungendo la fine 
+    // della via in cui si trova, per dirgli di compiere la svolta successiva.
+    // Viene eseguita ad ogni singolo aggiornamento GPS, fintanto che
+    // ci sono step validi ed è attiva una rotta.
+    if (_activeRoute != null && _routeSteps.isNotEmpty) {
+      // 1. Prendi lo step attuale
+      // Leggiamo fisicamente dalla lista lo step in base all'indice.
+      // Se _currentStepIndex è 0, stiamo guardando la primissima mossa.
+      final currentStep = _routeSteps[_currentStepIndex];
+
+      // 2. Calcola la distanza
+      // Usiamo la funzione geodetica (che legge la forma del pianeta curvo)
+      // per capire quanti metri passano tra la macchina (lat, lng)
+      // e le coordinate di fine via (endLat e endLng di currentStep).
+      final double distanceToIntersection = distanceBetween(
+        lat,
+        lng,
+        currentStep.endLat,
+        currentStep.endLng,
+      );
+
+      // 3. Controllo Prossimità (15 metri)
+      // Perché 15 metri? Perché non vogliamo aspettare che tocchi 0m
+      // perfetto centrale dell'incrocio, ma vogliamo che ci ronzii
+      // sufficientemente vicino.
+      if (distanceToIntersection < 25.0) {
+        // L'utente è nei 25 metri. Incrementiamo gli "Strikes" (conferme)
+        _consecutiveCloseUpdates++;
+
+        // Richiediamo che l'utente venga letto DENTRO questo raggio
+        // per almeno 1 frame GPS (era 2, ma a velocità alte si rischia di "saltarlo").
+        if (_consecutiveCloseUpdates >= 1) {
+          // CONFERMATO: L'utente sta svoltando all'incrocio.
+          // Azzeriamo le conferme per prepararci al prossimo incrocio.
+          _consecutiveCloseUpdates = 0;
+
+          // Assicuriamoci di non sfondare il limite massimo degli array
+          // (per evitare crash "Index out of range"). Se l'indice + 1 è
+          // minore del totoale... 
+          if (_currentStepIndex + 1 < _routeSteps.length) {
+            // Avanziamo l'indice logico di uno
+            _currentStepIndex++;
+
+            // E lanciamo un segnale (Notify) ai Widget ascoltatori (il Top Banner)
+            // dicendogli: "Ehi UI, il nuovo numero step è questo, disegnati con la nuova istruzione!"
+            currentStepNotifier.value = _currentStepIndex;
+          } else {
+            // Se sono entrato qui, non ho più step successivi. 
+            // Significa che questo era esplicitamente l'ultimo incrocio 
+            // prima dell'arrivo a destinazione finale!
+            print("🎉 Navigazione ultimata, l'utente è arrivato!");
+            // Volendo qui potremmo fare trigger per mostrare "Arrivati" sull'UI.
+          }
+        }
+      } else {
+        // L'utente è a >15m di distanza. 
+        // Lontano per natura, o allontanato/spostato irregolarmente.
+        // Resettiamo sempre a zero le false percezioni consecutive.
+        _consecutiveCloseUpdates = 0;
+      }
     }
   }
 
@@ -415,6 +525,13 @@ class NavigationMonitor {
     _activeRoute = null;
     _alternativeRoutes = [];
     _originalDestination = null;
+    _consecutiveOffRouteDetects = 0;
+    _routeCheckTicks = 0;
+    
+    // Resetta lo stato di tracciamento degli Step
+    _currentStepIndex = 0;
+    _consecutiveCloseUpdates = 0;
+    currentStepNotifier.value = 0;
 
     // Notifica la UI che non c'è più un percorso attivo
     activeRouteNotifier.value = null;
@@ -822,6 +939,24 @@ class NavigationMonitor {
     final double lat = _currentLat!;
     final double lng = _currentLng!;
 
+    // TASK 5 - Filtro Signal Drift basato sull'accuratezza GPS
+    if (_currentAccuracy > 30.0) {
+      print('⚠️ Segnale GPS debole (accuracy: ${_currentAccuracy}m). Ignoro controllo percorso.');
+      return;
+    }
+
+    // TASK 5 - Adaptive Polling basato sulla velocità
+    _routeCheckTicks++;
+    int requiredTicks = 1; // >60km/h: ogni 2 secondi (1 tick)
+    if (_currentSpeed <= 15.0) {
+      requiredTicks = 3; // <=15km/h o fermo: ogni 6 secondi (3 tick)
+    } else if (_currentSpeed <= 60.0) {
+      requiredTicks = 2; // 15-60km/h: ogni 4 secondi (2 tick)
+    }
+
+    if (_routeCheckTicks < requiredTicks) return;
+    _routeCheckTicks = 0; // Resetta i tick e procedi al controllo
+
     // =========================================================================
     // TASK 2a — CONFRONTO POSIZIONE CON PERCORSO ATTIVO
     // =========================================================================
@@ -842,6 +977,7 @@ class NavigationMonitor {
 
     // Se l'utente è sul percorso, tutto OK. Nessuna azione necessaria.
     if (onActiveRoute) {
+      _consecutiveOffRouteDetects = 0; // Azzera strike di deviazione
       return; // ← L'utente segue il percorso, aspettiamo il prossimo tick
     }
 
@@ -850,10 +986,19 @@ class NavigationMonitor {
     // =========================================================================
     //
     // La distanza minima dalla polyline attiva è > 40 metri.
+    
+    // TASK 5 - Strikes System (Verifica su più letture)
+    _consecutiveOffRouteDetects++;
+    if (_consecutiveOffRouteDetects < 2) {
+      print('⚠️ Deviazione rilevata (Strike $_consecutiveOffRouteDetects). Attendo conferma...');
+      return;
+    }
+    _consecutiveOffRouteDetects = 0; // Azzera prima del varo ricalcolo
+
     // Ora controlliamo se è finito su uno dei percorsi alternativi.
 
-    // Log per debugging: segnala la deviazione
-    print('⚠️ Deviazione rilevata! L\'utente è fuori dal percorso attivo.');
+    // Log per debugging: segnala la deviazione confermata
+    print('⚠️ Deviazione confermata! L\'utente è fuori dal percorso attivo.');
 
     // =========================================================================
     // TASK 2b — CONTROLLO PERCORSI ALTERNATIVI
@@ -901,6 +1046,12 @@ class NavigationMonitor {
 
         // Aggiorna gli step del percorso per il check dei waypoint di svolta
         _routeSteps = alternativeRoute.steps;
+
+        // Siccome ci siamo agganciati magicamente al percorso di scorta, 
+        // azzeriamo tutti i conteggi per fargli ricalcolare dal rigo 0 le sue istruzioni
+        _currentStepIndex = 0;
+        _consecutiveCloseUpdates = 0;
+        currentStepNotifier.value = 0;
 
         // Notifica la UI che il percorso attivo è cambiato.
         // La NavigationScreen si occuperà di aggiornare:
