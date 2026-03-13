@@ -467,7 +467,8 @@ class _SearchInputState extends State<SearchInput> {
             // Controller passato dal parent per leggere/scrivere il testo
             controller: widget.destinationController,
             focusNode: _searchFocusNode,
-            // Tap fuori dal campo: rimuove focus, cursore e tastiera.
+            // Tap fuori dalla barra: chiude tastiera e rimuove il cursore.
+            // I controlli avvolti in TextFieldTapRegion sono esclusi da questo evento.
             onTapOutside: (_) => FocusScope.of(context).unfocus(),
             // Callback chiamato ad ogni modifica del testo (ogni battitura)
             onChanged: _onTextChanged,
@@ -521,11 +522,13 @@ class _SearchInputState extends State<SearchInput> {
 
           // Azione esplicita per svuotare la cronologia locale.
           if (_historySuggestions.isNotEmpty && _hasVisibleSuggestions)
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(
-                onPressed: _clearHistorySuggestions,
-                child: const Text('Cancella cronologia'),
+            TextFieldTapRegion(
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: _clearHistorySuggestions,
+                  child: const Text('Cancella cronologia'),
+                ),
               ),
             ),
 
@@ -533,73 +536,77 @@ class _SearchInputState extends State<SearchInput> {
           // Mostrata solo se ci sono suggerimenti disponibili.
           // La lista appare direttamente sotto il campo di testo.
           if (_hasVisibleSuggestions)
-            Container(
-              // Margine sopra per separare dal campo di testo
-              margin: const EdgeInsets.only(top: 4),
-              // Decorazione della lista: bordo arrotondato con ombra
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey.shade300),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.1),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-              // Altezza massima della lista per evitare che occupi
-              // troppo spazio sullo schermo. Se ci sono più di ~4 risultati,
-              // l'utente può scrollare.
-              constraints: const BoxConstraints(maxHeight: 200),
-              // ClipRRect per applicare il borderRadius anche ai figli
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                // ListView.builder crea i widget solo quando sono visibili
-                // (lazy loading). Anche se avessimo 100 suggerimenti,
-                // renderebbe solo quelli visibili nello scrollview.
-                child: ListView.builder(
-                  // Shrinkwrap: la lista si adatta alla dimensione dei figli
-                  // invece di occupare tutto lo spazio disponibile
-                  shrinkWrap: true,
-                  // Padding zero per allineare con il campo di testo
-                  padding: EdgeInsets.zero,
-                  // Numero di suggerimenti da visualizzare
-                  itemCount: _visibleSource == _SuggestionSource.api
-                      ? _apiSuggestions.length
-                      : _filteredHistorySuggestions.length,
-                  // Builder per ogni elemento della lista
-                  itemBuilder: (context, index) {
-                    final bool isApi = _visibleSource == _SuggestionSource.api;
-                    final String title = isApi
-                        ? _apiSuggestions[index].description
-                        : _filteredHistorySuggestions[index].address;
+            TextFieldTapRegion(
+              child: Container(
+                // Margine sopra per separare dal campo di testo
+                margin: const EdgeInsets.only(top: 4),
+                // Decorazione della lista: bordo arrotondato con ombra
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.grey.shade300),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.1),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                // Altezza massima della lista per evitare che occupi
+                // troppo spazio sullo schermo. Se ci sono più di ~4 risultati,
+                // l'utente può scrollare.
+                constraints: const BoxConstraints(maxHeight: 200),
+                // ClipRRect per applicare il borderRadius anche ai figli
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  // ListView.builder crea i widget solo quando sono visibili
+                  // (lazy loading). Anche se avessimo 100 suggerimenti,
+                  // renderebbe solo quelli visibili nello scrollview.
+                  child: ListView.builder(
+                    // Shrinkwrap: la lista si adatta alla dimensione dei figli
+                    // invece di occupare tutto lo spazio disponibile
+                    shrinkWrap: true,
+                    // Padding zero per allineare con il campo di testo
+                    padding: EdgeInsets.zero,
+                    // Numero di suggerimenti da visualizzare
+                    itemCount: _visibleSource == _SuggestionSource.api
+                        ? _apiSuggestions.length
+                        : _filteredHistorySuggestions.length,
+                    // Builder per ogni elemento della lista
+                    itemBuilder: (context, index) {
+                      final bool isApi =
+                          _visibleSource == _SuggestionSource.api;
+                      final String title = isApi
+                          ? _apiSuggestions[index].description
+                          : _filteredHistorySuggestions[index].address;
 
-                    return ListTile(
-                      // Icona posizione a sinistra di ogni suggerimento
-                      leading: const Icon(
-                        Icons.location_on_outlined,
-                        color: Colors.grey,
-                      ),
-                      // Testo del suggerimento (descrizione del luogo)
-                      title: Text(
-                        title,
-                        style: const TextStyle(fontSize: 14),
-                        // Limita a 2 righe e tronca con "..." se troppo lungo
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      // Densità compatta per mostrare più suggerimenti
-                      dense: true,
-                      // Al tap, seleziona questo suggerimento
-                      onTap: isApi
-                          ? () => _onSuggestionSelected(_apiSuggestions[index])
-                          : () => _onHistorySuggestionSelected(
-                              _filteredHistorySuggestions[index],
-                            ),
-                    );
-                  },
+                      return ListTile(
+                        // Icona posizione a sinistra di ogni suggerimento
+                        leading: const Icon(
+                          Icons.location_on_outlined,
+                          color: Colors.grey,
+                        ),
+                        // Testo del suggerimento (descrizione del luogo)
+                        title: Text(
+                          title,
+                          style: const TextStyle(fontSize: 14),
+                          // Limita a 2 righe e tronca con "..." se troppo lungo
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        // Densità compatta per mostrare più suggerimenti
+                        dense: true,
+                        // Al tap, seleziona questo suggerimento
+                        onTap: isApi
+                            ? () =>
+                                  _onSuggestionSelected(_apiSuggestions[index])
+                            : () => _onHistorySuggestionSelected(
+                                _filteredHistorySuggestions[index],
+                              ),
+                      );
+                    },
+                  ),
                 ),
               ),
             ),
