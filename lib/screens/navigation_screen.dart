@@ -19,8 +19,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../models/search_history_item.dart';
 import '../services/directions_service.dart';
 import '../services/navigation_monitor.dart';
+import '../services/search_history_service.dart';
 import '../widgets/map_widget.dart';
 import '../widgets/search_input.dart';
 import '../widgets/directions_list.dart';
@@ -54,6 +56,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Servizio per le direzioni (Directions API)
   final DirectionsService _directionsService = DirectionsService();
 
+  /// Servizio per la memoria delle ultime ricerche.
+  final SearchHistoryService _searchHistoryService = SearchHistoryService();
+
   /// Monitor di navigazione — gestisce tutta la logica di business:
   /// bearing affidabile, trigger velocità zero, analisi strade laterali.
   /// Viene inizializzato in initState() e distrutto in dispose().
@@ -83,6 +88,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Messaggio di errore (null se nessun errore)
   String? _errorMessage;
+
+  /// Durata di visibilità del banner errore.
+  static const Duration _errorBannerDuration = Duration(seconds: 2);
+
+  /// Timer per nascondere automaticamente il banner errore.
+  Timer? _errorBannerTimer;
 
   // ===========================================================================
   // STATO GPS — VARIABILI IN TEMPO REALE
@@ -303,6 +314,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Cancella lo stream GPS per evitare memory leak e consumo batteria
     _positionStream?.cancel();
 
+    // Cancella il timer del banner errore.
+    _errorBannerTimer?.cancel();
+
     // Rimuove i listener prima di distruggere il monitor
     _navigationMonitor.overlayNotifier.removeListener(_onOverlayChanged);
 
@@ -318,6 +332,22 @@ class _NavigationScreenState extends State<NavigationScreen> {
     _destinationController.dispose();
 
     super.dispose();
+  }
+
+  void _showTemporaryError(String message) {
+    _errorBannerTimer?.cancel();
+
+    if (!mounted) return;
+    setState(() {
+      _errorMessage = message;
+    });
+
+    _errorBannerTimer = Timer(_errorBannerDuration, () {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = null;
+      });
+    });
   }
 
   // ===========================================================================
@@ -398,14 +428,13 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Senza la posizione dell'utente, non possiamo calcolare un percorso
     // perché non sappiamo da dove partire.
     if (_currentLat == null || _currentLng == null) {
-      setState(() {
-        _errorMessage =
-            'Posizione GPS non disponibile. '
-            'Attendi il fix GPS e riprova.';
-      });
+      _showTemporaryError(
+        'Posizione GPS non disponibile. Attendi il fix GPS e riprova.',
+      );
       return;
     }
 
+    _errorBannerTimer?.cancel();
     // Imposta lo stato di caricamento
     setState(() {
       _isLoading = true;
@@ -423,6 +452,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
       // 2. Funziona anche per punti sulla mappa senza indirizzo
       final String destination = '$destLat,$destLng';
 
+      // Registra la ricerca prima della request API.
+      // Vale per qualsiasi sorgente (barra ricerca o tap mappa)
+      // indipendentemente dal successo della chiamata.
+      await _searchHistoryService.recordSearch(
+        SearchHistoryItem(
+          address: destAddress,
+          lat: destLat,
+          lng: destLng,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+
       // Chiama l'API con percorsi alternativi (TASK 4).
       // Questo metodo:
       // 1. Invia la richiesta con alternatives=true
@@ -435,9 +476,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
       );
 
       // Aggiorna lo stato con il risultato
-      setState(() {
-        _isLoading = false;
-        if (result != null) {
+      if (result != null) {
+        setState(() {
+          _isLoading = false;
+
           // Salva il risultato completo con tutti i percorsi (TASK 4)
           _allRoutesResult = result;
 
@@ -454,21 +496,24 @@ class _NavigationScreenState extends State<NavigationScreen> {
             destLng: result.destLng,
           );
           _errorMessage = null;
+        });
 
-          // TASK 5: Avvia la navigazione nel monitor.
-          // Usa destAddress per il ricalcolo futuro (Task 2c del monitor)
-          // perché se l'utente devia, la destinazione deve restare la stessa.
-          _navigationMonitor.startNavigation(result, destAddress);
-        } else {
-          _errorMessage = 'Impossibile calcolare il percorso. Riprova.';
-        }
-      });
+        // TASK 5: Avvia la navigazione nel monitor.
+        // Usa destAddress per il ricalcolo futuro (Task 2c del monitor)
+        // perché se l'utente devia, la destinazione deve restare la stessa.
+        _navigationMonitor.startNavigation(result, destAddress);
+      } else {
+        setState(() {
+          _isLoading = false;
+        });
+        _showTemporaryError('Impossibile calcolare il percorso. Riprova.');
+      }
     } catch (e) {
       // Gestisce eventuali errori
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Errore: $e';
       });
+      _showTemporaryError('Errore: $e');
     }
   }
 
@@ -488,6 +533,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
   void _onDestinationSelected(double lat, double lng, String address) {
     // Log per debugging
     print('Destinazione selezionata da ricerca: $address ($lat, $lng)');
+
+    // Salva subito in cronologia (fire-and-forget, dedup gestito dal service)
+    _searchHistoryService
+        .recordSearch(
+          SearchHistoryItem(
+            address: address,
+            lat: lat,
+            lng: lng,
+            timestamp: DateTime.now().millisecondsSinceEpoch,
+          ),
+        )
+        .catchError((e) => print('Errore salvataggio cronologia: $e'));
 
     setState(() {
       _selectedDestinationAddress = address;
@@ -865,21 +922,25 @@ class _NavigationScreenState extends State<NavigationScreen> {
             builder: (context, currentStepIndex, child) {
               // 1. Prendi la lista di tutti gli step calcolati attualmente
               final steps = _directionsResult?.steps ?? [];
-              
+
               // Se per qualche motivo gli step sono vuoti, mostra un layout di fallback
               if (steps.isEmpty) {
                 return _buildFallbackBanner();
               }
 
               // 2. Sicurezza: Evita crash se l'indice impazzisce oltre la lunghezza dell'array
-              final safeIndex = currentStepIndex < steps.length ? currentStepIndex : steps.length - 1;
+              final safeIndex = currentStepIndex < steps.length
+                  ? currentStepIndex
+                  : steps.length - 1;
 
               // 3. Estrai lo step CORRENTE (quello da mostrare in grande)
               final currentStep = steps[safeIndex];
 
               // 4. Estrai lo step SUCCESSIVO (se esiste) per darne un'anteprima,
               // esattamente come fa Google Maps ("poi svolta a...")
-              final nextStep = (safeIndex + 1 < steps.length) ? steps[safeIndex + 1] : null;
+              final nextStep = (safeIndex + 1 < steps.length)
+                  ? steps[safeIndex + 1]
+                  : null;
 
               return Container(
                 color: Colors.green.shade800,
@@ -890,14 +951,19 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   right: 16,
                 ),
                 child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start, // Allinea gli elementi in alto
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start, // Allinea gli elementi in alto
                   children: [
                     // Icona della Manovra Corrente
                     // Qui al posto di freccia_su mettiamo un placeholder dinamico pronto
                     // per essere integrato con icone mappate su "maneuver" (es. Icons.turn_right).
                     const Padding(
                       padding: EdgeInsets.only(top: 4.0),
-                      child: Icon(Icons.directions, color: Colors.white, size: 40),
+                      child: Icon(
+                        Icons.directions,
+                        color: Colors.white,
+                        size: 40,
+                      ),
                     ),
                     const SizedBox(width: 16),
                     Expanded(
@@ -906,7 +972,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
                         children: [
                           // TESTO PRINCIPALE (Istruzione Corrente)
                           Text(
-                            currentStep.instruction, // "Svolta a destra su Via Roma"
+                            currentStep
+                                .instruction, // "Svolta a destra su Via Roma"
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 22,
@@ -914,12 +981,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
                             ),
                           ),
                           const SizedBox(height: 4),
-                          
+
                           // DISTANZA (Istruzione Corrente)
                           Text(
                             currentStep.distance, // "1.2 km"
                             style: TextStyle(
-                              color: Colors.white.withAlpha(220), // deprecated warning fix for withOpacity
+                              color: Colors.white.withAlpha(
+                                220,
+                              ), // deprecated warning fix for withOpacity
                               fontSize: 16,
                               fontWeight: FontWeight.w500,
                             ),
@@ -932,12 +1001,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
                               padding: const EdgeInsets.only(top: 12),
                               decoration: BoxDecoration(
                                 border: Border(
-                                  top: BorderSide(color: Colors.white.withAlpha(50)),
+                                  top: BorderSide(
+                                    color: Colors.white.withAlpha(50),
+                                  ),
                                 ),
                               ),
                               child: Row(
                                 children: [
-                                  Icon(Icons.subdirectory_arrow_right, color: Colors.white.withAlpha(150), size: 16),
+                                  Icon(
+                                    Icons.subdirectory_arrow_right,
+                                    color: Colors.white.withAlpha(150),
+                                    size: 16,
+                                  ),
                                   const SizedBox(width: 8),
                                   Expanded(
                                     child: Text(
@@ -954,7 +1029,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                                 ],
                               ),
                             ),
-                          ]
+                          ],
                         ],
                       ),
                     ),
@@ -965,7 +1040,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
                         // Ferma navigazione
                         _navigationMonitor.stopNavigation();
                         setState(() {
-                          _appState = NavigationAppState.routePreview; // o ricerca
+                          _appState =
+                              NavigationAppState.routePreview; // o ricerca
                         });
                       },
                     ),
@@ -1032,7 +1108,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     );
   }
 
-  /// Metodo Helper per estrarre la grafica di "Fallback" quando non c'è una rotta 
+  /// Metodo Helper per estrarre la grafica di "Fallback" quando non c'è una rotta
   /// (usato se il _navigationMonitor non ha ancora sincronizzato i percorsi).
   Widget _buildFallbackBanner() {
     return Container(
