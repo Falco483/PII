@@ -81,8 +81,8 @@ class RoadsService {
   static const String _baseUrl = 'https://roads.googleapis.com/v1/nearestRoads';
 
   /// Numero massimo di tentativi in caso di errore HTTP.
-  /// Dopo il primo fallimento si ritenta una volta sola.
-  static const int _maxRetries = 1;
+  /// Dopo il primo fallimento si ritenta fino a 3 volte con exponential backoff.
+  static const int _maxRetries = 3;
 
   /// Trova le strade più vicine ai punti forniti.
   ///
@@ -117,10 +117,11 @@ class RoadsService {
     // Tentativo con retry: prova fino a _maxRetries + 1 volte
     for (int attempt = 0; attempt <= _maxRetries; attempt++) {
       try {
-        // Costruisce l'URL completo con i parametri query
-        final uri = Uri.parse(
-          _baseUrl,
-        ).replace(queryParameters: {'points': pointsParam, 'key': apiKey});
+        // Costruisce l'URL completo con la stringa interpolate.
+        // EVITIAMO Uri.replace(queryParameters:) perché codifica il pipe (|)
+        // come %7C, causando un errore HTTP 400 Bad Request sulla Roads API
+        // che al momento ha un rate di fallimento del 100%.
+        final uri = Uri.parse('$_baseUrl?points=$pointsParam&key=$apiKey');
 
         // Effettua la chiamata HTTP GET.
         // NOTA: questa chiamata è ASINCRONA — il codice si "ferma" qui
@@ -143,8 +144,9 @@ class RoadsService {
             ' (tentativo ${attempt + 1}/${_maxRetries + 1})',
           );
           if (attempt < _maxRetries) {
-            // Aspetta 1 secondo prima di riprovare per dare tempo al server
-            await Future.delayed(const Duration(seconds: 1));
+            // Aspetta con exponential backoff prima di riprovare (1s, 2s, 4s...)
+            final delayMs = 1000 * (1 << attempt);
+            await Future.delayed(Duration(milliseconds: delayMs));
             continue; // Riprova
           }
           return null; // Tutti i tentativi esauriti
@@ -165,7 +167,8 @@ class RoadsService {
           ' (tentativo ${attempt + 1}/${_maxRetries + 1})',
         );
         if (attempt < _maxRetries) {
-          await Future.delayed(const Duration(seconds: 1));
+          final delayMs = 1000 * (1 << attempt);
+          await Future.delayed(Duration(milliseconds: delayMs));
           continue;
         }
         return null;

@@ -4,7 +4,9 @@
 /// parsifica la risposta JSON per estrarre il percorso e le indicazioni.
 library;
 
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 
 /// Modello per un singolo step delle indicazioni
@@ -62,9 +64,9 @@ class DirectionStep {
   /// }
   factory DirectionStep.fromJson(Map<String, dynamic> json) {
     return DirectionStep(
-      // Rimuove i tag HTML dalle istruzioni (la API restituisce HTML)
+      // Rimuove i tag HTML e personalizza il testo dell'istruzione
       // Il testo pulito è quello che verrà mostrato sull'overlay
-      instruction: _removeHtmlTags(json['html_instructions'] ?? ''),
+      instruction: _cleanInstruction(json['html_instructions'] ?? ''),
       distance: json['distance']['text'] ?? '',
       duration: json['duration']['text'] ?? '',
       startLat: json['start_location']['lat'].toDouble(),
@@ -76,10 +78,27 @@ class DirectionStep {
     );
   }
 
-  /// Rimuove i tag HTML da una stringa
-  static String _removeHtmlTags(String html) {
-    // Regex per rimuovere tutti i tag HTML
-    return html.replaceAll(RegExp(r'<[^>]*>'), '');
+  /// Rimuove i tag HTML e adatta il testo dell'istruzione
+  static String _cleanInstruction(String html) {
+    // 1. Rimuove tutti i log HTML (es. <b>, </b>, <div ...>)
+    String text = html.replaceAll(RegExp(r'<[^>]*>'), '');
+    
+    // 2. Personalizzazione specifica richiesta dall'utente:
+    
+    // "Procedi in direzione nord su" -> "Procedi in diritto su"
+    text = text.replaceAll(RegExp(r'Procedi in direzione (nord|sud|est|ovest|nord-est|nord-ovest|sud-est|sud-ovest)(-est|-ovest)?\b', caseSensitive: false), 'Procedi in diritto');
+    
+    // "Fai un'inversione a U" -> "Torna indietro "
+    text = text.replaceAll(RegExp(r"Fai un'inversione a U\b", caseSensitive: false), 'Torna indietro ');
+    
+    // "Svolta a destra per rimanere su Via Roma" -> "Svolta a destra"
+    text = text.replaceAll(RegExp(r' per rimanere su .*', caseSensitive: false), '');
+    
+    // Assicuriamoci che Svolta e Mantieni non venissero sovrascritte dalle vecchie regex
+    // (L'utente ha chiesto esplicitamente "Svolta a destra", ecc. quindi lo lasciamo invariato
+    // invece di scambiarlo in "Gira" come nella modifica precedente)
+    
+    return text;
   }
 }
 
@@ -215,6 +234,26 @@ class DirectionsService {
   static const String baseUrl =
       'https://maps.googleapis.com/maps/api/directions/json';
 
+  /// Esegue la chiamata HTTP con Exponential Backoff
+  Future<http.Response> _executeWithRetry(Uri uri, {int maxRetries = 3}) async {
+    int retryCount = 0;
+    while (true) {
+      try {
+        final response = await http.get(uri);
+        if (response.statusCode == 429 || response.statusCode >= 500) {
+          throw HttpException('Status code fallito: ${response.statusCode}');
+        }
+        return response;
+      } catch (e) {
+        if (retryCount >= maxRetries) rethrow;
+        retryCount++;
+        final delayMs = 1000 * (1 << (retryCount - 1)); // 1s, 2s, 4s
+        print('⚠️ Errore API: $e. Ritento in ${delayMs / 1000}s (tentativo $retryCount/$maxRetries)...');
+        await Future.delayed(Duration(milliseconds: delayMs));
+      }
+    }
+  }
+
   /// Calcola il percorso tra origine e destinazione
   ///
   /// [origin] - Indirizzo o coordinate di partenza (es. "Roma, Italia")
@@ -238,8 +277,8 @@ class DirectionsService {
         },
       );
 
-      // Esegue la chiamata HTTP GET
-      final response = await http.get(uri);
+      // Esegue la chiamata HTTP GET con retry
+      final response = await _executeWithRetry(uri);
 
       // Log della richiesta per debugging
       print('=== DIRECTIONS API REQUEST ===');
@@ -335,8 +374,8 @@ class DirectionsService {
         },
       );
 
-      // Esegue la chiamata HTTP GET alla Directions API
-      final response = await http.get(uri);
+      // Esegue la chiamata HTTP GET alla Directions API con retry
+      final response = await _executeWithRetry(uri);
 
       // Log della richiesta per debugging
       print('=== DIRECTIONS WITH ALTERNATIVES API REQUEST ===');

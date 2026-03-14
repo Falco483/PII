@@ -28,6 +28,14 @@ import '../widgets/search_input.dart';
 import '../widgets/directions_list.dart';
 import '../widgets/navigation_overlay.dart';
 
+/// Stati dell'interfaccia utente (UI)
+enum NavigationAppState {
+  search, // Barra di ricerca visibile, mappa vuota
+  placeSelected, // Luogo selezionato: mostriamo il bottom sheet con Indicationi/Avvia
+  routePreview, // "Indicazioni" cliccato: mostriamo sheet scorrevole e tracciamo il percorso
+  navigating, // "Avvia" cliccato: navigazione attiva, UI minimale con banner superiore
+}
+
 /// Schermata principale per la navigazione
 class NavigationScreen extends StatefulWidget {
   const NavigationScreen({super.key});
@@ -68,6 +76,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Risultato completo con tutti i percorsi alternativi (TASK 1).
   /// Usato per passare i percorsi al NavigationMonitor.
   AllRoutesResult? _allRoutesResult;
+
+  /// Indirizzo / Testo della destinazione selezionata.
+  String? _selectedDestinationAddress;
+
+  /// Stato attuale della UI
+  NavigationAppState _appState = NavigationAppState.search;
 
   /// Flag di caricamento per il calcolo del percorso
   bool _isLoading = false;
@@ -284,6 +298,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
             _currentLng!,
             _currentSpeed,
             _rawBearing,
+            position.accuracy, // TASK 5: Inviato confidence level
           );
         });
   }
@@ -311,8 +326,56 @@ class _NavigationScreenState extends State<NavigationScreen> {
   }
 
   // ===========================================================================
-  // LOGICA CALCOLO PERCORSO
+  // LOGICA CALCOLO E TRANSIZIONE STATI
   // ===========================================================================
+
+  /// Inizia il calcolo del percorso quando l'utente sceglie "Indicazioni".
+  /// Prima di questo metodo, siamo nello stato [placeSelected].
+  Future<void> _calculateRouteForSelectedPlace() async {
+    final lat = _allRoutesResult?.destLat ?? _directionsResult?.destLat;
+    final lng = _allRoutesResult?.destLng ?? _directionsResult?.destLng;
+    if (lat == null || lng == null) return;
+
+    await _calculateRouteFromCoordinates(
+      lat,
+      lng,
+      _selectedDestinationAddress ?? '',
+    );
+
+    // Se ha calcolato correttamente
+    if (_directionsResult != null) {
+      setState(() {
+        _appState = NavigationAppState.routePreview;
+      });
+    }
+  }
+
+  /// Avvia la navigazione reale (sia dal route preview sia diretti dal placeSelected)
+  Future<void> _startActiveNavigation() async {
+    // Se non abbiamo ancora un percorso (es. ha cliccato Avvia subito da placeSelected),
+    // calcoliamo il percorso prima di avviare.
+    if (_allRoutesResult == null || _directionsResult?.steps.isEmpty == true) {
+      final lat = _allRoutesResult?.destLat ?? _directionsResult?.destLat;
+      final lng = _allRoutesResult?.destLng ?? _directionsResult?.destLng;
+      if (lat != null && lng != null) {
+        await _calculateRouteFromCoordinates(
+          lat,
+          lng,
+          _selectedDestinationAddress ?? '',
+        );
+      }
+    }
+
+    if (_allRoutesResult != null) {
+      setState(() {
+        _appState = NavigationAppState.navigating;
+      });
+      _navigationMonitor.startNavigation(
+        _allRoutesResult!,
+        _selectedDestinationAddress ?? '',
+      );
+    }
+  }
 
   /// Calcola il percorso da coordinate GPS (TASK 4).
   ///
@@ -443,9 +506,24 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Log per debugging
     print('Destinazione selezionata da ricerca: $address ($lat, $lng)');
 
-    // Avvia il calcolo del percorso con le coordinate ricevute.
-    // L'origine sarà la posizione GPS corrente (gestita internamente).
-    _calculateRouteFromCoordinates(lat, lng, address);
+    setState(() {
+      _selectedDestinationAddress = address;
+      _appState = NavigationAppState.placeSelected;
+
+      // Imposta le coordinate della destinazione per posizionare il pin sulla mappa,
+      // ma senza calcolare ancora il percorso (lo calcoliamo quando clicca 'Indicazioni').
+      _directionsResult = DirectionsResult(
+        steps: [],
+        totalDistance: '',
+        totalDuration: '',
+        encodedPolyline: '', // Nessun percorso
+        originLat: _currentLat ?? 0,
+        originLng: _currentLng ?? 0,
+        destLat: lat,
+        destLng: lng,
+      );
+      _allRoutesResult = null; // Resetta i percorsi vecchi se presenti
+    });
   }
 
   /// Callback chiamato quando l'utente tocca un punto sulla mappa (TASK 3).
@@ -473,13 +551,22 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Log per debugging
     print('Punto mappa selezionato: $coordsText');
 
-    // Avvia il calcolo del percorso direttamente con le coordinate.
-    // Nessuna chiamata a Places Details API necessaria.
-    _calculateRouteFromCoordinates(
-      position.latitude,
-      position.longitude,
-      coordsText, // Usa le coordinate come "indirizzo" per il ricalcolo
-    );
+    setState(() {
+      _selectedDestinationAddress = coordsText;
+      _appState = NavigationAppState.placeSelected;
+
+      _directionsResult = DirectionsResult(
+        steps: [],
+        totalDistance: '',
+        totalDuration: '',
+        encodedPolyline: '',
+        originLat: _currentLat ?? 0,
+        originLng: _currentLng ?? 0,
+        destLat: position.latitude,
+        destLng: position.longitude,
+      );
+      _allRoutesResult = null;
+    });
   }
 
   // ===========================================================================
@@ -508,83 +595,73 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Layout per dispositivi mobili (stack verticale)
   Widget _buildMobileLayout() {
-    return Column(
+    return Stack(
+      fit: StackFit.expand,
       children: [
-        // Pannello ricerca sempre visibile
-        Padding(
-          padding: const EdgeInsets.all(8.0),
-          child: SearchInput(
-            destinationController: _destinationController,
-            onDestinationSelected: _onDestinationSelected,
-            isLoading: _isLoading,
-          ),
+        // --- LAYER 1: Mappa Google ---
+        MapWidget(
+          originLat: _directionsResult?.originLat,
+          originLng: _directionsResult?.originLng,
+          destLat: _directionsResult?.destLat,
+          destLng: _directionsResult?.destLng,
+          encodedPolyline: _directionsResult?.encodedPolyline,
+          // TASK 3: callback per tap sulla mappa
+          onMapTap:
+              _appState == NavigationAppState.search ||
+                  _appState == NavigationAppState.placeSelected
+              ? _onMapTapped
+              : null,
         ),
+
+        // --- LAYER 2: Pannello Ricerca (NASCOSTO IN NAVIGAZIONE) ---
+        if (_appState != NavigationAppState.navigating)
+          Positioned(
+            top: 8,
+            left: 8,
+            right: 8,
+            child: SafeArea(
+              child: SearchInput(
+                destinationController: _destinationController,
+                onDestinationSelected: _onDestinationSelected,
+                isLoading: _isLoading,
+              ),
+            ),
+          ),
 
         // Messaggio di errore
-        if (_errorMessage != null) _buildErrorMessage(),
-
-        // Mappa con overlay
-        Expanded(
-          flex: 2,
-          child: Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  // --- LAYER 1: Mappa Google ---
-                  SizedBox.expand(
-                    child: MapWidget(
-                      originLat: _directionsResult?.originLat,
-                      originLng: _directionsResult?.originLng,
-                      destLat: _directionsResult?.destLat,
-                      destLng: _directionsResult?.destLng,
-                      encodedPolyline: _directionsResult?.encodedPolyline,
-                      // TASK 3: callback per tap sulla mappa
-                      onMapTap: _onMapTapped,
-                    ),
-                  ),
-
-                  // --- LAYER 2: Overlay velocità ---
-                  _buildSpeedOverlay(),
-
-                  // --- LAYER 3: Overlay navigazione (istruzione svolta / "vai diritto") ---
-                  // Questo overlay viene mostrato dal NavigationMonitor quando:
-                  // a) L'utente è fermo su un waypoint di svolta → mostra html_instructions
-                  // b) La Roads API trova strade laterali → mostra "vai diritto stronzo"
-                  NavigationOverlay(
-                    state: _overlayState,
-                    onDismiss: () {
-                      // Quando l'overlay viene chiuso (tap o timeout),
-                      // resettiamo lo stato a null per nasconderlo.
-                      setState(() {
-                        _overlayState = null;
-                      });
-                      // Resettiamo anche il notifier del monitor per evitare
-                      // che lo stesso evento venga ri-emesso.
-                      _navigationMonitor.overlayNotifier.value = null;
-                    },
-                  ),
-                ],
-              ),
-            ),
+        if (_errorMessage != null)
+          Positioned(
+            top: 90,
+            left: 8,
+            right: 8,
+            child: SafeArea(child: _buildErrorMessage()),
           ),
+
+        // --- LAYER 3: Overlay Navigazione Originale ---
+        // Mostra le istruzioni turn-by-turn vecchie o "vai dritto"
+        NavigationOverlay(
+          state: _overlayState,
+          onDismiss: () {
+            setState(() {
+              _overlayState = null;
+            });
+            _navigationMonitor.overlayNotifier.value = null;
+          },
         ),
 
-        // Lista indicazioni (se disponibile)
-        if (_directionsResult != null)
-          Expanded(
-            flex: 1,
-            child: Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: DirectionsList(
-                steps: _directionsResult!.steps,
-                totalDistance: _directionsResult!.totalDistance,
-                totalDuration: _directionsResult!.totalDuration,
-              ),
-            ),
-          ),
+        // --- LAYER 4: Overlay Velocità ---
+        // Modifichiamo la pozione in base allo stato in modo che non si sovrapponga ai bottom sheet
+        _buildSpeedOverlay(),
+
+        // --- LAYER 5: BOTTOM SHEETS & TOP BANNER ---
+        if (_appState == NavigationAppState.placeSelected)
+          _buildPlaceSelectedSheet(),
+
+        if (_appState == NavigationAppState.navigating) _buildNavigatingUI(),
+
+        if (_appState == NavigationAppState.routePreview &&
+            _directionsResult != null)
+          _buildRoutePreviewSheet(),
       ],
     );
   }
@@ -676,8 +753,340 @@ class _NavigationScreenState extends State<NavigationScreen> {
   }
 
   // ===========================================================================
-  // WIDGET HELPER
+  // WIDGET HELPER (Bottom Sheets)
   // ===========================================================================
+
+  /// Scheda minimale che compare in fondo quando selezioniamo una destinazione (Niente percorso ancora calcolato se si clicca mappa).
+  Widget _buildPlaceSelectedSheet() {
+    return Positioned(
+      bottom: 0,
+      left: 0,
+      right: 0,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 10)],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _selectedDestinationAddress ?? 'Destinazione Sconosciuta',
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _calculateRouteForSelectedPlace,
+                    icon: const Icon(Icons.directions),
+                    label: const Text('Indicazioni'),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _startActiveNavigation,
+                    icon: const Icon(Icons.navigation),
+                    label: const Text('Avvia'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// DraggableScrollableSheet per mostrare in overlay i dettagli del percorso e gli step
+  Widget _buildRoutePreviewSheet() {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.35,
+      minChildSize: 0.2,
+      maxChildSize: 0.8,
+      builder: (context, scrollController) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 10)],
+          ),
+          child: SingleChildScrollView(
+            controller: scrollController,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Maniglia di scorrimento (dragger)
+                Center(
+                  child: Container(
+                    margin: const EdgeInsets.all(8),
+                    height: 4,
+                    width: 40,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade400,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                DirectionsList(
+                  steps: _directionsResult!.steps,
+                  totalDistance: _directionsResult!.totalDistance,
+                  totalDuration: _directionsResult!.totalDuration,
+                  shrinkWrap:
+                      true, // Impedisce all'interno di estendersi all'infinito spezzando lo scroll
+                  onStartPressed: _startActiveNavigation,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Interfaccia attiva in Navigazione (Top Banner e Bottom Info Sheet minimale senza pulsanti)
+  Widget _buildNavigatingUI() {
+    return Stack(
+      children: [
+        // TOP BANNER (Indicazione percorso corrente)
+        // Usiamo un costrutto ValueListenableBuilder: questo widget "ascolta"
+        // in tempo reale il numero emesso da currentStepNotifier (dal NavigationMonitor).
+        // Ogni volta che l'utente si avvicina a <15m dall'incrocio, il notifier
+        // emette un nuovo numero e SOLO questo widget si ridisegna,
+        // garantendo performance altissime.
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: ValueListenableBuilder<int>(
+            valueListenable: _navigationMonitor.currentStepNotifier,
+            builder: (context, currentStepIndex, child) {
+              // 1. Prendi la lista di tutti gli step calcolati attualmente
+              final steps = _directionsResult?.steps ?? [];
+              
+              // Se per qualche motivo gli step sono vuoti, mostra un layout di fallback
+              if (steps.isEmpty) {
+                return _buildFallbackBanner();
+              }
+
+              // 2. Sicurezza: Evita crash se l'indice impazzisce oltre la lunghezza dell'array
+              final safeIndex = currentStepIndex < steps.length ? currentStepIndex : steps.length - 1;
+
+              // 3. Estrai lo step CORRENTE (quello da mostrare in grande)
+              final currentStep = steps[safeIndex];
+
+              // 4. Estrai lo step SUCCESSIVO (se esiste) per darne un'anteprima,
+              // esattamente come fa Google Maps ("poi svolta a...")
+              final nextStep = (safeIndex + 1 < steps.length) ? steps[safeIndex + 1] : null;
+
+              return Container(
+                color: Colors.green.shade800,
+                padding: EdgeInsets.only(
+                  top: MediaQuery.of(context).padding.top + 16,
+                  bottom: 16,
+                  left: 16,
+                  right: 16,
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start, // Allinea gli elementi in alto
+                  children: [
+                    // Icona della Manovra Corrente
+                    // Qui al posto di freccia_su mettiamo un placeholder dinamico pronto
+                    // per essere integrato con icone mappate su "maneuver" (es. Icons.turn_right).
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4.0),
+                      child: Icon(Icons.directions, color: Colors.white, size: 40),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // TESTO PRINCIPALE (Istruzione Corrente)
+                          Text(
+                            currentStep.instruction, // "Svolta a destra su Via Roma"
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          
+                          // DISTANZA (Istruzione Corrente)
+                          Text(
+                            currentStep.distance, // "1.2 km"
+                            style: TextStyle(
+                              color: Colors.white.withAlpha(220), // deprecated warning fix for withOpacity
+                              fontSize: 16,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+
+                          // ANTEPRIMA STEP SUCCESSIVO (se esiste)
+                          if (nextStep != null) ...[
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.only(top: 12),
+                              decoration: BoxDecoration(
+                                border: Border(
+                                  top: BorderSide(color: Colors.white.withAlpha(50)),
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.subdirectory_arrow_right, color: Colors.white.withAlpha(150), size: 16),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      "Poi: ${nextStep.instruction}",
+                                      style: TextStyle(
+                                        color: Colors.white.withAlpha(200),
+                                        fontSize: 14,
+                                        fontStyle: FontStyle.italic,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ]
+                        ],
+                      ),
+                    ),
+                    // Pulsante "Chiudi Navigazione"
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white),
+                      onPressed: () {
+                        // Ferma navigazione
+                        _navigationMonitor.stopNavigation();
+                        setState(() {
+                          _appState = NavigationAppState.routePreview; // o ricerca
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        // BOTTOM SHEET (Info navigazione minimale, pedone, tempo, km - senza pulsanti)
+        Positioned(
+          bottom: 0,
+          left: 0,
+          right: 0,
+          child: Container(
+            padding: EdgeInsets.only(
+              top: 24,
+              bottom: MediaQuery.of(context).padding.bottom + 24,
+              left: 16,
+              right: 16,
+            ), // SafeArea bottom padding
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 10)],
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.directions_walk,
+                  size: 36,
+                  color: Colors.green.shade700,
+                ),
+                const SizedBox(width: 16),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _directionsResult?.totalDuration ?? '',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green.shade900,
+                      ),
+                    ),
+                    Text(
+                      _directionsResult?.totalDistance ?? '',
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
+                ),
+
+                const Spacer(),
+                // Eventuali Info extra (es arriovo previsto)
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Metodo Helper per estrarre la grafica di "Fallback" quando non c'è una rotta 
+  /// (usato se il _navigationMonitor non ha ancora sincronizzato i percorsi).
+  Widget _buildFallbackBanner() {
+    return Container(
+      color: Colors.green.shade800,
+      padding: EdgeInsets.only(
+        top: MediaQuery.of(context).padding.top + 16,
+        bottom: 16,
+        left: 16,
+        right: 16,
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.arrow_upward, color: Colors.white, size: 40),
+          const SizedBox(width: 16),
+          const Expanded(
+            child: Text(
+              'Procedi lungo il percorso',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, color: Colors.white),
+            onPressed: () {
+              _navigationMonitor.stopNavigation();
+              setState(() {
+                _appState = NavigationAppState.routePreview;
+              });
+            },
+          ),
+        ],
+      ),
+    );
+  }
 
   /// Widget per mostrare errori
   Widget _buildErrorMessage() {
@@ -706,8 +1115,19 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Crea il widget overlay per la velocità
   Widget _buildSpeedOverlay() {
+    double bottomPadding = 24.0;
+
+    // Spostiamo il widget speed più in alto a seconda di che bottom sheet è attivo
+    if (_appState == NavigationAppState.placeSelected) {
+      bottomPadding = 180.0;
+    } else if (_appState == NavigationAppState.navigating) {
+      bottomPadding = 120.0;
+    } else if (_appState == NavigationAppState.routePreview) {
+      bottomPadding = MediaQuery.of(context).size.height * 0.35 + 16;
+    }
+
     return Positioned(
-      bottom: 24,
+      bottom: bottomPadding,
       left: 16,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
