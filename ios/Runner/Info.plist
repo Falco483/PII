@@ -45,5 +45,11 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Questa app necessita della posizione per mostrare dove ti trovi sulla mappa e fornirti navigazione.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Questa app necessita della posizione anche in background per poterti orientare durante la navigazione.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Questa app necessita della tua posizione contina per una navigazione precisa in tempo reale.</string>
 </dict>
 </plist>
