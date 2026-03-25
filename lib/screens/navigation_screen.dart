@@ -25,6 +25,7 @@ import '../widgets/map_widget.dart';
 import '../widgets/search_input.dart';
 import '../widgets/directions_list.dart';
 import '../widgets/navigation_overlay.dart';
+import '../services/places_service.dart';
 
 /// Stati dell'interfaccia utente (UI)
 enum NavigationAppState {
@@ -58,6 +59,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// bearing affidabile, trigger velocità zero, analisi strade laterali.
   /// Viene inizializzato in initState() e distrutto in dispose().
   late final NavigationMonitor _navigationMonitor;
+
+  /// Chiave globale per accedere allo stato di MapWidget e chiamare
+  /// moveToLocation() quando l'utente preme il pulsante di re-center.
+  final GlobalKey<MapWidgetState> _mapKey = GlobalKey<MapWidgetState>();
 
   // ===========================================================================
   // STATO DELL'APP
@@ -156,6 +161,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// e la UI (widget overlay). Il monitor decide QUANDO e COSA mostrare,
   /// questo callback si limita a propagare la decisione alla UI.
   void _onOverlayChanged() {
+    print('🔵 Listener overlay triggered: ${_navigationMonitor.overlayNotifier.value?.type}');
     setState(() {
       _overlayState = _navigationMonitor.overlayNotifier.value;
     });
@@ -365,9 +371,17 @@ class _NavigationScreenState extends State<NavigationScreen> {
       setState(() {
         _appState = NavigationAppState.navigating;
       });
+
+      // FIX 1+2: Passiamo le COORDINATE della destinazione ("lat,lng"),
+      // non il testo dell'indirizzo, per evitare ri-geocodifiche nei ricalcoli.
+      // La chiamata a startNavigation() avviene SOLO qui (non più dentro
+      // _calculateRouteFromCoordinates), così il monitoring parte solo
+      // quando l'utente preme effettivamente "Avvia".
+      final destLat = _allRoutesResult!.destLat;
+      final destLng = _allRoutesResult!.destLng;
       _navigationMonitor.startNavigation(
         _allRoutesResult!,
-        _selectedDestinationAddress ?? '',
+        '$destLat,$destLng',
       );
     }
   }
@@ -455,10 +469,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
           );
           _errorMessage = null;
 
-          // TASK 5: Avvia la navigazione nel monitor.
-          // Usa destAddress per il ricalcolo futuro (Task 2c del monitor)
-          // perché se l'utente devia, la destinazione deve restare la stessa.
-          _navigationMonitor.startNavigation(result, destAddress);
+          // NOTA: startNavigation() NON viene più chiamato qui (FIX 2).
+          // Il monitoring del percorso si avvia solo quando l'utente
+          // preme "Avvia" (in _startActiveNavigation), non durante
+          // l'anteprima del percorso ("Indicazioni").
         } else {
           _errorMessage = 'Impossibile calcolare il percorso. Riprova.';
         }
@@ -522,13 +536,13 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// PARAMETRI:
   /// - [position]: coordinate del punto toccato sulla mappa
   void _onMapTapped(LatLng position) {
-    // Costruisce una stringa descrittiva con le coordinate
+    // Costruisce una stringa descrittiva con le coordinate come fallback
     final String coordsText =
         '${position.latitude.toStringAsFixed(5)}, '
         '${position.longitude.toStringAsFixed(5)}';
 
-    // Aggiorna il campo di testo con le coordinate per feedback visivo.
-    // L'utente vede cosa ha selezionato.
+    // Feedback visivo immediato: mostra le coordinate nella barra.
+    // Verranno sostituite dall'indirizzo reale appena la API risponde.
     _destinationController.text = coordsText;
 
     // Log per debugging
@@ -549,6 +563,20 @@ class _NavigationScreenState extends State<NavigationScreen> {
         destLng: position.longitude,
       );
       _allRoutesResult = null;
+    });
+
+    // Reverse geocoding asincrono: converte le coordinate in un
+    // indirizzo leggibile (es. "Via Roma 15, Milano") e aggiorna
+    // la barra di ricerca e il nome della destinazione.
+    PlacesService()
+        .reverseGeocode(position.latitude, position.longitude)
+        .then((address) {
+      if (address != null && mounted) {
+        setState(() {
+          _destinationController.text = address;
+          _selectedDestinationAddress = address;
+        });
+      }
     });
   }
 
@@ -578,16 +606,21 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Layout per dispositivi mobili (stack verticale)
   Widget _buildMobileLayout() {
+    print('🟡 Build mobile: overlayState = $_overlayState');
     return Stack(
       fit: StackFit.expand,
       children: [
         // --- LAYER 1: Mappa Google ---
         MapWidget(
+          key: _mapKey,
           originLat: _directionsResult?.originLat,
           originLng: _directionsResult?.originLng,
           destLat: _directionsResult?.destLat,
           destLng: _directionsResult?.destLng,
           encodedPolyline: _directionsResult?.encodedPolyline,
+          // Zoom iniziale sulla posizione GPS corrente
+          initialLat: _currentLat,
+          initialLng: _currentLng,
           // TASK 3: callback per tap sulla mappa
           onMapTap:
               _appState == NavigationAppState.search ||
@@ -636,7 +669,27 @@ class _NavigationScreenState extends State<NavigationScreen> {
         // Modifichiamo la pozione in base allo stato in modo che non si sovrapponga ai bottom sheet
         _buildSpeedOverlay(),
 
-        // --- LAYER 5: BOTTOM SHEETS & TOP BANNER ---
+        // --- LAYER 5: Pulsante Re-center GPS ---
+        // Mostrato solo quando non siamo in navigazione attiva
+        if (_appState != NavigationAppState.navigating)
+          Positioned(
+            bottom: _appState == NavigationAppState.placeSelected ? 160 : 24,
+            right: 16,
+            child: FloatingActionButton(
+              mini: true,
+              backgroundColor: Colors.white,
+              foregroundColor: Colors.black87,
+              tooltip: 'Torna alla posizione attuale',
+              onPressed: () {
+                if (_currentLat != null && _currentLng != null) {
+                  _mapKey.currentState?.moveToLocation(_currentLat!, _currentLng!);
+                }
+              },
+              child: const Icon(Icons.my_location),
+            ),
+          ),
+
+        // --- LAYER 6: BOTTOM SHEETS & TOP BANNER ---
         if (_appState == NavigationAppState.placeSelected)
           _buildPlaceSelectedSheet(),
 

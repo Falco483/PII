@@ -25,18 +25,12 @@ class MapWidget extends StatefulWidget {
   // Polyline codificata per il percorso
   final String? encodedPolyline;
 
+  /// Coordinate GPS iniziali: se fornite, la camera si posizionerà qui
+  /// appena la mappa è pronta (al posto del centro Italia fisso).
+  final double? initialLat;
+  final double? initialLng;
+
   /// Callback chiamato quando l'utente tocca un punto sulla mappa (TASK 3).
-  ///
-  /// Gestisce entrambi i casi di TASK 3:
-  /// - Caso 1 (POI): su Google Maps Flutter, anche il tap su un POI genera
-  ///   un evento onTap con le coordinate. Il parent può usare le coordinate
-  ///   direttamente per calcolare il percorso.
-  /// - Caso 2 (punto generico): restituisce le coordinate lat/lng del punto
-  ///   toccato. NON serve chiamare Places Details API.
-  ///
-  /// In entrambi i casi, le coordinate lat/lng sono sufficienti per la
-  /// Directions API (TASK 4). Il parent (NavigationScreen) deciderà se
-  /// usare le coordinate direttamente o effettuare una reverse geocoding.
   final void Function(LatLng position)? onMapTap;
 
   const MapWidget({
@@ -47,13 +41,15 @@ class MapWidget extends StatefulWidget {
     this.destLng,
     this.encodedPolyline,
     this.onMapTap,
+    this.initialLat,
+    this.initialLng,
   });
 
   @override
-  State<MapWidget> createState() => _MapWidgetState();
+  State<MapWidget> createState() => MapWidgetState();
 }
 
-class _MapWidgetState extends State<MapWidget> {
+class MapWidgetState extends State<MapWidget> {
   // Controller per la mappa Google
   GoogleMapController? _mapController;
 
@@ -82,10 +78,33 @@ class _MapWidgetState extends State<MapWidget> {
   void _onMapCreated(GoogleMapController controller) {
     _mapController = controller;
     print('=== GOOGLE MAP CREATED SUCCESSFULLY ===');
+
+    // Se sono disponibili le coordinate GPS iniziali, centra la camera lì.
+    if (widget.initialLat != null && widget.initialLng != null) {
+      _mapController!.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: LatLng(widget.initialLat!, widget.initialLng!),
+            zoom: _initialZoom,
+          ),
+        ),
+      );
+    }
+
     // Se ci sono già dati del percorso, aggiorna la mappa
     if (widget.encodedPolyline != null) {
       _updateRoute();
     }
+  }
+
+  /// Centra la camera sulla posizione fornita (chiamato dal parent per il
+  /// pulsante "Torna alla mia posizione").
+  void moveToLocation(double lat, double lng) {
+    _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(target: LatLng(lat, lng), zoom: _initialZoom),
+      ),
+    );
   }
 
   /// Aggiorna marker e polyline sulla mappa

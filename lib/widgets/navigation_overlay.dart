@@ -92,6 +92,12 @@ class _NavigationOverlayState extends State<NavigationOverlay>
       _animController.forward();
       _startAutoDismissTimer();
     }
+    // Quando lo stato cambia da un overlay a un altro overlay diverso,
+    // riavvia animazione e timer per mostrare il nuovo contenuto.
+    else if (widget.state != null && oldWidget.state != null) {
+      _animController.forward(from: 0.0);
+      _startAutoDismissTimer();
+    }
     // Quando lo stato passa da non-null a null, avvia il fade-out
     else if (widget.state == null && oldWidget.state != null) {
       _animController.reverse();

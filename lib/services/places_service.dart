@@ -195,6 +195,10 @@ class PlacesService {
   static const String _detailsUrl =
       'https://maps.googleapis.com/maps/api/place/details/json';
 
+  // URL base per la Geocoding API (Reverse Geocoding)
+  static const String _geocodeUrl =
+      'https://maps.googleapis.com/maps/api/geocode/json';
+
   /// Ottiene i suggerimenti di autocomplete dalla Places API.
   ///
   /// Questa funzione viene chiamata ogni volta che l'utente digita
@@ -373,6 +377,51 @@ class PlacesService {
     } catch (e) {
       // Gestisce qualsiasi eccezione non prevista
       print('Eccezione in getPlaceDetails: $e');
+      return null;
+    }
+  }
+
+  /// Ottiene un indirizzo leggibile (reverse geocoding) a partire dalle coordinate.
+  ///
+  /// PARAMETRI:
+  /// - [lat]: latitudine
+  /// - [lng]: longitudine
+  ///
+  /// RETURN:
+  /// - Stringa contenente l'indirizzo formattato o null se non trovato
+  Future<String?> reverseGeocode(double lat, double lng) async {
+    try {
+      final uri = Uri.parse(_geocodeUrl).replace(
+        queryParameters: {
+          'latlng': '$lat,$lng',
+          'key': apiKey,
+          'language': 'it', // Stessa lingua dell'interfaccia
+        },
+      );
+
+      final response = await http.get(uri);
+
+      if (response.statusCode != 200) {
+        print('Errore HTTP Geocode: ${response.statusCode}');
+        return null;
+      }
+
+      final data = json.decode(response.body);
+
+      if (data['status'] != 'OK') {
+        if (data['status'] == 'ZERO_RESULTS') return null;
+        print('Errore API Geocode: ${data["status"]}');
+        return null;
+      }
+
+      final results = data['results'] as List<dynamic>;
+      if (results.isNotEmpty) {
+        return results.first['formatted_address'] as String?;
+      }
+
+      return null;
+    } catch (e) {
+      print('Eccezione in reverseGeocode: $e');
       return null;
     }
   }

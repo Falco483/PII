@@ -119,9 +119,6 @@ class NavigationMonitor {
   /// Velocità corrente dell'utente in km/h.
   double _currentSpeed = 0.0;
 
-  /// Accuratezza GPS in metri (Confidence level).
-  double _currentAccuracy = 0.0;
-
   /// Counter dei tick per il polling dinamico (Adaptive Polling).
   int _routeCheckTicks = 0;
 
@@ -174,10 +171,15 @@ class NavigationMonitor {
   /// prima di fare una nuova chiamata API.
   List<RouteData> _alternativeRoutes = [];
 
-  /// Destinazione originale dell'utente (testo dell'indirizzo o coordinate).
+  /// Destinazione originale come COORDINATE (formato "lat,lng").
   /// Salvata al momento del calcolo iniziale del percorso e usata per il
   /// ricalcolo API nel Task 2c: la destinazione non cambia mai, solo la
   /// posizione di partenza (che diventa la posizione GPS corrente).
+  ///
+  /// FIX: prima salvava il testo dell'indirizzo (es. "Via Roma").
+  /// Ogni ricalcolo doveva ri-geocodare il testo, ottenendo punti
+  /// leggermente diversi → polyline diversa → falsi ricalcoli a catena.
+  /// Ora salviamo le coordinate esatte (es. "45.478,9.234").
   String? _originalDestination;
 
   /// Flag che indica se la navigazione è attiva.
@@ -190,6 +192,12 @@ class NavigationMonitor {
   /// Evita di lanciare ricalcoli concorrenti mentre il precedente è ancora
   /// in attesa di risposta dalla API.
   bool _isRerouting = false;
+
+  /// Timestamp di quando la navigazione è stata avviata.
+  /// Usato per il grace period: nei primi 15 secondi dopo l'avvio,
+  /// il controllo di deviazione viene ignorato per dare all'utente
+  /// il tempo di mettersi in cammino e allinearsi con la polyline.
+  DateTime? _navigationStartTime;
 
   // ===========================================================================
   // TIMER
@@ -337,13 +345,21 @@ class NavigationMonitor {
     double rawBearing, [
     double accuracy = 0.0,
   ]) {
+    // TASK 5 - Filtro Globale Accuratezza GPS
+    // Se il segnale GPS è troppo debole (accuracy > 30m), ignoriamo
+    // completamente l'aggiornamento per evitare "salti" fittizi che
+    // innescherebbero falsi calcoli (strade laterali, avanzamento step).
+    if (accuracy > 30.0) {
+      print('⚠️ GPS precisione insufficiente (${accuracy}m). Update ignorato.');
+      return;
+    }
+
     // Salva i valori correnti. Queste variabili sono usate dal timer del
     // bearing (ogni 5s) e dallo snapshot (quando il timer 10s scade).
     _currentLat = lat;
     _currentLng = lng;
     _currentSpeed = speedKmH;
     _rawBearing = rawBearing;
-    _currentAccuracy = accuracy;
 
     // --- LOGICA TRIGGER VELOCITÀ ZERO (Step 2.1) ---
     //
@@ -461,19 +477,22 @@ class NavigationMonitor {
   /// Questo metodo inizializza tutto il sistema di monitoraggio del percorso:
   /// 1. Salva il percorso migliore come "attivo" (quello visualizzato sulla mappa)
   /// 2. Salva tutti i percorsi alternativi per il confronto rapido (Task 2b)
-  /// 3. Salva la destinazione originale per i ricalcoli futuri (Task 2c)
+  /// 3. Salva la destinazione originale come COORDINATE per i ricalcoli futuri
   /// 4. Aggiorna gli step del percorso per il check dei waypoint di svolta
   /// 5. Avvia il timer periodico a 2 secondi per il monitoraggio
+  /// 6. Registra il timestamp di avvio per il grace period (15s)
   ///
   /// PARAMETRI:
   /// - [routesResult]: risultato dalla API con tutti i percorsi
-  /// - [destination]: testo della destinazione (indirizzo o coordinate)
+  /// - [destinationCoords]: coordinate della destinazione nel formato
+  ///   "lat,lng" (es. "45.478,9.234"). DEVE essere in formato coordinate,
+  ///   NON un indirizzo testuale, per evitare ri-geocodifiche nei ricalcoli.
   ///
   /// SIDE EFFECTS:
   /// - Setta _isNavigating = true
   /// - Avvia il timer _routeCheckTimer
   /// - Notifica la UI tramite activeRouteNotifier
-  void startNavigation(AllRoutesResult routesResult, String destination) {
+  void startNavigation(AllRoutesResult routesResult, String destinationCoords) {
     // Salva il percorso migliore (quello con durata minore) come attivo
     _activeRoute = routesResult.bestRoute;
 
@@ -482,16 +501,23 @@ class NavigationMonitor {
     // percorso alternativo a cui "agganciare" la posizione dell'utente.
     _alternativeRoutes = List<RouteData>.from(routesResult.allRoutes);
 
-    // Salva la destinazione originale per il ricalcolo API (Task 2c).
-    // La destinazione non cambia MAI durante la navigazione: se l'utente
-    // devia, ricalcoliamo da "posizione attuale" a "stessa destinazione".
-    _originalDestination = destination;
+    // FIX 1: Salva la destinazione come COORDINATE (es. "45.478,9.234").
+    // Prima salvava il testo dell'indirizzo (es. "Via Roma, Milano"),
+    // e ogni ricalcolo doveva ri-geocodare il testo, ottenendo punti
+    // leggermente diversi → polyline diversa → falsi ricalcoli a catena.
+    _originalDestination = destinationCoords;
 
     // Aggiorna gli step per la logica di check waypoint di svolta (Step 2.3)
     _routeSteps = routesResult.bestRoute.steps;
 
     // Imposta il flag di navigazione attiva
     _isNavigating = true;
+
+    // FIX 3: Registra il momento di avvio della navigazione.
+    // I primi 15 secondi sono un "grace period" in cui il controllo
+    // di deviazione viene saltato, per dare all'utente il tempo di
+    // mettersi in cammino e allinearsi con la polyline.
+    _navigationStartTime = DateTime.now();
 
     // Notifica la UI che il percorso attivo è stato impostato.
     // La UI aggiornerà la polyline sulla mappa e le indicazioni.
@@ -503,7 +529,7 @@ class NavigationMonitor {
 
     // Log per debugging
     print(
-      'Navigazione avviata. Percorsi disponibili: '
+      'Navigazione avviata (grace period 15s). Percorsi disponibili: '
       '${_alternativeRoutes.length}. '
       'Percorso attivo: ${_activeRoute!.totalDuration}',
     );
@@ -527,6 +553,7 @@ class NavigationMonitor {
     _originalDestination = null;
     _consecutiveOffRouteDetects = 0;
     _routeCheckTicks = 0;
+    _navigationStartTime = null;
     
     // Resetta lo stato di tracciamento degli Step
     _currentStepIndex = 0;
@@ -730,7 +757,12 @@ class NavigationMonitor {
       if (turnResult != null) {
         // L'utente è vicino a un waypoint di svolta!
         // Mostra l'istruzione di navigazione e interrompi.
+        // FORCE REFRESH: resettiamo a null prima di settare il nuovo valore.
+        // Questo garantisce che NavigationOverlay.didUpdateWidget() veda
+        // sempre la transizione null → non-null e riavvii animazione + timer.
+        overlayNotifier.value = null;
         overlayNotifier.value = turnResult;
+        print('🟢 Overlay impostato: turnInstruction');
         return;
       }
 
@@ -795,10 +827,15 @@ class NavigationMonitor {
 
       if (snappedPoints.isNotEmpty) {
         // Strada laterale rilevata! Mostra l'overlay.
+        // FORCE REFRESH: resettiamo a null prima di settare il nuovo valore.
+        // Questo garantisce che NavigationOverlay.didUpdateWidget() veda
+        // sempre la transizione null → non-null e riavvii animazione + timer.
+        overlayNotifier.value = null;
         overlayNotifier.value = NavigationOverlayState(
           type: OverlayType.lateralRoadDetected,
           message: 'vai diritto stronzo',
         );
+        print('🟢 Overlay impostato: lateralRoadDetected');
       }
       // Se snappedPoints è vuoto, non facciamo nulla. Nessun overlay.
     } finally {
@@ -932,6 +969,21 @@ class NavigationMonitor {
     // diversi secondi.
     if (_isRerouting) return;
 
+    // FIX 3 — GRACE PERIOD (15 secondi dopo l'avvio della navigazione).
+    // Nei primi 15 secondi dopo startNavigation(), saltiamo il controllo
+    // di deviazione. Questo evita falsi ricalcoli causati dal fatto che:
+    // 1. L'utente è fermo e non si è ancora messo in cammino
+    // 2. La overview_polyline di Google potrebbe non passare esattamente
+    //    per la posizione GPS dell'utente al momento della partenza
+    // 3. Il GPS potrebbe non essere ancora stabilizzato
+    if (_navigationStartTime != null) {
+      final secondsSinceStart =
+          DateTime.now().difference(_navigationStartTime!).inSeconds;
+      if (secondsSinceStart < 15) {
+        return; // Ancora nel grace period, skip controllo deviazione
+      }
+    }
+
     // Cattura uno snapshot delle coordinate ATTUALI.
     // Questo è importante per coerenza: durante il controllo (che potrebbe
     // essere asincrono se si arriva al Task 2c), la posizione GPS continua
@@ -940,10 +992,9 @@ class NavigationMonitor {
     final double lng = _currentLng!;
 
     // TASK 5 - Filtro Signal Drift basato sull'accuratezza GPS
-    if (_currentAccuracy > 30.0) {
-      print('⚠️ Segnale GPS debole (accuracy: ${_currentAccuracy}m). Ignoro controllo percorso.');
-      return;
-    }
+    // RIMOSSO: Il filtro è stato spostato a monte in `updatePosition` per
+    // proteggere tutte le funzionalità, non solo il controllo percorso.
+
 
     // TASK 5 - Adaptive Polling basato sulla velocità
     _routeCheckTicks++;
