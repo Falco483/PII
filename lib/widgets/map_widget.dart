@@ -33,6 +33,11 @@ class MapWidget extends StatefulWidget {
   /// Callback chiamato quando l'utente tocca un punto sulla mappa (TASK 3).
   final void Function(LatLng position)? onMapTap;
 
+  /// Callback chiamato quando l'utente sposta manualmente la mappa (pan/pinch).
+  /// Usato dal parent per sapere che il follow-mode è stato interrotto
+  /// dall'interazione dell'utente e mostrare il tasto Recenter.
+  final VoidCallback? onUserInteraction;
+
   const MapWidget({
     super.key,
     this.originLat,
@@ -41,6 +46,7 @@ class MapWidget extends StatefulWidget {
     this.destLng,
     this.encodedPolyline,
     this.onMapTap,
+    this.onUserInteraction,
     this.initialLat,
     this.initialLng,
   });
@@ -58,6 +64,15 @@ class MapWidgetState extends State<MapWidget> {
 
   // Set di polyline sulla mappa
   Set<Polyline> _polylines = {};
+
+  /// Flag per distinguere i movimenti di camera programmatici (animateCamera)
+  /// da quelli causati dal gesto dell'utente (pan/pinch).
+  ///
+  /// MECCANISMO:
+  /// - Prima di ogni animateCamera(), settiamo _isProgrammaticMove = true
+  /// - In onCameraMoveStarted, se _isProgrammaticMove è false → è un gesto utente
+  /// - Il flag viene resettato in onCameraIdle
+  bool _isProgrammaticMove = false;
 
   // Posizione iniziale: centro Italia
   static const LatLng _initialPosition = LatLng(45.4836315, 9.2249375);
@@ -81,6 +96,7 @@ class MapWidgetState extends State<MapWidget> {
 
     // Se sono disponibili le coordinate GPS iniziali, centra la camera lì.
     if (widget.initialLat != null && widget.initialLng != null) {
+      _isProgrammaticMove = true;
       _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
@@ -100,9 +116,35 @@ class MapWidgetState extends State<MapWidget> {
   /// Centra la camera sulla posizione fornita (chiamato dal parent per il
   /// pulsante "Torna alla mia posizione").
   void moveToLocation(double lat, double lng) {
+    _isProgrammaticMove = true;
     _mapController?.animateCamera(
       CameraUpdate.newCameraPosition(
         CameraPosition(target: LatLng(lat, lng), zoom: _initialZoom),
+      ),
+    );
+  }
+
+  /// Centra la camera sulla posizione dell'utente con bearing e tilt
+  /// (visuale "navigazione guidata" — prospettiva 3D orientata nella
+  /// direzione di marcia).
+  ///
+  /// Chiamato dal parent:
+  /// 1. Ad ogni aggiornamento GPS quando il follow-mode è attivo
+  /// 2. Quando l'utente preme il tasto Recenter
+  ///
+  /// PARAMETRI:
+  /// - [lat], [lng]: coordinate GPS correnti dell'utente
+  /// - [bearing]: direzione di marcia in gradi (0-360, 0=Nord)
+  void followUser(double lat, double lng, double bearing) {
+    _isProgrammaticMove = true;
+    _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(
+          target: LatLng(lat, lng),
+          zoom: 17.5, // Zoom ravvicinato per navigazione pedonale
+          bearing: bearing, // Ruota la mappa nella direzione di marcia
+          tilt: 45, // Prospettiva 3D inclinata
+        ),
       ),
     );
   }
@@ -178,6 +220,7 @@ class MapWidgetState extends State<MapWidget> {
       return;
     }
 
+    _isProgrammaticMove = true;
     _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
         CameraPosition(
@@ -249,9 +292,24 @@ class MapWidgetState extends State<MapWidget> {
       // Abilita zoom e rotazione
       zoomControlsEnabled: true,
       myLocationEnabled: true,
-      myLocationButtonEnabled: true,
+      myLocationButtonEnabled: false, // Disabilitato: usiamo il tasto Recenter custom
       // Tipo di mappa
       mapType: MapType.normal,
+
+      // --- RILEVAMENTO PAN MANUALE ---
+      // Quando l'utente inizia a spostare la mappa con il dito,
+      // notifichiamo il parent per disattivare il follow-mode.
+      onCameraMoveStarted: () {
+        if (!_isProgrammaticMove) {
+          // L'utente ha spostato la mappa manualmente → notifica il parent
+          widget.onUserInteraction?.call();
+        }
+      },
+
+      // Quando il movimento della camera si ferma, resettiamo il flag.
+      onCameraIdle: () {
+        _isProgrammaticMove = false;
+      },
 
       // --- TASK 3: GESTIONE TAP SULLA MAPPA ---
 
@@ -259,19 +317,6 @@ class MapWidgetState extends State<MapWidget> {
       // (non un POI). Restituisce le coordinate lat/lng del punto toccato.
       // Se il callback è null (non fornito dal parent), il tap viene ignorato.
       onTap: widget.onMapTap,
-
-      // onLongPress: non usato per ora, ma disponibile per future estensioni
-      // (es. "tieni premuto per impostare un waypoint intermedio")
-
-      // NOTA SUL POI TAP:
-      // A partire da google_maps_flutter, il callback per il tap su POI
-      // è gestito tramite il parametro 'onTap' dei marker interni di Google.
-      // Su Android/iOS nativi, i POI sulla mappa (negozi, ristoranti, ecc.)
-      // generano un evento separato. In Flutter, questo è esposto tramite
-      // il parametro 'onTap' del GoogleMap widget SOLO se il POI non è
-      // coperto da un marker custom. Google Maps Flutter non espone
-      // direttamente un 'onPoiTap', quindi lo gestiamo attraverso l'onTap
-      // generico e lasciamo che il parent usi le coordinate direttamente.
     );
   }
 }

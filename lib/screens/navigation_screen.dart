@@ -16,6 +16,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -53,6 +54,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Controller per il campo di testo della destinazione.
   /// Viene passato al SearchInput e usato per mostrare/leggere l'indirizzo.
   final TextEditingController _destinationController = TextEditingController();
+
+  /// GlobalKey per accedere ai metodi del MapWidget (followUser, moveToLocation).
+  /// Necessaria perché MapWidget è uno StatefulWidget e i metodi pubblici
+  /// del suo State (MapWidgetState) sono accessibili solo tramite la key.
+  final GlobalKey<MapWidgetState> _mapKey = GlobalKey<MapWidgetState>();
 
   /// Servizio per le direzioni (Directions API)
   final DirectionsService _directionsService = DirectionsService();
@@ -169,6 +175,23 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// null = nessun overlay da mostrare.
   /// Non-null = mostra l'overlay con il messaggio specificato.
   NavigationOverlayState? _overlayState;
+
+  /// Flag "follow-mode": quando true, la camera insegue automaticamente
+  /// la posizione GPS dell'utente ad ogni aggiornamento, orientata nella
+  /// direzione di marcia (bearing).
+  ///
+  /// CICLO DI VITA:
+  /// - true → quando si avvia la navigazione (_startActiveNavigation)
+  /// - true → quando l'utente preme il tasto Recenter
+  /// - false → quando l'utente sposta la mappa con il dito (onUserInteraction)
+  /// - false → quando la navigazione si ferma
+  bool _isFollowingUser = false;
+
+  /// Flag per il primo fix GPS. Quando l'app si apre, la mappa parte
+  /// su coordinate fisse (Milano). Al primo aggiornamento GPS valido,
+  /// spostiamo la camera sulla posizione reale dell'utente e settiamo
+  /// questo flag a true per non ripetere l'operazione.
+  bool _hasInitialFix = false;
 
   // ===========================================================================
   // CICLO DI VITA
@@ -419,6 +442,31 @@ class _NavigationScreenState extends State<NavigationScreen> {
             _rawBearing,
             position.accuracy, // TASK 5: Inviato confidence level
           );
+
+          // --- PRIMO FIX GPS: centra la mappa sulla posizione reale ---
+          // Al primo aggiornamento GPS valido, spostiamo la camera dalla
+          // posizione iniziale fissa (Milano) alla posizione reale dell'utente.
+          // Questo viene fatto una sola volta all'apertura dell'app.
+          if (!_hasInitialFix) {
+            _hasInitialFix = true;
+            _mapKey.currentState?.moveToLocation(
+              _currentLat!,
+              _currentLng!,
+            );
+          }
+
+          // --- FOLLOW-MODE: insegui la posizione GPS sulla mappa ---
+          // Se siamo in navigazione attiva e il follow-mode è attivo,
+          // muoviamo la camera sulla posizione corrente con il bearing
+          // del NavigationMonitor (filtrato, più affidabile del raw GPS).
+          if (_appState == NavigationAppState.navigating && _isFollowingUser) {
+            final double navBearing = _navigationMonitor.direction ?? _rawBearing;
+            _mapKey.currentState?.followUser(
+              _currentLat!,
+              _currentLng!,
+              navBearing,
+            );
+          }
         });
   }
 
@@ -445,6 +493,56 @@ class _NavigationScreenState extends State<NavigationScreen> {
     _destinationController.dispose();
 
     super.dispose();
+  }
+
+  // ===========================================================================
+  // HELPER: BEARING LUNGO IL PERCORSO
+  // ===========================================================================
+
+  /// Calcola il bearing (direzione in gradi, 0°=Nord) dalla posizione
+  /// corrente dell'utente verso lo step corrente del percorso attivo.
+  ///
+  /// LOGICA:
+  /// 1. Prende l'indice dello step corrente dal NavigationMonitor
+  /// 2. Calcola il bearing dalla posizione GPS dell'utente verso
+  ///    l'endLocation dello step corrente (il punto dove deve arrivare)
+  /// 3. Se non è possibile calcolarlo, usa il bearing GPS come fallback
+  ///
+  /// FORMULA (bearing iniziale tra due punti sulla sfera):
+  /// θ = atan2(sin(Δλ)·cos(φ₂), cos(φ₁)·sin(φ₂) − sin(φ₁)·cos(φ₂)·cos(Δλ))
+  ///
+  /// RETURN: gradi 0-360
+  double _getRouteBearing() {
+    // Fallback: bearing GPS (filtrato dal monitor, o raw)
+    final double fallback = _navigationMonitor.direction ?? _rawBearing;
+
+    // Serve la posizione GPS e gli step del percorso
+    if (_currentLat == null || _currentLng == null) return fallback;
+    final steps = _directionsResult?.steps;
+    if (steps == null || steps.isEmpty) return fallback;
+
+    // Prende l'indice dello step corrente dal monitor
+    final int idx = _navigationMonitor.currentStepNotifier.value;
+    final int safeIdx = idx < steps.length ? idx : steps.length - 1;
+    final step = steps[safeIdx];
+
+    // Punto target: endLocation dello step corrente
+    // (è il punto dove l'utente deve arrivare prima del prossimo step)
+    final double targetLat = step.endLat;
+    final double targetLng = step.endLng;
+
+    // Calcolo bearing geodetico (formula Haversine initial bearing)
+    final double lat1 = _currentLat! * (3.141592653589793 / 180.0);
+    final double lat2 = targetLat * (3.141592653589793 / 180.0);
+    final double dLng = (targetLng - _currentLng!) * (3.141592653589793 / 180.0);
+
+    final double x = math.sin(dLng) * math.cos(lat2);
+    final double y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLng);
+    double bearing = math.atan2(x, y) * (180.0 / 3.141592653589793);
+
+    // Normalizza in 0-360
+    bearing = (bearing + 360) % 360;
+    return bearing;
   }
 
   void _showTemporaryError(String message) {
@@ -507,11 +605,22 @@ class _NavigationScreenState extends State<NavigationScreen> {
     if (_allRoutesResult != null) {
       setState(() {
         _appState = NavigationAppState.navigating;
+        _isFollowingUser = true; // Attiva il follow-mode all'avvio
       });
       _navigationMonitor.startNavigation(
         _allRoutesResult!,
         _selectedDestinationAddress ?? '',
       );
+
+      // Centra subito la camera sulla posizione corrente con bearing
+      // verso il primo step del percorso
+      if (_currentLat != null && _currentLng != null) {
+        _mapKey.currentState?.followUser(
+          _currentLat!,
+          _currentLng!,
+          _getRouteBearing(),
+        );
+      }
     }
   }
 
@@ -753,6 +862,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
       children: [
         // --- LAYER 1: Mappa Google ---
         MapWidget(
+          key: _mapKey,
           originLat: _directionsResult?.originLat,
           originLng: _directionsResult?.originLng,
           destLat: _directionsResult?.destLat,
@@ -764,6 +874,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   _appState == NavigationAppState.placeSelected
               ? _onMapTapped
               : null,
+          // Callback pan manuale: disattiva il follow-mode
+          onUserInteraction: () {
+            if (_isFollowingUser) {
+              setState(() {
+                _isFollowingUser = false;
+              });
+            }
+          },
         ),
 
         // --- LAYER 2: Pannello Ricerca (NASCOSTO IN NAVIGAZIONE) ---
@@ -878,6 +996,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   // --- LAYER 1: Mappa Google ---
                   SizedBox.expand(
                     child: MapWidget(
+                      key: _mapKey,
                       originLat: _directionsResult?.originLat,
                       originLng: _directionsResult?.originLng,
                       destLat: _directionsResult?.destLat,
@@ -885,6 +1004,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
                       encodedPolyline: _directionsResult?.encodedPolyline,
                       // TASK 3: callback per tap sulla mappa
                       onMapTap: _onMapTapped,
+                      // Callback pan manuale: disattiva il follow-mode
+                      onUserInteraction: () {
+                        if (_isFollowingUser) {
+                          setState(() {
+                            _isFollowingUser = false;
+                          });
+                        }
+                      },
                     ),
                   ),
 
@@ -1159,6 +1286,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                         setState(() {
                           _appState =
                               NavigationAppState.routePreview; // o ricerca
+                          _isFollowingUser = false;
                         });
                       },
                     ),
@@ -1168,6 +1296,41 @@ class _NavigationScreenState extends State<NavigationScreen> {
             },
           ),
         ),
+        // --- TASTO RECENTER ---
+        // Visibile SOLO quando l'utente ha spostato la mappa manualmente
+        // (follow-mode disattivato). Premendo il tasto:
+        // 1. Riattiva il follow-mode
+        // 2. Centra la camera sulla posizione GPS corrente
+        // 3. Orienta la mappa nella direzione del PERCORSO (non del GPS)
+        if (!_isFollowingUser)
+          Positioned(
+            bottom: 140, // Sopra il bottom sheet
+            right: 16,
+            child: FloatingActionButton(
+              heroTag: 'recenter_btn',
+              onPressed: () {
+                setState(() {
+                  _isFollowingUser = true;
+                });
+                // Centra subito con bearing calcolato verso il prossimo
+                // step del percorso, così l'utente vede subito DOVE andare
+                if (_currentLat != null && _currentLng != null) {
+                  _mapKey.currentState?.followUser(
+                    _currentLat!,
+                    _currentLng!,
+                    _getRouteBearing(),
+                  );
+                }
+              },
+              backgroundColor: Colors.white,
+              elevation: 4,
+              child: Icon(
+                Icons.my_location,
+                color: Colors.blue.shade700,
+                size: 28,
+              ),
+            ),
+          ),
         // BOTTOM SHEET (Info navigazione minimale, pedone, tempo, km - senza pulsanti)
         Positioned(
           bottom: 0,
@@ -1256,6 +1419,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
               _navigationMonitor.stopNavigation();
               setState(() {
                 _appState = NavigationAppState.routePreview;
+                _isFollowingUser = false;
               });
             },
           ),
