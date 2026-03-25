@@ -332,8 +332,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
               // Calcola il tempo trascorso dall'ultimo aggiornamento.
               // Usiamo position.timestamp (momento della lettura GPS)
               // invece di DateTime.now() per evitare latenza di delivery.
-              final DateTime currentTimestamp =
-                  position.timestamp ?? DateTime.now();
+              final DateTime currentTimestamp = position.timestamp;
               final double deltaSec =
                   currentTimestamp.difference(_prevTimestamp!).inMilliseconds /
                   1000.0;
@@ -392,7 +391,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
             // per il prossimo calcolo manuale
             _prevLat = position.latitude;
             _prevLng = position.longitude;
-            _prevTimestamp = position.timestamp ?? DateTime.now();
+            _prevTimestamp = position.timestamp;
 
             // DEBUG: mostra sorgente e valori per diagnostica
             final String source = position.speed > 0 ? 'CHIP' : 'MANUAL';

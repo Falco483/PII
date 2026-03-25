@@ -128,6 +128,11 @@ class NavigationMonitor {
   /// Bearing raw corrente dal GPS (può essere inaffidabile a basse velocità).
   double _rawBearing = 0.0;
 
+  /// Accuratezza GPS corrente in metri (0.0 = sconosciuta).
+  /// Aggiornata ad ogni chiamata updatePosition() e usata in _onRouteCheckTick()
+  /// per saltare i tick quando il segnale è troppo debole (> 30m).
+  double _currentAccuracy = 0.0;
+
   /// Lista degli step del percorso calcolato dalla Directions API.
   /// Viene aggiornata ogni volta che l'utente calcola un nuovo percorso.
   List<DirectionStep> _routeSteps = [];
@@ -355,6 +360,7 @@ class NavigationMonitor {
     _currentLng = lng;
     _currentSpeed = speedKmH;
     _rawBearing = rawBearing;
+    _currentAccuracy = accuracy;
 
     // --- LOGICA TRIGGER VELOCITÀ ZERO (Step 2.1) ---
     //
@@ -1026,6 +1032,16 @@ class NavigationMonitor {
     // ad aggiornarsi. Usiamo lo snapshot per tutti i calcoli.
     final double lat = _currentLat!;
     final double lng = _currentLng!;
+
+    // FIX 3: Grace period dei primi 15 secondi dopo l'avvio della navigazione.
+    // Nei primi 15 secondi saltiamo il controllo di deviazione per dare
+    // all'utente il tempo di mettersi in cammino e allinearsi alla polyline.
+    if (_navigationStartTime != null) {
+      final elapsed = DateTime.now().difference(_navigationStartTime!).inSeconds;
+      if (elapsed < 15) {
+        return;
+      }
+    }
 
     // TASK 5 - Filtro Signal Drift basato sull'accuratezza GPS
     if (_currentAccuracy > 30.0) {
