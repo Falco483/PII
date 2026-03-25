@@ -52,10 +52,18 @@ const int kBearingUpdateIntervalSec = 5;
 /// Soglia di velocità (km/h) sotto la quale si considera l'utente "fermo".
 /// Usata per attivare il timer di 10 secondi (Step 2.1).
 ///
-/// Si usa 1 km/h invece di 0 esatto perché il GPS raramente restituisce
-/// velocità perfettamente zero anche quando il dispositivo è fermo —
-/// c'è sempre un po' di rumore/drift nel segnale.
-const double kZeroSpeedThresholdKmH = 1.0;
+/// PERCHÉ 2.5 km/h E NON 1.0:
+/// Il GPS ha un drift intrinseco: anche da completamente fermi, il chip
+/// calcola micro-spostamenti fantasma (multipath, rumore termico) che
+/// producono velocità raw di 0.5-3 km/h. Con la soglia a 1.0, il drift
+/// superava la soglia troppo spesso e il timer non partiva mai.
+///
+/// 2.5 km/h è un buon compromesso:
+/// - È sopra il range tipico di drift da fermo (0.5-2 km/h dopo EMA)
+/// - È sotto la velocità minima di camminata umana (~3.5-4 km/h)
+/// - Con il filtro EMA applicato a monte, la velocità filtrata da fermo
+///   converge verso 0.3-0.8 km/h, ben sotto questa soglia
+const double kZeroSpeedThresholdKmH = 2.5;
 
 /// Durata del countdown (millisecondi) quando la velocità scende a zero.
 ///
