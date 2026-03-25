@@ -360,18 +360,16 @@ class NavigationMonitor {
     //    destinata a persone con disabilità cognitive
 
     if (speedKmH < kZeroSpeedThresholdKmH) {
-      // L'utente è fermo. Avvia il countdown SOLO se non è già attivo.
-      // Controllare _zeroSpeedTimer != null evita di creare timer multipli
-      // che causerebbero analisi duplicate.
       if (_zeroSpeedTimer == null && !_isAnalysisRunning) {
+        print('⏱️ OVERLAY DEBUG: Velocità ${speedKmH.toStringAsFixed(1)} km/h < soglia. '
+              'Avvio countdown ${kZeroSpeedDelayMs}ms...');
         _startZeroSpeedCountdown();
       }
     } else {
-      // Se l'utente si è rimesso in moto. Cancella il countdown se era attivo.
-      // Questo gestisce il caso classico: l'utente si ferma al semaforo,
-      // il semaforo diventa verde dopo 5 secondi, l'utente riparte.
-      // Senza questa cancellazione, il timer continuerebbe a contare e
-      // l'analisi partirebbe anche se l'utente è in movimento.
+      if (_zeroSpeedTimer != null) {
+        print('🏃 OVERLAY DEBUG: Velocità ${speedKmH.toStringAsFixed(1)} km/h — '
+              'utente in moto, ANNULLO countdown.');
+      }
       _cancelZeroSpeedCountdown();
     }
 
@@ -591,15 +589,15 @@ class NavigationMonitor {
     _bearingTimer = Timer.periodic(
       Duration(seconds: kBearingUpdateIntervalSec),
       (timer) {
-        // Solo se la velocità è sopra la soglia configurabile il bearing
-        // è considerato affidabile. Sotto soglia, direction mantiene
-        // il suo ultimo valore valido (o resta null se mai impostato).
         if (_currentSpeed >= kSpeedThresholdKmH) {
+          final bool wasNull = _direction == null;
           _direction = _rawBearing;
+          if (wasNull) {
+            print('🧭 OVERLAY DEBUG: PRIMO bearing acquisito! '
+                  'direction=$_direction° (speed=$_currentSpeed km/h). '
+                  'L\'analisi overlay è ora ABILITATA.');
+          }
         }
-        // Se la velocità è sotto soglia, NON aggiorniamo _direction.
-        // Questo è intenzionale: preferiamo un bearing "vecchio ma buono"
-        // a un bearing "nuovo ma casuale".
       },
     );
   }
@@ -622,16 +620,16 @@ class NavigationMonitor {
     _zeroSpeedTimer = Timer(
       const Duration(milliseconds: kZeroSpeedDelayMs),
       () {
-        // Il timer è scaduto. Resettiamo il riferimento al timer perché
-        // non è più cancellabile (è già scaduto).
         _zeroSpeedTimer = null;
 
-        // Doppia verifica: anche se abbiamo avviato il timer quando la
-        // velocità era sotto soglia, controlliamo di nuovo. Potrebbe essere
-        // cambiata nel frattempo a causa di un aggiornamento GPS arrivato
-        // tra l'ultimo check e lo scadere del timer.
         if (_currentSpeed < kZeroSpeedThresholdKmH) {
+          print('⏱️ OVERLAY DEBUG: Countdown ${kZeroSpeedDelayMs}ms SCADUTO — '
+                'velocità ancora ${_currentSpeed.toStringAsFixed(1)} km/h. '
+                'Lancio _executeAnalysis()...');
           _executeAnalysis();
+        } else {
+          print('⏱️ OVERLAY DEBUG: Countdown scaduto MA velocità è salita a '
+                '${_currentSpeed.toStringAsFixed(1)} km/h — analisi SALTATA.');
         }
       },
     );
@@ -671,8 +669,12 @@ class NavigationMonitor {
   Future<void> _executeAnalysis() async {
     // Evita analisi concorrenti. Se un'analisi è già in corso (es. la
     // chiamata Roads API è lenta), non ne lanciamo una seconda.
-    if (_isAnalysisRunning) return;
+    if (_isAnalysisRunning) {
+      print('🔒 OVERLAY DEBUG: _executeAnalysis bloccata — analisi già in corso');
+      return;
+    }
     _isAnalysisRunning = true;
+    print('🟢 OVERLAY DEBUG: _executeAnalysis AVVIATA');
 
     try {
       // =====================================================================
@@ -691,17 +693,8 @@ class NavigationMonitor {
       final double? snapshotLng = _currentLng;
       final double? snapshotDirection = _direction;
 
-      // Se la posizione non è disponibile, non possiamo fare nulla.
       if (snapshotLat == null || snapshotLng == null) {
-        return;
-      }
-
-      // Se direction è null, nessun bearing affidabile è stato ancora acquisito.
-      // Non possiamo calcolare i punti laterali (non sappiamo dove è "destra"
-      // e dove è "sinistra"). Interrompiamo l'elaborazione.
-      // Le funzionalità che dipendono da direction restano in standby
-      // fino a quando l'utente non si muove a velocità sufficiente.
-      if (snapshotDirection == null) {
+        print('❌ OVERLAY DEBUG: ABORT — posizione GPS non disponibile (lat=$snapshotLat, lng=$snapshotLng)');
         return;
       }
 
@@ -709,30 +702,47 @@ class NavigationMonitor {
       // STEP 2.3 — VERIFICA VICINANZA A WAYPOINT DI SVOLTA
       // =====================================================================
       //
-      // Controlliamo se l'utente è fermo ESATTAMENTE su un punto di svolta
-      // del percorso calcolato. Se sì, l'overlay mostra l'istruzione di
+      // PRIMA del check bearing! Questo step ha bisogno SOLO di lat/lng,
+      // non della direzione. Così l'overlay di svolta funziona anche
+      // quando l'utente è fermo alla partenza e non ha mai camminato
+      // (bearing ancora null).
+      //
+      // Controlliamo se l'utente è fermo su un punto di svolta del
+      // percorso calcolato. Se sì, l'overlay mostra l'istruzione di
       // navigazione (dal campo html_instructions dello step) e usciamo.
-      //
-      // COME SI NAVIGANO GLI STEP DEL JSON DELLA DIRECTIONS API:
-      // La risposta della Directions API ha questa struttura:
-      //   routes[0].legs[0].steps[] — array di step
-      // Ogni step ha:
-      //   - start_location {lat, lng} — inizio del segmento
-      //   - end_location {lat, lng} — fine del segmento (= punto di svolta)
-      //   - html_instructions — testo dell'istruzione (es. "Svolta a destra")
-      //   - maneuver — codice della manovra (es. "turn-right")
-      //
-      // I PUNTI DI SVOLTA sono le end_location di ogni step: rappresentano
-      // i punti dove l'utente deve cambiare direzione.
 
       final turnResult = _checkNearTurnWaypoint(snapshotLat, snapshotLng);
 
       if (turnResult != null) {
-        // L'utente è vicino a un waypoint di svolta!
-        // Mostra l'istruzione di navigazione e interrompi.
+        print('🔵 OVERLAY DEBUG: WAYPOINT DI SVOLTA RILEVATO! '
+              'Messaggio: "${turnResult.message}", maneuver: ${turnResult.maneuver}');
         overlayNotifier.value = turnResult;
         return;
       }
+
+      print('⬜ OVERLAY DEBUG: Nessun waypoint di svolta vicino '
+            '(${_routeSteps.length} step controllati, raggio=${kTurnWaypointRadiusMeters}m). '
+            'Procedo con analisi laterale...');
+
+      // =====================================================================
+      // CHECK BEARING — necessario SOLO per i punti laterali (step 2.4+)
+      // =====================================================================
+      //
+      // Se direction è null, nessun bearing affidabile è stato ancora acquisito.
+      // Non possiamo calcolare i punti laterali (non sappiamo dove è "destra"
+      // e dove è "sinistra"). L'overlay di svolta (sopra) funziona comunque.
+      // Solo la parte laterale (Roads API) resta in standby.
+      if (snapshotDirection == null) {
+        print('❌ OVERLAY DEBUG: ABORT analisi laterale — direction è NULL '
+              '(bearing mai acquisito). Il check waypoint sopra è già passato. '
+              'Cammina a ≥${kSpeedThresholdKmH} km/h per ≥${kBearingUpdateIntervalSec}s '
+              'per abilitare anche il rilevamento strade laterali.');
+        return;
+      }
+
+      print('📍 OVERLAY DEBUG: Snapshot acquisito — '
+            'pos=($snapshotLat, $snapshotLng), bearing=$snapshotDirection°, '
+            'speed=$_currentSpeed km/h');
 
       // L'utente NON è su un incrocio di svolta del percorso.
       // Procediamo con il rilevamento delle strade laterali.
@@ -750,6 +760,9 @@ class NavigationMonitor {
         snapshotLng,
         snapshotDirection,
       );
+
+      print('📐 OVERLAY DEBUG: ${lateralPoints.length} punti laterali calcolati. '
+            'Chiamo Roads API...');
 
       // =====================================================================
       // STEP 2.5 — CHIAMATA ROADS API
@@ -788,19 +801,21 @@ class NavigationMonitor {
 
       if (snappedPoints == null) {
         // Chiamata fallita — fallback silenzioso.
-        // L'utente non viene disturbato. Meglio non mostrare nulla
-        // che mostrare un'informazione potenzialmente sbagliata.
+        print('❌ OVERLAY DEBUG: Roads API FALLITA (null). Nessun overlay mostrato.');
         return;
       }
 
       if (snappedPoints.isNotEmpty) {
         // Strada laterale rilevata! Mostra l'overlay.
+        print('🟠 OVERLAY DEBUG: STRADA LATERALE RILEVATA! '
+              '${snappedPoints.length} punti snappati. Mostro overlay arancione.');
         overlayNotifier.value = NavigationOverlayState(
           type: OverlayType.lateralRoadDetected,
           message: 'vai diritto stronzo',
         );
+      } else {
+        print('⬜ OVERLAY DEBUG: Roads API OK ma 0 strade trovate. Nessun overlay.');
       }
-      // Se snappedPoints è vuoto, non facciamo nulla. Nessun overlay.
     } finally {
       // Assicuriamoci di resettare il flag anche in caso di eccezioni
       // non gestite. Il blocco finally viene eseguito SEMPRE, sia che
@@ -824,14 +839,15 @@ class NavigationMonitor {
   /// - NavigationOverlayState con l'istruzione, se l'utente è vicino a un waypoint
   /// - null se l'utente non è vicino a nessun waypoint
   NavigationOverlayState? _checkNearTurnWaypoint(double lat, double lng) {
-    // Se non c'è un percorso calcolato, non possiamo controllare nulla
-    if (_routeSteps.isEmpty) return null;
+    if (_routeSteps.isEmpty) {
+      print('🔍 OVERLAY DEBUG: _checkNearTurnWaypoint — 0 step nel percorso, skip.');
+      return null;
+    }
+
+    double closestDistance = double.infinity;
+    String closestInstruction = '';
 
     for (final step in _routeSteps) {
-      // Calcola la distanza tra la posizione dell'utente e la end_location
-      // dello step. La end_location è il punto dove termina il segmento
-      // corrente e inizia il segmento successivo — ovvero il punto dove
-      // l'utente deve cambiare direzione.
       final double distance = haversineDistance(
         lat,
         lng,
@@ -839,16 +855,12 @@ class NavigationMonitor {
         step.endLng,
       );
 
-      // Se la distanza è inferiore al raggio configurabile (default 5m),
-      // l'utente è considerato "sul" waypoint di svolta.
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestInstruction = step.instruction;
+      }
+
       if (distance <= kTurnWaypointRadiusMeters) {
-        // L'utente è fermo esattamente su un punto di svolta del percorso!
-        // Mostra l'istruzione di navigazione testuale presa da html_instructions.
-        //
-        // Usiamo step.instruction (che è il campo html_instructions ripulito
-        // dai tag HTML) come testo dell'overlay, così l'utente legge
-        // esattamente l'istruzione che la Directions API ha fornito per
-        // questo specifico punto del percorso.
         return NavigationOverlayState(
           type: OverlayType.turnInstruction,
           message: step.instruction,
@@ -856,6 +868,9 @@ class NavigationMonitor {
         );
       }
     }
+
+    print('🔍 OVERLAY DEBUG: Waypoint più vicino a ${closestDistance.toStringAsFixed(1)}m '
+          '(soglia=${kTurnWaypointRadiusMeters}m) — "$closestInstruction"');
 
     // Nessun waypoint di svolta è abbastanza vicino
     return null;

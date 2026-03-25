@@ -17,6 +17,7 @@
 /// che decide QUANDO e COSA mostrare è in navigation_monitor.dart.
 library;
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/navigation_monitor.dart';
 import '../services/geo_utils.dart';
@@ -67,9 +68,16 @@ class _NavigationOverlayState extends State<NavigationOverlay>
   late AnimationController _animController;
   late Animation<double> _fadeAnimation;
 
-  /// Timer per l'auto-dismiss.
+  /// Timer CANCELLABILE per l'auto-dismiss.
   /// Dopo [kOverlayAutoDismissSeconds] secondi, l'overlay si chiude da solo.
-  /// Il timer viene cancellato se l'utente tocca l'overlay prima dello scadere.
+  ///
+  /// PERCHÉ Timer E NON Future.delayed:
+  /// Future.delayed non è cancellabile. Se il monitor emette un nuovo overlay
+  /// mentre il vecchio Future.delayed è ancora in coda, il vecchio callback
+  /// scatta comunque e chiude prematuramente il nuovo overlay.
+  /// Con Timer possiamo cancellare il countdown precedente ogni volta che
+  /// arriva un nuovo overlay, resettando il conteggio da zero.
+  Timer? _autoDismissTimer;
   @override
   void initState() {
     super.initState();
@@ -92,33 +100,60 @@ class _NavigationOverlayState extends State<NavigationOverlay>
       _animController.forward();
       _startAutoDismissTimer();
     }
+    // FIX: Quando lo stato passa da non-null a un ALTRO non-null
+    // (il monitor ha emesso un nuovo overlay mentre il precedente era ancora
+    // visibile), resettiamo il timer di auto-dismiss e assicuriamoci che
+    // l'animazione sia in forward. Senza questo ramo, il vecchio timer
+    // (non cancellabile con Future.delayed) poteva chiudere prematuramente
+    // il nuovo overlay, e l'animazione restava nel suo stato corrente
+    // senza mai fare forward sul nuovo messaggio.
+    else if (widget.state != null && oldWidget.state != null) {
+      _animController.forward();
+      _startAutoDismissTimer();
+    }
     // Quando lo stato passa da non-null a null, avvia il fade-out
     else if (widget.state == null && oldWidget.state != null) {
       _animController.reverse();
     }
   }
 
-  /// Avvia il timer di auto-dismiss.
+  /// Avvia il timer di auto-dismiss (CANCELLABILE).
   ///
   /// L'overlay si chiude automaticamente dopo kOverlayAutoDismissSeconds
   /// secondi. Questo è importante per:
   /// - Non richiedere un'azione esplicita all'utente
   /// - Evitare che l'overlay copra la mappa indefinitamente
   /// - Gestire il caso in cui l'utente non tocchi lo schermo
+  ///
+  /// Se un timer precedente è ancora attivo (es. il monitor ha emesso un
+  /// nuovo overlay prima che il vecchio scadesse), viene cancellato e
+  /// ricreato con il countdown pieno. Così il nuovo overlay ha sempre
+  /// i suoi N secondi completi di visibilità.
   void _startAutoDismissTimer() {
-    Future.delayed(Duration(seconds: kOverlayAutoDismissSeconds), () {
-      // Verifica che il widget sia ancora montato (l'utente potrebbe
-      // aver cambiato schermata durante il countdown)
-      if (mounted && widget.state != null) {
-        _dismiss();
-      }
-    });
+    // Cancella un eventuale timer precedente ancora in corso
+    _autoDismissTimer?.cancel();
+
+    _autoDismissTimer = Timer(
+      Duration(seconds: kOverlayAutoDismissSeconds),
+      () {
+        // Verifica che il widget sia ancora montato (l'utente potrebbe
+        // aver cambiato schermata durante il countdown)
+        if (mounted && widget.state != null) {
+          _dismiss();
+        }
+      },
+    );
   }
 
   /// Chiude l'overlay con animazione fade-out e notifica il chiamante.
   ///
   /// Chiamato sia dal tap dell'utente che dal timer di auto-dismiss.
   void _dismiss() {
+    // Cancella il timer di auto-dismiss per evitare un secondo _dismiss()
+    // se l'utente chiude manualmente l'overlay prima dello scadere.
+    _autoDismissTimer?.cancel();
+    _autoDismissTimer = null;
+
     _animController.reverse().then((_) {
       // Notifica il chiamante SOLO dopo che il fade-out è completato.
       // Se chiamassimo onDismiss subito, lo stato verrebbe resettato
@@ -131,6 +166,7 @@ class _NavigationOverlayState extends State<NavigationOverlay>
 
   @override
   void dispose() {
+    _autoDismissTimer?.cancel();
     _animController.dispose();
     super.dispose();
   }

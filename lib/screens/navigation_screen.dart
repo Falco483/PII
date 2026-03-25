@@ -19,8 +19,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../models/search_history_item.dart';
 import '../services/directions_service.dart';
 import '../services/navigation_monitor.dart';
+import '../services/search_history_service.dart';
+import '../services/geo_utils.dart';
 import '../widgets/map_widget.dart';
 import '../widgets/search_input.dart';
 import '../widgets/directions_list.dart';
@@ -54,6 +57,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Servizio per le direzioni (Directions API)
   final DirectionsService _directionsService = DirectionsService();
 
+  /// Servizio per la memoria delle ultime ricerche.
+  final SearchHistoryService _searchHistoryService = SearchHistoryService();
+
   /// Monitor di navigazione — gestisce tutta la logica di business:
   /// bearing affidabile, trigger velocità zero, analisi strade laterali.
   /// Viene inizializzato in initState() e distrutto in dispose().
@@ -84,6 +90,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Messaggio di errore (null se nessun errore)
   String? _errorMessage;
 
+  /// Durata di visibilità del banner errore.
+  static const Duration _errorBannerDuration = Duration(seconds: 2);
+
+  /// Timer per nascondere automaticamente il banner errore.
+  Timer? _errorBannerTimer;
+
   // ===========================================================================
   // STATO GPS — VARIABILI IN TEMPO REALE
   // ===========================================================================
@@ -92,19 +104,52 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Viene cancellata in dispose() per evitare memory leak.
   StreamSubscription<Position>? _positionStream;
 
-  /// Velocità corrente dell'utente in km/h.
-  /// Aggiornata ad ogni frame GPS. Usata per:
-  /// 1. Mostrare la velocità nell'overlay sulla mappa
-  /// 2. Alimentare il NavigationMonitor per il trigger velocità-zero
+  /// Velocità corrente dell'utente in km/h (filtrata con EMA).
+  ///
+  /// Calcolata con approccio IBRIDO:
+  /// 1. Se il chip GPS riporta position.speed > 0 → usa quello (più preciso)
+  /// 2. Se position.speed == 0 (chip non lo supporta) → calcola manualmente
+  ///    dalla distanza tra due posizioni GPS consecutive diviso il tempo
+  ///
+  /// In entrambi i casi il valore viene poi smorzato con un filtro EMA
+  /// per eliminare i picchi di drift da fermo.
   double _currentSpeed = 0.0;
 
+  /// Fattore di smoothing per il filtro EMA (Exponential Moving Average).
+  ///
+  /// Formula: filteredSpeed = α × rawSpeed + (1 - α) × filteredSpeed_precedente
+  ///
+  /// α = 0.4 → buon compromesso: reagisce in 2-3 frame (~1-2 secondi con
+  /// distanceFilter=2), ma smorza abbastanza i picchi di drift da fermo.
+  static const double _speedEmaAlpha = 0.4;
+
+  /// Soglia minima di intervallo temporale (secondi) tra due aggiornamenti
+  /// GPS per il calcolo manuale della velocità.
+  ///
+  /// Se due aggiornamenti arrivano troppo ravvicinati (es. < 0.5s),
+  /// la distanza tra le due posizioni è dominata dall'errore GPS e il
+  /// rapporto distanza/tempo produce velocità assurde (es. 50 km/h per
+  /// un drift di 3 metri in 0.2 secondi). Scartiamo questi campioni.
+  static const double _minTimeDeltaSec = 0.5;
+
   /// Posizione corrente dell'utente (latitudine).
-  /// Aggiornata ad ogni frame GPS. Usata come input per il NavigationMonitor.
   double? _currentLat;
 
   /// Posizione corrente dell'utente (longitudine).
-  /// Aggiornata ad ogni frame GPS. Usata come input per il NavigationMonitor.
   double? _currentLng;
+
+  /// Posizione GPS PRECEDENTE — per calcolo velocità manuale.
+  /// Salvata alla fine di ogni aggiornamento GPS. Al prossimo aggiornamento,
+  /// calcoliamo la distanza tra la posizione precedente e quella nuova
+  /// e dividiamo per il tempo trascorso.
+  double? _prevLat;
+  double? _prevLng;
+
+  /// Timestamp dell'aggiornamento GPS precedente (epoch).
+  /// Usiamo position.timestamp (quando il chip ha preso la lettura)
+  /// e non DateTime.now() (quando Flutter l'ha ricevuta), perché il
+  /// secondo include latenza variabile di delivery dall'OS.
+  DateTime? _prevTimestamp;
 
   /// Bearing raw del GPS (gradi 0-360).
   /// Questo è il bearing grezzo fornito dal sensore GPS. È INAFFIDABILE
@@ -256,38 +301,118 @@ class _NavigationScreenState extends State<NavigationScreen> {
           ),
         ).listen((Position position) {
           setState(() {
-            // --- Velocità ---
-            // La velocità in Position è in m/s. Convertiamo in km/h (* 3.6).
-            // Se il valore è negativo (errore del sensore), lo azzeriamo.
-            double speedKmH = position.speed * 3.6;
-            _currentSpeed = speedKmH > 0 ? speedKmH : 0.0;
+            // =============================================================
+            // VELOCITÀ — CALCOLO IBRIDO (chip GPS + fallback manuale)
+            // =============================================================
+            //
+            // STRATEGIA:
+            // 1. Se il chip GPS riporta speed > 0 → usiamo quello.
+            //    È il dato più preciso perché il chip usa il Doppler shift
+            //    del segnale satellitare, che è accurato anche a basse
+            //    velocità (errore tipico: ±0.1 m/s).
+            //
+            // 2. Se speed == 0 (chip non lo supporta, comune su molti
+            //    Android economici) → calcoliamo manualmente dalla
+            //    distanza geodetica tra la posizione precedente e quella
+            //    attuale, diviso il tempo trascorso.
+            //
+            // 3. In entrambi i casi applichiamo un filtro EMA per smorzare
+            //    i picchi di drift da fermo.
+
+            double rawSpeedKmH;
+
+            // Caso 1: il chip GPS riporta la velocità
+            if (position.speed > 0) {
+              rawSpeedKmH = position.speed * 3.6; // m/s → km/h
+            }
+            // Caso 2: calcolo manuale dalla distanza/tempo
+            else if (_prevLat != null &&
+                     _prevLng != null &&
+                     _prevTimestamp != null) {
+              // Calcola il tempo trascorso dall'ultimo aggiornamento.
+              // Usiamo position.timestamp (momento della lettura GPS)
+              // invece di DateTime.now() per evitare latenza di delivery.
+              final DateTime currentTimestamp =
+                  position.timestamp ?? DateTime.now();
+              final double deltaSec =
+                  currentTimestamp.difference(_prevTimestamp!).inMilliseconds /
+                  1000.0;
+
+              // Scarta campioni troppo ravvicinati: con Δt < 0.5s
+              // la distanza è dominata dall'errore GPS (3-10m) e il
+              // rapporto d/t esplode (es. 3m / 0.2s = 54 km/h da fermo).
+              if (deltaSec >= _minTimeDeltaSec) {
+                // Distanza geodetica tra la posizione precedente e attuale
+                final double distanceMeters = haversineDistance(
+                  _prevLat!,
+                  _prevLng!,
+                  position.latitude,
+                  position.longitude,
+                );
+
+                // velocità = distanza / tempo, convertita in km/h
+                // distanceMeters / deltaSec = m/s, × 3.6 = km/h
+                rawSpeedKmH = (distanceMeters / deltaSec) * 3.6;
+              } else {
+                // Intervallo troppo breve, manteniamo il valore precedente
+                rawSpeedKmH = _currentSpeed;
+              }
+            }
+            // Caso 3: primo aggiornamento GPS, nessun dato precedente
+            else {
+              rawSpeedKmH = 0.0;
+            }
+
+            // Sanitizza: se negativo (errore sensore) azzeriamo
+            if (rawSpeedKmH < 0) rawSpeedKmH = 0.0;
+
+            // Clamp anti-teleportazione: una persona a piedi non supera
+            // i 15 km/h (corsa veloce). Valori superiori sono certamente
+            // un salto del fix GPS (il chip perde il segnale per 2s e al
+            // ritorno si ritrova a 20m di distanza → 20m/2s = 36 km/h).
+            // Li scartiamo per evitare che l'EMA impieghi molti frame
+            // a smaltire un picco assurdo.
+            if (rawSpeedKmH > 15.0) {
+              rawSpeedKmH = _currentSpeed; // Mantieni il valore filtrato attuale
+            }
+
+            // Filtro EMA — smorza i picchi di drift da fermo
+            _currentSpeed = _speedEmaAlpha * rawSpeedKmH +
+                (1 - _speedEmaAlpha) * _currentSpeed;
+
+            // Dead zone: sotto 0.3 km/h forziamo a zero.
+            // Questo elimina il micro-drift residuo dopo l'EMA che
+            // manterrebbe il contavelocità a "0.2" anche da perfettamente
+            // fermi, impedendo al timer di 10s di partire.
+            if (_currentSpeed < 0.3) {
+              _currentSpeed = 0.0;
+            }
+
+            // Salva posizione e timestamp correnti come "precedenti"
+            // per il prossimo calcolo manuale
+            _prevLat = position.latitude;
+            _prevLng = position.longitude;
+            _prevTimestamp = position.timestamp ?? DateTime.now();
+
+            // DEBUG: mostra sorgente e valori per diagnostica
+            final String source = position.speed > 0 ? 'CHIP' : 'MANUAL';
+            print('🚶 SPEED DEBUG [$source]: '
+                  'raw=${rawSpeedKmH.toStringAsFixed(2)} '
+                  '→ EMA=${_currentSpeed.toStringAsFixed(2)} km/h '
+                  '(chip=${(position.speed * 3.6).toStringAsFixed(2)} km/h, '
+                  'acc=${position.accuracy.toStringAsFixed(1)}m)');
 
             // --- Posizione ---
-            // Salviamo latitudine e longitudine correnti.
-            // Questi valori vengono usati dal NavigationMonitor per:
-            // 1. Lo snapshot al momento del trigger (Step 2.2)
-            // 2. Il calcolo della distanza dai waypoint (Step 2.3)
-            // 3. Il calcolo dei punti laterali (Step 2.4)
             _currentLat = position.latitude;
             _currentLng = position.longitude;
 
             // --- Bearing ---
-            // Il bearing (heading) del GPS indica la direzione in cui il
-            // dispositivo si sta muovendo, espressa in gradi (0° = Nord,
-            // 90° = Est, 180° = Sud, 270° = Ovest).
-            //
-            // position.heading può essere NaN o negativo in alcuni dispositivi
-            // quando non è disponibile. Lo sanitizziamo a 0.0 in quei casi.
             _rawBearing = position.heading.isFinite && position.heading >= 0
                 ? position.heading
                 : 0.0;
           });
 
           // Inoltra TUTTI i dati aggiornati al NavigationMonitor.
-          // Il monitor si occupa di:
-          // - Decidere se aggiornare il bearing affidabile (direction)
-          // - Gestire il trigger velocità-zero
-          // - Lanciare l'analisi delle strade laterali se necessario
           _navigationMonitor.updatePosition(
             _currentLat!,
             _currentLng!,
@@ -302,6 +427,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
   void dispose() {
     // Cancella lo stream GPS per evitare memory leak e consumo batteria
     _positionStream?.cancel();
+
+    // Cancella il timer del banner errore.
+    _errorBannerTimer?.cancel();
 
     // Rimuove i listener prima di distruggere il monitor
     _navigationMonitor.overlayNotifier.removeListener(_onOverlayChanged);
@@ -318,6 +446,22 @@ class _NavigationScreenState extends State<NavigationScreen> {
     _destinationController.dispose();
 
     super.dispose();
+  }
+
+  void _showTemporaryError(String message) {
+    _errorBannerTimer?.cancel();
+
+    if (!mounted) return;
+    setState(() {
+      _errorMessage = message;
+    });
+
+    _errorBannerTimer = Timer(_errorBannerDuration, () {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = null;
+      });
+    });
   }
 
   // ===========================================================================
@@ -398,14 +542,13 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Senza la posizione dell'utente, non possiamo calcolare un percorso
     // perché non sappiamo da dove partire.
     if (_currentLat == null || _currentLng == null) {
-      setState(() {
-        _errorMessage =
-            'Posizione GPS non disponibile. '
-            'Attendi il fix GPS e riprova.';
-      });
+      _showTemporaryError(
+        'Posizione GPS non disponibile. Attendi il fix GPS e riprova.',
+      );
       return;
     }
 
+    _errorBannerTimer?.cancel();
     // Imposta lo stato di caricamento
     setState(() {
       _isLoading = true;
@@ -423,6 +566,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
       // 2. Funziona anche per punti sulla mappa senza indirizzo
       final String destination = '$destLat,$destLng';
 
+      // Registra la ricerca prima della request API.
+      // Vale per qualsiasi sorgente (barra ricerca o tap mappa)
+      // indipendentemente dal successo della chiamata.
+      await _searchHistoryService.recordSearch(
+        SearchHistoryItem(
+          address: destAddress,
+          lat: destLat,
+          lng: destLng,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+
       // Chiama l'API con percorsi alternativi (TASK 4).
       // Questo metodo:
       // 1. Invia la richiesta con alternatives=true
@@ -435,9 +590,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
       );
 
       // Aggiorna lo stato con il risultato
-      setState(() {
-        _isLoading = false;
-        if (result != null) {
+      if (result != null) {
+        setState(() {
+          _isLoading = false;
+
           // Salva il risultato completo con tutti i percorsi (TASK 4)
           _allRoutesResult = result;
 
@@ -454,21 +610,24 @@ class _NavigationScreenState extends State<NavigationScreen> {
             destLng: result.destLng,
           );
           _errorMessage = null;
+        });
 
-          // TASK 5: Avvia la navigazione nel monitor.
-          // Usa destAddress per il ricalcolo futuro (Task 2c del monitor)
-          // perché se l'utente devia, la destinazione deve restare la stessa.
-          _navigationMonitor.startNavigation(result, destAddress);
-        } else {
-          _errorMessage = 'Impossibile calcolare il percorso. Riprova.';
-        }
-      });
+        // TASK 5: Avvia la navigazione nel monitor.
+        // Usa destAddress per il ricalcolo futuro (Task 2c del monitor)
+        // perché se l'utente devia, la destinazione deve restare la stessa.
+        _navigationMonitor.startNavigation(result, destAddress);
+      } else {
+        setState(() {
+          _isLoading = false;
+        });
+        _showTemporaryError('Impossibile calcolare il percorso. Riprova.');
+      }
     } catch (e) {
       // Gestisce eventuali errori
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Errore: $e';
       });
+      _showTemporaryError('Errore: $e');
     }
   }
 
@@ -488,6 +647,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
   void _onDestinationSelected(double lat, double lng, String address) {
     // Log per debugging
     print('Destinazione selezionata da ricerca: $address ($lat, $lng)');
+
+    // Salva subito in cronologia (fire-and-forget, dedup gestito dal service)
+    _searchHistoryService
+        .recordSearch(
+          SearchHistoryItem(
+            address: address,
+            lat: lat,
+            lng: lng,
+            timestamp: DateTime.now().millisecondsSinceEpoch,
+          ),
+        )
+        .catchError((e) => print('Errore salvataggio cronologia: $e'));
 
     setState(() {
       _selectedDestinationAddress = address;
@@ -625,10 +796,15 @@ class _NavigationScreenState extends State<NavigationScreen> {
         NavigationOverlay(
           state: _overlayState,
           onDismiss: () {
+            // Resettiamo SOLO lo stato locale della UI.
+            // NON tocchiamo overlayNotifier.value: farlo causerebbe un
+            // loop circolare (onDismiss → notifier=null → _onOverlayChanged
+            // → setState) e potrebbe interrompere l'animazione di fade-out
+            // in corso perché il widget verrebbe ricostruito con state=null
+            // prima che reverse() sia completato.
             setState(() {
               _overlayState = null;
             });
-            _navigationMonitor.overlayNotifier.value = null;
           },
         ),
 
@@ -723,7 +899,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
                       setState(() {
                         _overlayState = null;
                       });
-                      _navigationMonitor.overlayNotifier.value = null;
                     },
                   ),
                 ],
@@ -865,21 +1040,25 @@ class _NavigationScreenState extends State<NavigationScreen> {
             builder: (context, currentStepIndex, child) {
               // 1. Prendi la lista di tutti gli step calcolati attualmente
               final steps = _directionsResult?.steps ?? [];
-              
+
               // Se per qualche motivo gli step sono vuoti, mostra un layout di fallback
               if (steps.isEmpty) {
                 return _buildFallbackBanner();
               }
 
               // 2. Sicurezza: Evita crash se l'indice impazzisce oltre la lunghezza dell'array
-              final safeIndex = currentStepIndex < steps.length ? currentStepIndex : steps.length - 1;
+              final safeIndex = currentStepIndex < steps.length
+                  ? currentStepIndex
+                  : steps.length - 1;
 
               // 3. Estrai lo step CORRENTE (quello da mostrare in grande)
               final currentStep = steps[safeIndex];
 
               // 4. Estrai lo step SUCCESSIVO (se esiste) per darne un'anteprima,
               // esattamente come fa Google Maps ("poi svolta a...")
-              final nextStep = (safeIndex + 1 < steps.length) ? steps[safeIndex + 1] : null;
+              final nextStep = (safeIndex + 1 < steps.length)
+                  ? steps[safeIndex + 1]
+                  : null;
 
               return Container(
                 color: Colors.green.shade800,
@@ -890,14 +1069,19 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   right: 16,
                 ),
                 child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start, // Allinea gli elementi in alto
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start, // Allinea gli elementi in alto
                   children: [
                     // Icona della Manovra Corrente
                     // Qui al posto di freccia_su mettiamo un placeholder dinamico pronto
                     // per essere integrato con icone mappate su "maneuver" (es. Icons.turn_right).
                     const Padding(
                       padding: EdgeInsets.only(top: 4.0),
-                      child: Icon(Icons.directions, color: Colors.white, size: 40),
+                      child: Icon(
+                        Icons.directions,
+                        color: Colors.white,
+                        size: 40,
+                      ),
                     ),
                     const SizedBox(width: 16),
                     Expanded(
@@ -906,7 +1090,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
                         children: [
                           // TESTO PRINCIPALE (Istruzione Corrente)
                           Text(
-                            currentStep.instruction, // "Svolta a destra su Via Roma"
+                            currentStep
+                                .instruction, // "Svolta a destra su Via Roma"
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 22,
@@ -914,12 +1099,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
                             ),
                           ),
                           const SizedBox(height: 4),
-                          
+
                           // DISTANZA (Istruzione Corrente)
                           Text(
                             currentStep.distance, // "1.2 km"
                             style: TextStyle(
-                              color: Colors.white.withAlpha(220), // deprecated warning fix for withOpacity
+                              color: Colors.white.withAlpha(
+                                220,
+                              ), // deprecated warning fix for withOpacity
                               fontSize: 16,
                               fontWeight: FontWeight.w500,
                             ),
@@ -932,12 +1119,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
                               padding: const EdgeInsets.only(top: 12),
                               decoration: BoxDecoration(
                                 border: Border(
-                                  top: BorderSide(color: Colors.white.withAlpha(50)),
+                                  top: BorderSide(
+                                    color: Colors.white.withAlpha(50),
+                                  ),
                                 ),
                               ),
                               child: Row(
                                 children: [
-                                  Icon(Icons.subdirectory_arrow_right, color: Colors.white.withAlpha(150), size: 16),
+                                  Icon(
+                                    Icons.subdirectory_arrow_right,
+                                    color: Colors.white.withAlpha(150),
+                                    size: 16,
+                                  ),
                                   const SizedBox(width: 8),
                                   Expanded(
                                     child: Text(
@@ -954,7 +1147,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                                 ],
                               ),
                             ),
-                          ]
+                          ],
                         ],
                       ),
                     ),
@@ -965,7 +1158,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
                         // Ferma navigazione
                         _navigationMonitor.stopNavigation();
                         setState(() {
-                          _appState = NavigationAppState.routePreview; // o ricerca
+                          _appState =
+                              NavigationAppState.routePreview; // o ricerca
                         });
                       },
                     ),
@@ -1032,7 +1226,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     );
   }
 
-  /// Metodo Helper per estrarre la grafica di "Fallback" quando non c'è una rotta 
+  /// Metodo Helper per estrarre la grafica di "Fallback" quando non c'è una rotta
   /// (usato se il _navigationMonitor non ha ancora sincronizzato i percorsi).
   Widget _buildFallbackBanner() {
     return Container(

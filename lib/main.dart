@@ -6,7 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter_android/google_maps_flutter_android.dart';
 import 'package:google_maps_flutter_platform_interface/google_maps_flutter_platform_interface.dart';
-import 'screens/navigation_screen.dart';
+import 'package:pii/screens/navigation_screen.dart';
 
 /// Entry point dell'applicazione
 void main() async {
