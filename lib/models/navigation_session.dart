@@ -60,8 +60,12 @@ class NavigationSession {
   /// Lista degli overlay mostrati durante la sessione.
   final List<OverlayRecord> overlays;
 
-  /// Numero di ricalcoli del percorso effettuati (Task 2b + Task 2c).
+  /// Numero di ricalcoli del percorso effettuati.
   int rerouteCount;
+
+  /// Indica se l'utente è arrivato a destinazione prima di fermare la navigazione.
+  /// È true solo se tutti gli step del percorso sono stati completati.
+  bool destinationReached;
 
   /// Mappa per dati aggiuntivi futuri (es. distanza totale, velocità media, ecc.).
   final Map<String, dynamic> extraData;
@@ -73,6 +77,7 @@ class NavigationSession {
     this.endTime,
     List<OverlayRecord>? overlays,
     this.rerouteCount = 0,
+    this.destinationReached = false,
     Map<String, dynamic>? extraData,
   }) : overlays = overlays ?? [],
        extraData = extraData ?? {};
@@ -84,6 +89,7 @@ class NavigationSession {
     'endTime': endTime,
     'overlays': overlays.map((o) => o.toJson()).toList(),
     'rerouteCount': rerouteCount,
+    'destinationReached': destinationReached,
     'extraData': extraData,
   };
 
@@ -117,6 +123,7 @@ class NavigationSession {
       endTime: json['endTime'] as String?,
       overlays: overlayList,
       rerouteCount: (json['rerouteCount'] as num?)?.toInt() ?? 0,
+      destinationReached: (json['destinationReached'] as bool?) ?? false,
       extraData: extra,
     );
   }

@@ -441,10 +441,11 @@ class NavigationMonitor {
             // dicendogli: "Ehi UI, il nuovo numero step è questo, disegnati con la nuova istruzione!"
             currentStepNotifier.value = _currentStepIndex;
           } else {
-            // Se sono entrato qui, non ho più step successivi. 
-            // Significa che questo era esplicitamente l'ultimo incrocio 
+            // Se sono entrato qui, non ho più step successivi.
+            // Significa che questo era esplicitamente l'ultimo incrocio
             // prima dell'arrivo a destinazione finale!
             print("🎉 Navigazione ultimata, l'utente è arrivato!");
+            _currentSession?.destinationReached = true;
             // Volendo qui potremmo fare trigger per mostrare "Arrivati" sull'UI.
           }
         }

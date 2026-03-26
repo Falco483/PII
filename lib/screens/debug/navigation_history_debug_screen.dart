@@ -106,7 +106,7 @@ class _SessionCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                _StatusChip(completed: session.endTime != null),
+                _StatusChip(reached: session.destinationReached),
               ],
             ),
             const SizedBox(height: 10),
@@ -172,15 +172,15 @@ class _SessionCard extends StatelessWidget {
 // ── Status Chip ───────────────────────────────────────────────────────────────
 
 class _StatusChip extends StatelessWidget {
-  final bool completed;
+  final bool reached;
 
-  const _StatusChip({required this.completed});
+  const _StatusChip({required this.reached});
 
   @override
   Widget build(BuildContext context) {
-    final bg = completed ? Colors.green.shade100 : Colors.amber.shade100;
-    final fg = completed ? Colors.green.shade800 : Colors.amber.shade800;
-    final label = completed ? 'Completata' : 'In corso';
+    final bg = reached ? Colors.green.shade100 : Colors.red.shade100;
+    final fg = reached ? Colors.green.shade800 : Colors.red.shade800;
+    final label = reached ? 'Raggiunta' : 'Interrotta';
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
