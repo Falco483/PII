@@ -78,13 +78,18 @@ const int kZeroSpeedDelayMs = 10000;
 /// Raggio in metri entro il quale la posizione dell'utente viene considerata
 /// "coincidente" con un waypoint di svolta del percorso (Step 2.3).
 ///
-/// PERCHÉ 5 METRI:
-/// - La precisione tipica del GPS su smartphone è 3-10 m in condizioni normali
-/// - 5 m è abbastanza ampio da catturare l'utente che è "sull'incrocio"
-///   ma abbastanza stretto da non confondere due incroci vicini
-/// - Questo valore può essere aumentato (es. 10 m) se si opera in zone
-///   con GPS degradato (es. canyon urbani, gallerie)
-const double kTurnWaypointRadiusMeters = 5.0;
+/// PERCHÉ 25 METRI:
+/// - La precisione tipica del GPS su smartphone è 3-10 m in condizioni normali,
+///   ma in ambienti urbani (canyon urbani, riflessi su palazzi) può degradare
+///   fino a 15-20 m.
+/// - Con 5 m l'overlay di svolta non appariva quasi mai perché l'errore GPS
+///   posizionava l'utente fuori dal raggio troppo stretto.
+/// - 25 m garantisce che l'overlay appaia in anticipo (~5-6 secondi prima
+///   dell'incrocio a passo normale di 4-5 km/h), dando ai ragazzi con
+///   disabilità cognitive tempo sufficiente per leggere e prepararsi.
+/// - Il rischio di confondere due incroci vicini è basso: nelle aree urbane
+///   gli incroci distano tipicamente 50-100+ m l'uno dall'altro.
+const double kTurnWaypointRadiusMeters = 25.0;
 
 /// Distanza in metri dal punto corrente per calcolare i punti laterali
 /// principali (dx e sx) — Step 2.4.

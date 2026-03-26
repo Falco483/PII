@@ -320,11 +320,11 @@ class _SearchInputState extends State<SearchInput> {
         // La colonna si adatta alla dimensione dei figli
         mainAxisSize: MainAxisSize.min,
         children: [
-          // --- TITOLO ---
+          // --- TITOLO --- Amichevole per ragazzi con disabilità cognitive
           Text(
-            'Cerca Destinazione',
+            'Dove vuoi andare?',
             style: TextStyle(
-              fontSize: 18,
+              fontSize: 20,
               fontWeight: FontWeight.bold,
               color: Colors.blue.shade800,
             ),
@@ -340,12 +340,16 @@ class _SearchInputState extends State<SearchInput> {
             controller: widget.destinationController,
             // Callback chiamato ad ogni modifica del testo (ogni battitura)
             onChanged: _onTextChanged,
+            // Font grande per accessibilità
+            style: const TextStyle(fontSize: 18),
             // Decorazione del campo di testo
             decoration: InputDecoration(
               // Etichetta sopra il campo quando è attivo
               labelText: 'Destinazione',
+              labelStyle: const TextStyle(fontSize: 16),
               // Testo suggerimento quando il campo è vuoto
-              hintText: 'Cerca un indirizzo...',
+              hintText: 'Scrivi dove vuoi andare...',
+              hintStyle: TextStyle(fontSize: 16, color: Colors.grey.shade500),
               // Icona a sinistra del campo (pin rosso)
               prefixIcon: const Icon(Icons.place, color: Colors.red),
               // Icona a destra: mostra il caricamento se in corso,
@@ -436,18 +440,22 @@ class _SearchInputState extends State<SearchInput> {
                       // Icona posizione a sinistra di ogni suggerimento
                       leading: const Icon(
                         Icons.location_on_outlined,
-                        color: Colors.grey,
+                        color: Colors.blue,
+                        size: 28,
                       ),
-                      // Testo del suggerimento (descrizione del luogo)
+                      // Testo del suggerimento — più grande per accessibilità
                       title: Text(
                         suggestion.description,
-                        style: const TextStyle(fontSize: 14),
+                        style: const TextStyle(fontSize: 16),
                         // Limita a 2 righe e tronca con "..." se troppo lungo
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      // Densità compatta per mostrare più suggerimenti
-                      dense: true,
+                      // Più padding verticale per target di tocco più grande
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
                       // Al tap, seleziona questo suggerimento
                       onTap: () => _onSuggestionSelected(suggestion),
                     );
@@ -465,12 +473,15 @@ class _SearchInputState extends State<SearchInput> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 3),
                   ),
-                  SizedBox(width: 8),
-                  Text('Calcolo percorso in corso...'),
+                  SizedBox(width: 10),
+                  Text(
+                    'Sto preparando il percorso...',
+                    style: TextStyle(fontSize: 16),
+                  ),
                 ],
               ),
             ),

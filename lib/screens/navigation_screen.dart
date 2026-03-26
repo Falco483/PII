@@ -20,11 +20,13 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_compass/flutter_compass.dart';
 import '../models/search_history_item.dart';
 import '../services/directions_service.dart';
 import '../services/navigation_monitor.dart';
 import '../services/search_history_service.dart';
 import '../services/geo_utils.dart';
+import '../services/places_service.dart';
 import '../widgets/map_widget.dart';
 import '../widgets/search_input.dart';
 import '../widgets/directions_list.dart';
@@ -56,8 +58,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
   final TextEditingController _destinationController = TextEditingController();
 
   /// GlobalKey per accedere ai metodi del MapWidget (followUser, moveToLocation).
-  /// Necessaria perché MapWidget è uno StatefulWidget e i metodi pubblici
-  /// del suo State (MapWidgetState) sono accessibili solo tramite la key.
   final GlobalKey<MapWidgetState> _mapKey = GlobalKey<MapWidgetState>();
 
   /// Servizio per le direzioni (Directions API)
@@ -65,6 +65,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Servizio per la memoria delle ultime ricerche.
   final SearchHistoryService _searchHistoryService = SearchHistoryService();
+
+  /// Servizio Places API per reverse geocoding (nome del posto da coordinate).
+  final PlacesService _placesService = PlacesService();
 
   /// Monitor di navigazione — gestisce tutta la logica di business:
   /// bearing affidabile, trigger velocità zero, analisi strade laterali.
@@ -168,6 +171,28 @@ class _NavigationScreenState extends State<NavigationScreen> {
   double _rawBearing = 0.0;
 
   // ===========================================================================
+  // STATO BUSSOLA — ORIENTAMENTO FISICO DEL TELEFONO
+  // ===========================================================================
+
+  /// Subscription allo stream della bussola (magnetometro).
+  /// Fornisce l'orientamento fisico del telefono rispetto al nord magnetico.
+  /// A differenza del bearing GPS (che indica la DIREZIONE DI MARCIA),
+  /// la bussola indica DOVE IL TELEFONO È GIRATO — anche da fermo.
+  ///
+  /// Viene cancellata in dispose() per evitare memory leak.
+  StreamSubscription<CompassEvent>? _compassStream;
+
+  /// Heading della bussola in gradi (0-360, 0=Nord magnetico).
+  ///
+  /// Questo valore viene passato al MapWidget come `userBearing` per
+  /// ruotare la freccia arancione nella direzione in cui l'utente tiene
+  /// il telefono. Così l'utente vede:
+  /// - La freccia punta dove sta guardando (bussola)
+  /// - Il corridoio verde mostra dove deve andare (percorso)
+  /// - Se i due non coincidono → deve girarsi
+  double _compassHeading = 0.0;
+
+  // ===========================================================================
   // STATO OVERLAY DI NAVIGAZIONE
   // ===========================================================================
 
@@ -176,21 +201,69 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Non-null = mostra l'overlay con il messaggio specificato.
   NavigationOverlayState? _overlayState;
 
+  // ===========================================================================
+  // STATO RICALCOLO PERCORSO — Bottom Sheet animato
+  // ===========================================================================
+
+  /// Fase corrente del processo di ricalcolo (none/offRoute/rerouting/routeChanged).
+  /// Guida la visualizzazione del bottom sheet di ricalcolo.
+  ReroutePhase _reroutePhase = ReroutePhase.none;
+
+  /// Step dell'animazione progressiva "Va tutto bene" (0, 1, 2).
+  /// - 0: solo mascotte + "Va tutto bene."
+  /// - 1: + "Sembra che il percorso sia cambiato."
+  /// - 2: + pulsanti "Mostra il nuovo percorso" / "Controllo la mappa"
+  int _routeChangedAnimStep = 0;
+
+  /// Timer per l'animazione progressiva del bottom sheet "Va tutto bene".
+  /// Ogni step appare dopo un delay per non sovraccaricare il ragazzo
+  /// con troppe informazioni contemporaneamente.
+  Timer? _routeChangedAnimTimer;
+
+  // ===========================================================================
+  // STATO ARRIVO A DESTINAZIONE — Bottom Sheet animato
+  // ===========================================================================
+
+  /// Flag: true quando l'utente ha raggiunto la destinazione.
+  /// Quando è true, la UI mostra il bottom sheet di arrivo al posto
+  /// del banner di navigazione e del bottom sheet navigazione.
+  bool _isArrived = false;
+
+  /// Step dell'animazione progressiva arrivo (0, 1, 2).
+  /// - 0: solo checkmark + "Sei arrivato."
+  /// - 1: + "Hai seguito il percorso con attenzione."
+  /// - 2: + "Vuoi rivedere il percorso?" (link cliccabile)
+  int _arrivalAnimStep = 0;
+
+  /// Timer per l'animazione progressiva del bottom sheet arrivo.
+  Timer? _arrivalAnimTimer;
+
+  // ===========================================================================
+  // TRACKING PERCORSO EFFETTUATO — GPS breadcrumb
+  // ===========================================================================
+
+  /// Lista di coordinate GPS registrate durante la navigazione.
+  /// Ogni posizione viene aggiunta ad ogni aggiornamento GPS (~500ms)
+  /// quando la navigazione è attiva. Usata per mostrare il percorso
+  /// effettivamente camminato nella review post-arrivo.
+  ///
+  /// FILTRAGGIO: salviamo un punto solo se distante almeno 5 metri
+  /// dal precedente per evitare di accumulare migliaia di punti
+  /// quando l'utente è fermo (il GPS jitter genera punti ravvicinatissimi).
+  List<LatLng> _walkedPath = [];
+
+  /// Flag: true quando l'utente sta rivedendo il percorso effettuato.
+  /// In questo stato la mappa mostra sia il percorso pianificato (blu)
+  /// sia il percorso camminato (verde), con vista panoramica.
+  bool _isReviewingWalkedPath = false;
+
   /// Flag "follow-mode": quando true, la camera insegue automaticamente
   /// la posizione GPS dell'utente ad ogni aggiornamento, orientata nella
   /// direzione di marcia (bearing).
-  ///
-  /// CICLO DI VITA:
-  /// - true → quando si avvia la navigazione (_startActiveNavigation)
-  /// - true → quando l'utente preme il tasto Recenter
-  /// - false → quando l'utente sposta la mappa con il dito (onUserInteraction)
-  /// - false → quando la navigazione si ferma
   bool _isFollowingUser = false;
 
-  /// Flag per il primo fix GPS. Quando l'app si apre, la mappa parte
-  /// su coordinate fisse (Milano). Al primo aggiornamento GPS valido,
-  /// spostiamo la camera sulla posizione reale dell'utente e settiamo
-  /// questo flag a true per non ripetere l'operazione.
+  /// Flag per il primo fix GPS. Al primo aggiornamento GPS valido,
+  /// spostiamo la camera sulla posizione reale dell'utente.
   bool _hasInitialFix = false;
 
   // ===========================================================================
@@ -205,7 +278,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     _navigationMonitor = NavigationMonitor();
 
     // Ascolta gli eventi del NavigationMonitor per mostrare/nascondere l'overlay.
-    // Quando il monitor emette un nuovo stato (es. "vai diritto stronzo"),
+    // Quando il monitor emette un nuovo stato (es. "Continua dritto!"),
     // aggiorniamo la UI per mostrare l'overlay corrispondente.
     _navigationMonitor.overlayNotifier.addListener(_onOverlayChanged);
 
@@ -214,8 +287,56 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Task 2c: ricalcolo API), questo listener aggiorna la UI.
     _navigationMonitor.activeRouteNotifier.addListener(_onActiveRouteChanged);
 
+    // Ascolta le fasi del ricalcolo percorso per mostrare il bottom sheet
+    // animato ("Ricalcolo in corso..." → "Va tutto bene").
+    _navigationMonitor.reroutePhaseNotifier.addListener(_onReroutePhaseChanged);
+
+    // Ascolta il cambio di step corrente per aggiornare le polyline segmentate.
+    // Quando il monitor avanza allo step successivo (es. l'utente ha completato
+    // una svolta), il MapWidget deve spostare il "corridoio verde" al nuovo
+    // segmento del percorso.
+    _navigationMonitor.currentStepNotifier.addListener(_onStepChanged);
+
     // Avvia il monitoraggio della posizione GPS
     _initLocationMonitoring();
+
+    // Avvia il monitoraggio della bussola (magnetometro)
+    _initCompass();
+  }
+
+  // ===========================================================================
+  // BUSSOLA — ORIENTAMENTO FISICO DEL TELEFONO
+  // ===========================================================================
+
+  /// Inizializza lo stream della bussola (magnetometro).
+  ///
+  /// La bussola fornisce l'orientamento del telefono rispetto al nord
+  /// magnetico. Questo è diverso dal bearing GPS:
+  /// - Bearing GPS = direzione di MARCIA (serve velocità > 0)
+  /// - Bussola = dove il telefono PUNTA (funziona anche da fermo)
+  ///
+  /// Per utenti con disabilità cognitive, la bussola è fondamentale:
+  /// il ragazzo tiene il telefono davanti a sé, e la freccia arancione
+  /// sulla mappa punta esattamente dove sta guardando. Se la freccia
+  /// non è allineata col corridoio verde → deve girarsi.
+  ///
+  /// FALLBACK: Se il dispositivo non ha un magnetometro (raro ma possibile),
+  /// FlutterCompass.events è null e _compassHeading resta a 0.
+  /// In quel caso la freccia punta sempre a nord — non ideale ma non
+  /// catastrofico, perché l'utente ha comunque il banner direzionale.
+  void _initCompass() {
+    _compassStream = FlutterCompass.events?.listen((CompassEvent event) {
+      if (event.heading != null && mounted) {
+        setState(() {
+          _compassHeading = event.heading!;
+        });
+      }
+    });
+
+    if (_compassStream == null) {
+      print('⚠️ Bussola non disponibile su questo dispositivo. '
+            'La freccia userà il bearing GPS come fallback.');
+    }
   }
 
   /// Callback chiamato quando il NavigationMonitor emette un nuovo stato overlay.
@@ -223,10 +344,166 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Questo listener è il PONTE tra la logica di business (NavigationMonitor)
   /// e la UI (widget overlay). Il monitor decide QUANDO e COSA mostrare,
   /// questo callback si limita a propagare la decisione alla UI.
+  ///
+  /// FIX: Ora controlla che la navigazione sia effettivamente attiva prima
+  /// di propagare l'overlay. Prima, se il timer di 10s nel monitor scadeva
+  /// DOPO che l'utente aveva premuto "Termina", l'overlay appariva comunque
+  /// sullo schermo di ricerca perché questo callback non filtrava lo stato.
   void _onOverlayChanged() {
+    // Se la navigazione non è attiva, ignoriamo l'evento.
+    // Questo gestisce il caso in cui un timer interno del monitor
+    // (es. _zeroSpeedTimer) scade DOPO lo stop della navigazione.
+    if (_appState != NavigationAppState.navigating) {
+      return;
+    }
+
+    final newState = _navigationMonitor.overlayNotifier.value;
+
+    // =====================================================================
+    // INTERCETTA ARRIVO A DESTINAZIONE
+    // =====================================================================
+    // Se il monitor ha emesso un arrivalCelebration, NON mostriamo il
+    // solito overlay banner ma passiamo allo stato "arrivato" con
+    // il bottom sheet animato progressivo (come per il ricalcolo).
+    if (newState?.type == OverlayType.arrivalCelebration) {
+      setState(() {
+        _isArrived = true;
+        _overlayState = null; // Non mostrare il banner overlay vecchio
+      });
+      _startArrivalAnimation();
+      return;
+    }
+
     setState(() {
-      _overlayState = _navigationMonitor.overlayNotifier.value;
+      _overlayState = newState;
     });
+  }
+
+  /// Callback chiamato quando la fase di ricalcolo cambia nel monitor.
+  ///
+  /// Gestisce la transizione tra le fasi del bottom sheet:
+  /// - offRoute/rerouting → mostra "Ricalcolo in corso..."
+  /// - routeChanged → avvia animazione progressiva "Va tutto bene"
+  /// - none → nasconde il bottom sheet
+  void _onReroutePhaseChanged() {
+    if (_appState != NavigationAppState.navigating) return;
+
+    final phase = _navigationMonitor.reroutePhaseNotifier.value;
+
+    setState(() {
+      _reroutePhase = phase;
+    });
+
+    // Se il percorso è cambiato, avvia l'animazione progressiva a 3 step
+    if (phase == ReroutePhase.routeChanged) {
+      _startRouteChangedAnimation();
+    } else {
+      // Cancella l'animazione se torniamo a un'altra fase
+      _routeChangedAnimTimer?.cancel();
+      _routeChangedAnimStep = 0;
+    }
+  }
+
+  /// Avvia l'animazione progressiva "Va tutto bene" a 3 step.
+  ///
+  /// FLUSSO VISIVO (come da screenshot):
+  /// - Subito (0s): mascotte + "Va tutto bene."
+  /// - Dopo 1.5s: + "Sembra che il percorso sia cambiato."
+  /// - Dopo 3.0s: + pulsanti "Mostra il nuovo percorso" / "Controllo la mappa"
+  void _startRouteChangedAnimation() {
+    _routeChangedAnimTimer?.cancel();
+    _routeChangedAnimStep = 0;
+
+    _routeChangedAnimTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (!mounted || _reroutePhase != ReroutePhase.routeChanged) return;
+      setState(() => _routeChangedAnimStep = 1);
+
+      _routeChangedAnimTimer = Timer(const Duration(milliseconds: 1500), () {
+        if (!mounted || _reroutePhase != ReroutePhase.routeChanged) return;
+        setState(() => _routeChangedAnimStep = 2);
+      });
+    });
+  }
+
+  /// Chiude il bottom sheet di ricalcolo e resetta lo stato.
+  void _dismissRerouteSheet() {
+    _routeChangedAnimTimer?.cancel();
+    setState(() {
+      _reroutePhase = ReroutePhase.none;
+      _routeChangedAnimStep = 0;
+    });
+    _navigationMonitor.reroutePhaseNotifier.value = ReroutePhase.none;
+  }
+
+  // ===========================================================================
+  // ANIMAZIONE ARRIVO A DESTINAZIONE
+  // ===========================================================================
+
+  /// Avvia l'animazione progressiva "Sei arrivato" a 3 step.
+  ///
+  /// FLUSSO VISIVO (come da screenshot):
+  /// - Subito (0s): checkmark verde + "Sei arrivato."
+  /// - Dopo 1.5s: + "Hai seguito il percorso con attenzione."
+  /// - Dopo 3.0s: + "Vuoi rivedere il percorso?" (link blu cliccabile)
+  ///
+  /// Il pattern è identico a _startRouteChangedAnimation() per coerenza UX.
+  void _startArrivalAnimation() {
+    _arrivalAnimTimer?.cancel();
+    _arrivalAnimStep = 0;
+
+    _arrivalAnimTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (!mounted || !_isArrived) return;
+      setState(() => _arrivalAnimStep = 1);
+
+      _arrivalAnimTimer = Timer(const Duration(milliseconds: 1500), () {
+        if (!mounted || !_isArrived) return;
+        setState(() => _arrivalAnimStep = 2);
+      });
+    });
+  }
+
+  /// Chiude il bottom sheet di arrivo e torna alla schermata di ricerca.
+  void _dismissArrivalSheet() {
+    _arrivalAnimTimer?.cancel();
+    _resetNavigation();
+  }
+
+  /// Passa alla modalità "rivedi percorso": mostra il percorso pianificato (blu)
+  /// e il percorso effettivamente camminato (verde) in vista panoramica.
+  void _showWalkedPathReview() {
+    _arrivalAnimTimer?.cancel();
+    _navigationMonitor.stopNavigation();
+
+    setState(() {
+      _isArrived = false;
+      _arrivalAnimStep = 0;
+      _isReviewingWalkedPath = true;
+      // Manteniamo _appState = navigating per tenere la mappa e
+      // il percorso visibile, ma la UI cambia per mostrare la review.
+    });
+
+    // Dopo il rebuild, adatta la camera per mostrare tutto il percorso
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        _mapKey.currentState?.fitAllPoints();
+      }
+    });
+  }
+
+  /// Callback: lo step corrente è cambiato → aggiorna la mappa per
+  /// spostare il "corridoio verde" al nuovo segmento.
+  ///
+  /// Viene invocato dal currentStepNotifier quando il NavigationMonitor
+  /// rileva che l'utente ha superato un waypoint e avanza allo step
+  /// successivo. Il rebuild passa il nuovo currentStepIndex al MapWidget,
+  /// che ricostruisce le polyline segmentate (verde=nuovo step, grigio=dopo).
+  void _onStepChanged() {
+    if (_appState == NavigationAppState.navigating) {
+      setState(() {
+        // Il rebuild causa MapWidget.didUpdateWidget() che ricalcola
+        // le polyline con il nuovo currentStepIndex.
+      });
+    }
   }
 
   /// Callback chiamato quando il NavigationMonitor cambia il percorso attivo (TASK 2).
@@ -434,6 +711,30 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 : 0.0;
           });
 
+          // --- TRACKING PERCORSO EFFETTUATO ---
+          // Registra la posizione GPS nella lista _walkedPath solo quando
+          // la navigazione è attiva. Filtra punti troppo vicini (<5m) per
+          // evitare accumulo da GPS jitter quando l'utente è fermo.
+          if (_appState == NavigationAppState.navigating && !_isArrived) {
+            final newPoint = LatLng(position.latitude, position.longitude);
+
+            if (_walkedPath.isEmpty) {
+              _walkedPath.add(newPoint);
+            } else {
+              final lastPoint = _walkedPath.last;
+              final double dist = distanceBetween(
+                lastPoint.latitude,
+                lastPoint.longitude,
+                newPoint.latitude,
+                newPoint.longitude,
+              );
+              // Salva solo se distante almeno 5 metri dal punto precedente
+              if (dist >= 5.0) {
+                _walkedPath.add(newPoint);
+              }
+            }
+          }
+
           // Inoltra TUTTI i dati aggiornati al NavigationMonitor.
           _navigationMonitor.updatePosition(
             _currentLat!,
@@ -444,9 +745,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
           );
 
           // --- PRIMO FIX GPS: centra la mappa sulla posizione reale ---
-          // Al primo aggiornamento GPS valido, spostiamo la camera dalla
-          // posizione iniziale fissa (Milano) alla posizione reale dell'utente.
-          // Questo viene fatto una sola volta all'apertura dell'app.
           if (!_hasInitialFix) {
             _hasInitialFix = true;
             _mapKey.currentState?.moveToLocation(
@@ -456,11 +754,16 @@ class _NavigationScreenState extends State<NavigationScreen> {
           }
 
           // --- FOLLOW-MODE: insegui la posizione GPS sulla mappa ---
-          // Se siamo in navigazione attiva e il follow-mode è attivo,
-          // muoviamo la camera sulla posizione corrente con il bearing
-          // del NavigationMonitor (filtrato, più affidabile del raw GPS).
+          // FIX: usiamo _getRouteBearing() che calcola il bearing geometrico
+          // dalla posizione corrente verso lo step corrente del percorso.
+          // Prima usavamo _navigationMonitor.direction ?? _rawBearing, che
+          // all'avvio è 0° (nord) perché il monitor non ha ancora acquisito
+          // un bearing affidabile → la camera ruotava verso nord annullando
+          // l'orientamento impostato da snapToRoute().
+          // _getRouteBearing() ha già il fallback interno a
+          // _navigationMonitor.direction ?? _rawBearing se non ci sono steps.
           if (_appState == NavigationAppState.navigating && _isFollowingUser) {
-            final double navBearing = _navigationMonitor.direction ?? _rawBearing;
+            final double navBearing = _getRouteBearing();
             _mapKey.currentState?.followUser(
               _currentLat!,
               _currentLng!,
@@ -475,6 +778,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Cancella lo stream GPS per evitare memory leak e consumo batteria
     _positionStream?.cancel();
 
+    // Cancella lo stream della bussola
+    _compassStream?.cancel();
+
     // Cancella il timer del banner errore.
     _errorBannerTimer?.cancel();
 
@@ -485,6 +791,20 @@ class _NavigationScreenState extends State<NavigationScreen> {
     _navigationMonitor.activeRouteNotifier.removeListener(
       _onActiveRouteChanged,
     );
+
+    // Rimuove il listener dello step corrente (polyline segmentate)
+    _navigationMonitor.currentStepNotifier.removeListener(_onStepChanged);
+
+    // Rimuove il listener della fase di ricalcolo
+    _navigationMonitor.reroutePhaseNotifier.removeListener(
+      _onReroutePhaseChanged,
+    );
+
+    // Cancella il timer dell'animazione ricalcolo
+    _routeChangedAnimTimer?.cancel();
+
+    // Cancella il timer dell'animazione arrivo
+    _arrivalAnimTimer?.cancel();
 
     // Distrugge il NavigationMonitor (cancella tutti i timer interni)
     _navigationMonitor.dispose();
@@ -499,39 +819,22 @@ class _NavigationScreenState extends State<NavigationScreen> {
   // HELPER: BEARING LUNGO IL PERCORSO
   // ===========================================================================
 
-  /// Calcola il bearing (direzione in gradi, 0°=Nord) dalla posizione
-  /// corrente dell'utente verso lo step corrente del percorso attivo.
-  ///
-  /// LOGICA:
-  /// 1. Prende l'indice dello step corrente dal NavigationMonitor
-  /// 2. Calcola il bearing dalla posizione GPS dell'utente verso
-  ///    l'endLocation dello step corrente (il punto dove deve arrivare)
-  /// 3. Se non è possibile calcolarlo, usa il bearing GPS come fallback
-  ///
-  /// FORMULA (bearing iniziale tra due punti sulla sfera):
-  /// θ = atan2(sin(Δλ)·cos(φ₂), cos(φ₁)·sin(φ₂) − sin(φ₁)·cos(φ₂)·cos(Δλ))
-  ///
-  /// RETURN: gradi 0-360
+  /// Calcola il bearing dalla posizione corrente verso lo step corrente
+  /// del percorso attivo (direzione in cui l'utente DEVE andare).
   double _getRouteBearing() {
-    // Fallback: bearing GPS (filtrato dal monitor, o raw)
     final double fallback = _navigationMonitor.direction ?? _rawBearing;
 
-    // Serve la posizione GPS e gli step del percorso
     if (_currentLat == null || _currentLng == null) return fallback;
     final steps = _directionsResult?.steps;
     if (steps == null || steps.isEmpty) return fallback;
 
-    // Prende l'indice dello step corrente dal monitor
     final int idx = _navigationMonitor.currentStepNotifier.value;
     final int safeIdx = idx < steps.length ? idx : steps.length - 1;
     final step = steps[safeIdx];
 
-    // Punto target: endLocation dello step corrente
-    // (è il punto dove l'utente deve arrivare prima del prossimo step)
     final double targetLat = step.endLat;
     final double targetLng = step.endLng;
 
-    // Calcolo bearing geodetico (formula Haversine initial bearing)
     final double lat1 = _currentLat! * (3.141592653589793 / 180.0);
     final double lat2 = targetLat * (3.141592653589793 / 180.0);
     final double dLng = (targetLng - _currentLng!) * (3.141592653589793 / 180.0);
@@ -540,9 +843,142 @@ class _NavigationScreenState extends State<NavigationScreen> {
     final double y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLng);
     double bearing = math.atan2(x, y) * (180.0 / 3.141592653589793);
 
-    // Normalizza in 0-360
-    bearing = (bearing + 360) % 360;
-    return bearing;
+    return (bearing + 360) % 360;
+  }
+
+  /// Mostra un dialog di conferma per terminare la navigazione.
+  ///
+  /// Design accessibile per utenti con disabilità cognitive:
+  /// - Testi grandi e chiari
+  /// - Due pulsanti grandi "Sì" / "No" con colori distinti
+  /// - Nessun gesto nascosto, nessuna ambiguità
+  Future<void> _showStopNavigationDialog() async {
+    final bool? conferma = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false, // Impedisce chiusura toccando fuori
+      builder: (BuildContext ctx) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          contentPadding: const EdgeInsets.fromLTRB(24, 28, 24, 12),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+          content: const Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.help_outline, size: 48, color: Colors.orange),
+              SizedBox(height: 16),
+              Text(
+                'Vuoi fermarti?',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  height: 1.3,
+                ),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'La navigazione verrà fermata',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 16,
+                  color: Colors.grey,
+                ),
+              ),
+            ],
+          ),
+          actionsAlignment: MainAxisAlignment.spaceEvenly,
+          actions: [
+            // Pulsante "No" — grande, bordo grigio, rassicurante
+            SizedBox(
+              width: 120,
+              height: 56,
+              child: OutlinedButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: Colors.grey.shade400, width: 2),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                ),
+                child: const Text(
+                  'No',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black87,
+                  ),
+                ),
+              ),
+            ),
+            // Pulsante "Sì" — grande, rosso, azione distruttiva evidente
+            SizedBox(
+              width: 120,
+              height: 56,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red.shade600,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                ),
+                child: const Text(
+                  'Sì',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    // Se l'utente ha confermato, resetta la navigazione
+    if (conferma == true) {
+      _resetNavigation();
+    }
+  }
+
+  // ===========================================================================
+  // RESET NAVIGAZIONE
+  // ===========================================================================
+
+  /// Resetta completamente lo stato della navigazione.
+  ///
+  /// Chiamato quando l'utente chiude la navigazione attiva o il route preview.
+  /// Pulisce TUTTI i dati del percorso precedente per evitare che rimangano
+  /// indicazioni, polyline e marker fantasma sulla mappa.
+  ///
+  /// SIDE EFFECTS:
+  /// - Ferma il NavigationMonitor (timer, notifier)
+  /// - Azzera DirectionsResult e AllRoutesResult
+  /// - Pulisce il campo di testo della destinazione
+  /// - Riporta lo stato UI a [search]
+  void _resetNavigation() {
+    _navigationMonitor.stopNavigation();
+    _routeChangedAnimTimer?.cancel();
+    _arrivalAnimTimer?.cancel();
+    setState(() {
+      _appState = NavigationAppState.search;
+      _directionsResult = null;
+      _allRoutesResult = null;
+      _selectedDestinationAddress = null;
+      _overlayState = null;
+      _isFollowingUser = false;
+      _reroutePhase = ReroutePhase.none;
+      _routeChangedAnimStep = 0;
+      _isArrived = false;
+      _arrivalAnimStep = 0;
+      _walkedPath = [];
+      _isReviewingWalkedPath = false;
+      _destinationController.clear();
+    });
   }
 
   void _showTemporaryError(String message) {
@@ -605,22 +1041,35 @@ class _NavigationScreenState extends State<NavigationScreen> {
     if (_allRoutesResult != null) {
       setState(() {
         _appState = NavigationAppState.navigating;
-        _isFollowingUser = true; // Attiva il follow-mode all'avvio
+        _isFollowingUser = true;
+        // Reset stato arrivo/review per una nuova navigazione
+        _walkedPath = [];
+        _isArrived = false;
+        _arrivalAnimStep = 0;
+        _isReviewingWalkedPath = false;
       });
-      _navigationMonitor.startNavigation(
-        _allRoutesResult!,
-        _selectedDestinationAddress ?? '',
-      );
 
-      // Centra subito la camera sulla posizione corrente con bearing
-      // verso il primo step del percorso
-      if (_currentLat != null && _currentLng != null) {
-        _mapKey.currentState?.followUser(
-          _currentLat!,
-          _currentLng!,
-          _getRouteBearing(),
-        );
-      }
+      // FIX: Passa le COORDINATE della destinazione (formato "lat,lng"),
+      // NON l'indirizzo testuale. Il monitor usa _originalDestination per
+      // i ricalcoli (Task 2c): se passiamo il testo, ogni ricalcolo
+      // ri-geocodifica l'indirizzo ottenendo coordinate leggermente diverse
+      // → polyline diversa → falsi ricalcoli a catena.
+      final String destCoords =
+          '${_allRoutesResult!.destLat},${_allRoutesResult!.destLng}';
+      _navigationMonitor.startNavigation(_allRoutesResult!, destCoords);
+
+      // Posiziona ISTANTANEAMENTE la camera sulla posizione utente,
+      // ORIENTATA verso la direzione del percorso. Usa snapToRoute
+      // (moveCamera) invece di followUser (animateCamera) per evitare
+      // il lag — la mappa si sposta subito senza transizione animata.
+      final double startLat = _currentLat ?? _allRoutesResult!.originLat;
+      final double startLng = _currentLng ?? _allRoutesResult!.originLng;
+
+      _mapKey.currentState?.snapToRoute(
+        startLat,
+        startLng,
+        _getRouteBearing(),
+      );
     }
   }
 
@@ -651,7 +1100,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // perché non sappiamo da dove partire.
     if (_currentLat == null || _currentLng == null) {
       _showTemporaryError(
-        'Posizione GPS non disponibile. Attendi il fix GPS e riprova.',
+        'Non riesco a trovarti sulla mappa. Aspetta un momento e riprova!',
       );
       return;
     }
@@ -720,22 +1169,25 @@ class _NavigationScreenState extends State<NavigationScreen> {
           _errorMessage = null;
         });
 
-        // TASK 5: Avvia la navigazione nel monitor.
-        // Usa destAddress per il ricalcolo futuro (Task 2c del monitor)
-        // perché se l'utente devia, la destinazione deve restare la stessa.
-        _navigationMonitor.startNavigation(result, destAddress);
+        // NOTA: NON avviamo la navigazione qui. _calculateRouteFromCoordinates
+        // è usato sia da "Indicazioni" (preview) sia da "Avvia" (navigazione).
+        // Solo _startActiveNavigation() deve chiamare startNavigation(),
+        // altrimenti:
+        // 1. "Indicazioni" avvierebbe i timer di monitoraggio prematuramente
+        // 2. "Avvia" chiamerebbe startNavigation() DUE VOLTE (qui + in
+        //    _startActiveNavigation), creando timer duplicati
       } else {
         setState(() {
           _isLoading = false;
         });
-        _showTemporaryError('Impossibile calcolare il percorso. Riprova.');
+        _showTemporaryError('Non riesco a trovare la strada. Riprova!');
       }
     } catch (e) {
       // Gestisce eventuali errori
       setState(() {
         _isLoading = false;
       });
-      _showTemporaryError('Errore: $e');
+      _showTemporaryError('Qualcosa non ha funzionato. Riprova!');
     }
   }
 
@@ -790,31 +1242,27 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Callback chiamato quando l'utente tocca un punto sulla mappa (TASK 3).
   ///
-  /// Gestisce il TASK 3 Caso 2 (punto generico):
-  /// L'utente tocca un punto qualsiasi della mappa → usiamo le coordinate
-  /// direttamente come destinazione, senza chiamare Places Details API.
-  ///
-  /// PERCHÉ NON CHIAMIAMO PLACES DETAILS:
-  /// Per un punto generico non c'è un place_id disponibile. Le coordinate
-  /// lat/lng sono sufficienti per la Directions API (TASK 4).
+  /// FLUSSO:
+  /// 1. Mostra SUBITO il bottom sheet con "Caricamento..." (UI reattiva)
+  /// 2. Chiama reverseGeocode() in background per ottenere il nome del posto
+  /// 3. Aggiorna il nome quando la risposta arriva
+  /// 4. Se la geocodifica fallisce, usa le coordinate come fallback
   ///
   /// PARAMETRI:
   /// - [position]: coordinate del punto toccato sulla mappa
   void _onMapTapped(LatLng position) {
-    // Costruisce una stringa descrittiva con le coordinate
-    final String coordsText =
-        '${position.latitude.toStringAsFixed(5)}, '
-        '${position.longitude.toStringAsFixed(5)}';
-
-    // Aggiorna il campo di testo con le coordinate per feedback visivo.
-    // L'utente vede cosa ha selezionato.
-    _destinationController.text = coordsText;
+    // Placeholder temporaneo mentre la geocodifica è in corso
+    const String loadingText = 'Cerco il nome del posto...';
 
     // Log per debugging
-    print('Punto mappa selezionato: $coordsText');
+    print('Punto mappa selezionato: ${position.latitude}, ${position.longitude}');
 
+    // STEP 1: Mostra SUBITO il bottom sheet con placeholder.
+    // L'utente vede una risposta immediata al tocco — non deve aspettare
+    // la risposta di rete per capire che il tap è stato registrato.
+    _destinationController.text = loadingText;
     setState(() {
-      _selectedDestinationAddress = coordsText;
+      _selectedDestinationAddress = loadingText;
       _appState = NavigationAppState.placeSelected;
 
       _directionsResult = DirectionsResult(
@@ -828,6 +1276,32 @@ class _NavigationScreenState extends State<NavigationScreen> {
         destLng: position.longitude,
       );
       _allRoutesResult = null;
+    });
+
+    // STEP 2: Chiama reverse geocoding in background.
+    // Non usiamo await perché non vogliamo bloccare la UI.
+    _placesService.reverseGeocode(
+      position.latitude,
+      position.longitude,
+    ).then((String? address) {
+      // Verifica che il widget sia ancora montato e che l'utente non abbia
+      // già selezionato un'altra destinazione nel frattempo.
+      if (!mounted) return;
+      if (_appState != NavigationAppState.placeSelected) return;
+
+      // STEP 3: Aggiorna il nome del posto.
+      // Se reverseGeocode ha restituito un indirizzo, lo usiamo.
+      // Altrimenti usiamo le coordinate come fallback leggibile.
+      final String displayName = address ??
+          '${position.latitude.toStringAsFixed(5)}, '
+          '${position.longitude.toStringAsFixed(5)}';
+
+      setState(() {
+        _selectedDestinationAddress = displayName;
+      });
+      _destinationController.text = displayName;
+
+      print('Reverse geocoding risultato: $displayName');
     });
   }
 
@@ -843,7 +1317,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
     return Scaffold(
       // App Bar
       appBar: AppBar(
-        title: const Text('Navigation App'),
+        title: const Text(
+          'La mia mappa',
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+        ),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
         elevation: 0,
@@ -868,6 +1345,31 @@ class _NavigationScreenState extends State<NavigationScreen> {
           destLat: _directionsResult?.destLat,
           destLng: _directionsResult?.destLng,
           encodedPolyline: _directionsResult?.encodedPolyline,
+          // NAVIGAZIONE ACCESSIBILE: passa stato navigazione, step corrente
+          // e lista step con polyline individuali per la visualizzazione
+          // a segmenti (verde=corrente, grigio=successivo, nascosto=resto).
+          // In modalità review (post-arrivo), disattiviamo la segmentazione
+          // per mostrare la overview polyline completa + la walked path.
+          isNavigating: _appState == NavigationAppState.navigating &&
+              !_isArrived &&
+              !_isReviewingWalkedPath,
+          currentStepIndex: _navigationMonitor.currentStepNotifier.value,
+          steps: _directionsResult?.steps,
+          // FRECCIA DIREZIONALE: posizione e heading della bussola.
+          // La freccia punta dove il TELEFONO è girato (bussola/magnetometro),
+          // NON nella direzione di marcia GPS. Così l'utente vede:
+          // - Freccia = dove sto guardando (bussola)
+          // - Corridoio verde = dove devo andare (percorso)
+          // - Se non coincidono → mi devo girare
+          // Fallback: se la bussola non è disponibile, usa il bearing GPS.
+          userLat: _currentLat,
+          userLng: _currentLng,
+          userBearing: _compassStream != null
+              ? _compassHeading
+              : (_navigationMonitor.direction ?? _rawBearing),
+          // PERCORSO EFFETTUATO: lista coordinate GPS registrate durante
+          // la navigazione. Mostrate come polyline verde nella review.
+          walkedPath: _isReviewingWalkedPath ? _walkedPath : null,
           // TASK 3: callback per tap sulla mappa
           onMapTap:
               _appState == NavigationAppState.search ||
@@ -933,7 +1435,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
         if (_appState == NavigationAppState.placeSelected)
           _buildPlaceSelectedSheet(),
 
-        if (_appState == NavigationAppState.navigating) _buildNavigatingUI(),
+        if (_appState == NavigationAppState.navigating)
+          _isArrived
+              ? _buildArrivalUI()
+              : _isReviewingWalkedPath
+                  ? _buildWalkedPathReviewUI()
+                  : _buildNavigatingUI(),
 
         if (_appState == NavigationAppState.routePreview &&
             _directionsResult != null)
@@ -1002,6 +1509,20 @@ class _NavigationScreenState extends State<NavigationScreen> {
                       destLat: _directionsResult?.destLat,
                       destLng: _directionsResult?.destLng,
                       encodedPolyline: _directionsResult?.encodedPolyline,
+                      // NAVIGAZIONE ACCESSIBILE (stessi parametri del mobile)
+                      isNavigating: _appState == NavigationAppState.navigating &&
+                          !_isArrived &&
+                          !_isReviewingWalkedPath,
+                      currentStepIndex: _navigationMonitor.currentStepNotifier.value,
+                      steps: _directionsResult?.steps,
+                      // FRECCIA DIREZIONALE (stessi parametri del mobile)
+                      userLat: _currentLat,
+                      userLng: _currentLng,
+                      userBearing: _compassStream != null
+                          ? _compassHeading
+                          : (_navigationMonitor.direction ?? _rawBearing),
+                      // PERCORSO EFFETTUATO (review post-arrivo)
+                      walkedPath: _isReviewingWalkedPath ? _walkedPath : null,
                       // TASK 3: callback per tap sulla mappa
                       onMapTap: _onMapTapped,
                       // Callback pan manuale: disattiva il follow-mode
@@ -1040,7 +1561,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
   // WIDGET HELPER (Bottom Sheets)
   // ===========================================================================
 
-  /// Scheda minimale che compare in fondo quando selezioniamo una destinazione (Niente percorso ancora calcolato se si clicca mappa).
+  /// Scheda minimale che compare in fondo quando selezioniamo una destinazione.
+  /// Design accessibile: pulsanti grandi, testo chiaro, colori evidenti.
   Widget _buildPlaceSelectedSheet() {
     return Positioned(
       bottom: 0,
@@ -1057,25 +1579,40 @@ class _NavigationScreenState extends State<NavigationScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Etichetta sopra l'indirizzo
             Text(
-              _selectedDestinationAddress ?? 'Destinazione Sconosciuta',
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              'Vuoi andare qui?',
+              style: TextStyle(
+                fontSize: 16,
+                color: Colors.grey.shade600,
+              ),
+            ),
+            const SizedBox(height: 4),
+            // Indirizzo della destinazione — grande e chiaro
+            Text(
+              _selectedDestinationAddress ?? 'Destinazione',
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 20),
+            // Pulsanti — grandi, con icone evidenti
             Row(
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: _calculateRouteForSelectedPlace,
-                    icon: const Icon(Icons.directions),
-                    label: const Text('Indicazioni'),
+                    icon: const Icon(Icons.directions, size: 24),
+                    label: const Text(
+                      'Vedi percorso',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
                     style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(30),
                       ),
+                      side: BorderSide(color: Colors.blue.shade400, width: 2),
                     ),
                   ),
                 ),
@@ -1083,10 +1620,15 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: _startActiveNavigation,
-                    icon: const Icon(Icons.navigation),
-                    label: const Text('Avvia'),
+                    icon: const Icon(Icons.navigation, size: 24),
+                    label: const Text(
+                      'Andiamo!',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
                     style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      backgroundColor: Colors.green.shade600,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(30),
                       ),
@@ -1151,12 +1693,13 @@ class _NavigationScreenState extends State<NavigationScreen> {
   Widget _buildNavigatingUI() {
     return Stack(
       children: [
-        // TOP BANNER (Indicazione percorso corrente)
-        // Usiamo un costrutto ValueListenableBuilder: questo widget "ascolta"
-        // in tempo reale il numero emesso da currentStepNotifier (dal NavigationMonitor).
-        // Ogni volta che l'utente si avvicina a <15m dall'incrocio, il notifier
-        // emette un nuovo numero e SOLO questo widget si ridisegna,
-        // garantendo performance altissime.
+        // TOP BANNER — CARD DIREZIONALE ACCESSIBILE
+        //
+        // Design pensato per utenti con disabilità cognitive:
+        // - Freccia direzionale GIGANTE (80px) come elemento primario
+        // - Colore sfondo cambia in base alla direzione (verde=dritto, arancione=sinistra...)
+        // - Testo grande e semplice (solo istruzione corrente, nessun "Poi:")
+        // - Card arrotonata con ombra per distinguerla dalla mappa
         Positioned(
           top: 0,
           left: 0,
@@ -1164,131 +1707,101 @@ class _NavigationScreenState extends State<NavigationScreen> {
           child: ValueListenableBuilder<int>(
             valueListenable: _navigationMonitor.currentStepNotifier,
             builder: (context, currentStepIndex, child) {
-              // 1. Prendi la lista di tutti gli step calcolati attualmente
               final steps = _directionsResult?.steps ?? [];
 
-              // Se per qualche motivo gli step sono vuoti, mostra un layout di fallback
               if (steps.isEmpty) {
                 return _buildFallbackBanner();
               }
 
-              // 2. Sicurezza: Evita crash se l'indice impazzisce oltre la lunghezza dell'array
               final safeIndex = currentStepIndex < steps.length
                   ? currentStepIndex
                   : steps.length - 1;
 
-              // 3. Estrai lo step CORRENTE (quello da mostrare in grande)
               final currentStep = steps[safeIndex];
 
-              // 4. Estrai lo step SUCCESSIVO (se esiste) per darne un'anteprima,
-              // esattamente come fa Google Maps ("poi svolta a...")
-              final nextStep = (safeIndex + 1 < steps.length)
-                  ? steps[safeIndex + 1]
-                  : null;
+              // Determina icona e colore in base al tipo di manovra
+              final IconData directionIcon = _getManeuverIcon(currentStep.maneuver);
+              final Color bannerColor = _getManeuverColor(currentStep.maneuver);
 
               return Container(
-                color: Colors.green.shade800,
-                padding: EdgeInsets.only(
-                  top: MediaQuery.of(context).padding.top + 16,
-                  bottom: 16,
-                  left: 16,
-                  right: 16,
+                margin: EdgeInsets.only(
+                  top: MediaQuery.of(context).padding.top + 8,
+                  left: 12,
+                  right: 12,
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 20,
+                ),
+                decoration: BoxDecoration(
+                  color: bannerColor,
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black38,
+                      blurRadius: 12,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
                 ),
                 child: Row(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.start, // Allinea gli elementi in alto
                   children: [
-                    // Icona della Manovra Corrente
-                    // Qui al posto di freccia_su mettiamo un placeholder dinamico pronto
-                    // per essere integrato con icone mappate su "maneuver" (es. Icons.turn_right).
-                    const Padding(
-                      padding: EdgeInsets.only(top: 4.0),
+                    // FRECCIA DIREZIONALE — elemento primario (80px)
+                    // L'utente vede PRIMA la freccia e capisce subito dove andare,
+                    // poi legge il testo per conferma.
+                    Container(
+                      width: 80,
+                      height: 80,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withAlpha(50),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
                       child: Icon(
-                        Icons.directions,
+                        directionIcon,
                         color: Colors.white,
-                        size: 40,
+                        size: 56,
                       ),
                     ),
                     const SizedBox(width: 16),
+                    // TESTO — istruzione + distanza, grande e leggibile
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // TESTO PRINCIPALE (Istruzione Corrente)
+                          // Istruzione semplificata (es. "Vai a destra")
                           Text(
-                            currentStep
-                                .instruction, // "Svolta a destra su Via Roma"
+                            currentStep.instruction,
                             style: const TextStyle(
                               color: Colors.white,
-                              fontSize: 22,
+                              fontSize: 26,
                               fontWeight: FontWeight.bold,
+                              height: 1.2,
                             ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          const SizedBox(height: 4),
-
-                          // DISTANZA (Istruzione Corrente)
-                          Text(
-                            currentStep.distance, // "1.2 km"
-                            style: TextStyle(
-                              color: Colors.white.withAlpha(
-                                220,
-                              ), // deprecated warning fix for withOpacity
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
+                          const SizedBox(height: 8),
+                          // Distanza rimanente allo step (es. "120 m")
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 4,
                             ),
-                          ),
-
-                          // ANTEPRIMA STEP SUCCESSIVO (se esiste)
-                          if (nextStep != null) ...[
-                            const SizedBox(height: 12),
-                            Container(
-                              padding: const EdgeInsets.only(top: 12),
-                              decoration: BoxDecoration(
-                                border: Border(
-                                  top: BorderSide(
-                                    color: Colors.white.withAlpha(50),
-                                  ),
-                                ),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    Icons.subdirectory_arrow_right,
-                                    color: Colors.white.withAlpha(150),
-                                    size: 16,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      "Poi: ${nextStep.instruction}",
-                                      style: TextStyle(
-                                        color: Colors.white.withAlpha(200),
-                                        fontSize: 14,
-                                        fontStyle: FontStyle.italic,
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                ],
+                            decoration: BoxDecoration(
+                              color: Colors.white.withAlpha(40),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              currentStep.distance,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w600,
                               ),
                             ),
-                          ],
+                          ),
                         ],
                       ),
-                    ),
-                    // Pulsante "Chiudi Navigazione"
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white),
-                      onPressed: () {
-                        // Ferma navigazione
-                        _navigationMonitor.stopNavigation();
-                        setState(() {
-                          _appState =
-                              NavigationAppState.routePreview; // o ricerca
-                          _isFollowingUser = false;
-                        });
-                      },
                     ),
                   ],
                 ),
@@ -1297,14 +1810,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
           ),
         ),
         // --- TASTO RECENTER ---
-        // Visibile SOLO quando l'utente ha spostato la mappa manualmente
-        // (follow-mode disattivato). Premendo il tasto:
-        // 1. Riattiva il follow-mode
-        // 2. Centra la camera sulla posizione GPS corrente
-        // 3. Orienta la mappa nella direzione del PERCORSO (non del GPS)
+        // Visibile SOLO quando il follow-mode è disattivato (pan manuale).
         if (!_isFollowingUser)
           Positioned(
-            bottom: 140, // Sopra il bottom sheet
+            bottom: 140,
             right: 16,
             child: FloatingActionButton(
               heroTag: 'recenter_btn',
@@ -1312,8 +1821,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 setState(() {
                   _isFollowingUser = true;
                 });
-                // Centra subito con bearing calcolato verso il prossimo
-                // step del percorso, così l'utente vede subito DOVE andare
                 if (_currentLat != null && _currentLng != null) {
                   _mapKey.currentState?.followUser(
                     _currentLat!,
@@ -1379,7 +1886,776 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 ),
 
                 const Spacer(),
-                // Eventuali Info extra (es arriovo previsto)
+                // Pulsante "Termina" — sempre visibile, grande, con icona
+                // Design accessibile: colore rosso evidente, testo esplicito,
+                // nessun gesto nascosto da ricordare.
+                ElevatedButton.icon(
+                  onPressed: _showStopNavigationDialog,
+                  icon: const Icon(Icons.stop_circle, size: 28),
+                  label: const Text(
+                    'Termina',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red.shade600,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 14,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    elevation: 2,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        // --- BOTTOM SHEET RICALCOLO: "Sto cercando una strada migliore..." ---
+        // Appare quando l'utente devia dal percorso (fase offRoute o rerouting).
+        if (_reroutePhase == ReroutePhase.offRoute ||
+            _reroutePhase == ReroutePhase.rerouting)
+          _buildReroutingSheet(),
+
+        // --- BOTTOM SHEET RICALCOLO COMPLETATO: "Va tutto bene" ---
+        // Appare dopo che il percorso è stato ricalcolato con successo.
+        if (_reroutePhase == ReroutePhase.routeChanged)
+          _buildRouteChangedSheet(),
+      ],
+    );
+  }
+
+  // ===========================================================================
+  // HELPER: BOTTOM SHEET RICALCOLO PERCORSO (Design da screenshot)
+  // ===========================================================================
+
+  /// Bottom sheet ARANCIONE che appare quando l'utente devia dal percorso.
+  ///
+  /// DESIGN (da Immagine 1):
+  /// - Banner arancione in basso con icona warning
+  /// - "Ricalcolo in corso..." con spinner
+  /// - "Torna al percorso" come sottotitolo
+  /// - Pulsanti "Passi" e "Riprendi"
+  ///
+  /// ACCESSIBILITÀ:
+  /// Tono rassicurante, nessun allarme. Il ragazzo deve capire che
+  /// qualcosa è cambiato ma che va tutto bene, non deve agitarsi.
+  Widget _buildReroutingSheet() {
+    return Positioned(
+      bottom: 0,
+      left: 0,
+      right: 0,
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          boxShadow: [
+            BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, -2)),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Maniglia di scorrimento
+            Center(
+              child: Container(
+                margin: const EdgeInsets.only(top: 12, bottom: 8),
+                height: 4,
+                width: 40,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            // Banner arancione "Ricalcolo in corso..."
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade600,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 24),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Ricalcolo in corso...',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Titolo rassicurante
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 24),
+              child: Text(
+                'Sto cercando una strada migliore',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black87,
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            // Info percorso attuale
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Text(
+                _directionsResult?.totalDuration != null
+                    ? '${_directionsResult!.totalDuration} • ${_directionsResult!.totalDistance}'
+                    : '',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey.shade600,
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            // Spinner al centro
+            SizedBox(
+              width: 36,
+              height: 36,
+              child: CircularProgressIndicator(
+                strokeWidth: 3,
+                color: Colors.blue.shade600,
+              ),
+            ),
+            SizedBox(height: MediaQuery.of(context).padding.bottom + 24),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Bottom sheet BIANCO con animazione progressiva "Va tutto bene".
+  ///
+  /// DESIGN (da Immagine 2 — 3 fasi):
+  /// 1. Mascotte mappa + "Va tutto bene." (subito)
+  /// 2. + "Sembra che il percorso sia cambiato." (dopo 1.5s)
+  /// 3. + Pulsanti "Mostra il nuovo percorso" / "Controllo la mappa" (dopo 3s)
+  ///
+  /// Ogni fase appare con un'animazione fade per non sovraccaricare
+  /// cognitivamente il ragazzo con troppe informazioni simultanee.
+  Widget _buildRouteChangedSheet() {
+    return Positioned(
+      bottom: 0,
+      left: 0,
+      right: 0,
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          boxShadow: [
+            BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, -2)),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Maniglia
+            Center(
+              child: Container(
+                margin: const EdgeInsets.only(top: 12, bottom: 16),
+                height: 4,
+                width: 40,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+
+            // --- MASCOTTE MAPPA ---
+            // Icona stilizzata che ricorda una mappa felice (come nello screenshot).
+            // Usiamo un Container circolare con icona mappa + freccia di refresh.
+            Container(
+              width: 100,
+              height: 100,
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Icon(
+                    Icons.map_rounded,
+                    size: 56,
+                    color: Colors.blue.shade400,
+                  ),
+                  // Pin rosso in alto a destra (come nello screenshot)
+                  Positioned(
+                    top: 14,
+                    right: 18,
+                    child: Icon(
+                      Icons.location_on,
+                      size: 24,
+                      color: Colors.red.shade400,
+                    ),
+                  ),
+                  // Freccia di refresh intorno alla mappa
+                  Positioned(
+                    bottom: 12,
+                    right: 12,
+                    child: Icon(
+                      Icons.refresh,
+                      size: 20,
+                      color: Colors.blue.shade300,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // --- TESTO 1: "Va tutto bene." (sempre visibile) ---
+            const Text(
+              'Va tutto bene.',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // --- TESTO 2: "Sembra che il percorso sia cambiato." (step >= 1) ---
+            AnimatedOpacity(
+              opacity: _routeChangedAnimStep >= 1 ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 500),
+              child: AnimatedSlide(
+                offset: _routeChangedAnimStep >= 1
+                    ? Offset.zero
+                    : const Offset(0, 0.3),
+                duration: const Duration(milliseconds: 500),
+                curve: Curves.easeOut,
+                child: Text(
+                  'Sembra che il percorso sia cambiato.',
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+
+            // --- PULSANTI (step >= 2) ---
+            AnimatedOpacity(
+              opacity: _routeChangedAnimStep >= 2 ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 500),
+              child: AnimatedSlide(
+                offset: _routeChangedAnimStep >= 2
+                    ? Offset.zero
+                    : const Offset(0, 0.3),
+                duration: const Duration(milliseconds: 500),
+                curve: Curves.easeOut,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Column(
+                    children: [
+                      // Pulsante principale — "Mostra il nuovo percorso"
+                      SizedBox(
+                        width: double.infinity,
+                        height: 52,
+                        child: ElevatedButton(
+                          onPressed: _dismissRerouteSheet,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue.shade600,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(26),
+                            ),
+                            elevation: 0,
+                          ),
+                          child: const Text(
+                            'Mostra il nuovo percorso',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      // Pulsante secondario — "Controllo la mappa"
+                      TextButton(
+                        onPressed: _dismissRerouteSheet,
+                        child: Text(
+                          'Controllo la mappa',
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: Colors.blue.shade700,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ===========================================================================
+  // HELPER: BOTTOM SHEET ARRIVO A DESTINAZIONE (Design da screenshot)
+  // ===========================================================================
+
+  /// UI completa per lo stato "arrivato": banner verde in alto + bottom sheet.
+  ///
+  /// Sostituisce _buildNavigatingUI() quando _isArrived è true.
+  /// Il banner di navigazione diventa verde "Sei arrivato" e il bottom
+  /// sheet mostra un'animazione progressiva di congratulazioni.
+  Widget _buildArrivalUI() {
+    return Stack(
+      children: [
+        // --- TOP BANNER VERDE "Sei arrivato" ---
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: Container(
+            margin: EdgeInsets.only(
+              top: MediaQuery.of(context).padding.top + 8,
+              left: 12,
+              right: 12,
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+            decoration: BoxDecoration(
+              color: Colors.green.shade600,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black38,
+                  blurRadius: 12,
+                  offset: Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                // Icona checkmark grande
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withAlpha(50),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: const Icon(
+                    Icons.check_circle,
+                    color: Colors.white,
+                    size: 40,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                const Expanded(
+                  child: Text(
+                    'Sei arrivato',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 26,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        // --- BOTTOM SHEET ARRIVO CON ANIMAZIONE PROGRESSIVA ---
+        _buildArrivalSheet(),
+      ],
+    );
+  }
+
+  /// Bottom sheet "Sei arrivato" con animazione progressiva a 3 step.
+  ///
+  /// DESIGN (da screenshot — 3 fasi):
+  /// 1. Checkmark verde + "Sei arrivato." (subito)
+  /// 2. + "Hai seguito il percorso con attenzione." (dopo 1.5s)
+  /// 3. + "Vuoi rivedere il percorso?" link blu (dopo 3s)
+  ///
+  /// I pulsanti "Chiudi" e "Nuova meta" sono sempre visibili in basso.
+  Widget _buildArrivalSheet() {
+    return Positioned(
+      bottom: 0,
+      left: 0,
+      right: 0,
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black26,
+              blurRadius: 12,
+              offset: Offset(0, -2),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Maniglia di scorrimento + pulsante X
+            Padding(
+              padding: const EdgeInsets.only(top: 8, right: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const SizedBox(width: 40), // Bilancia il pulsante X
+                  // Maniglia
+                  Container(
+                    margin: const EdgeInsets.only(top: 4),
+                    height: 4,
+                    width: 40,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  // Pulsante X
+                  IconButton(
+                    onPressed: _dismissArrivalSheet,
+                    icon: Icon(
+                      Icons.close,
+                      color: Colors.grey.shade500,
+                      size: 24,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // --- CHECKMARK GRANDE VERDE ---
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.check_circle,
+                size: 52,
+                color: Colors.green.shade600,
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // --- TESTO 1: "Sei arrivato." (sempre visibile) ---
+            const Text(
+              'Sei arrivato.',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // --- TESTO 2: "Hai seguito il percorso con attenzione." (step >= 1) ---
+            AnimatedOpacity(
+              opacity: _arrivalAnimStep >= 1 ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 500),
+              child: AnimatedSlide(
+                offset: _arrivalAnimStep >= 1
+                    ? Offset.zero
+                    : const Offset(0, 0.3),
+                duration: const Duration(milliseconds: 500),
+                curve: Curves.easeOut,
+                child: Text(
+                  'Hai seguito il percorso con attenzione.',
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // --- TESTO 3: "Vuoi rivedere il percorso?" (step >= 2) ---
+            AnimatedOpacity(
+              opacity: _arrivalAnimStep >= 2 ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 500),
+              child: AnimatedSlide(
+                offset: _arrivalAnimStep >= 2
+                    ? Offset.zero
+                    : const Offset(0, 0.3),
+                duration: const Duration(milliseconds: 500),
+                curve: Curves.easeOut,
+                child: GestureDetector(
+                  onTap: _showWalkedPathReview,
+                  child: Text(
+                    'Vuoi rivedere il percorso?',
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: Colors.blue.shade600,
+                      fontWeight: FontWeight.w500,
+                      decoration: TextDecoration.underline,
+                      decorationColor: Colors.blue.shade600,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+
+            // --- PULSANTI SEMPRE VISIBILI ---
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Row(
+                children: [
+                  // Pulsante "Chiudi" — secondario
+                  Expanded(
+                    child: SizedBox(
+                      height: 52,
+                      child: OutlinedButton(
+                        onPressed: _dismissArrivalSheet,
+                        style: OutlinedButton.styleFrom(
+                          side: BorderSide(
+                            color: Colors.grey.shade400,
+                            width: 2,
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(26),
+                          ),
+                        ),
+                        child: const Text(
+                          'Chiudi',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.black87,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  // Pulsante "Nuova meta" — principale
+                  Expanded(
+                    child: SizedBox(
+                      height: 52,
+                      child: ElevatedButton(
+                        onPressed: _dismissArrivalSheet,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blue.shade600,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(26),
+                          ),
+                          elevation: 0,
+                        ),
+                        child: const Text(
+                          'Nuova meta',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ===========================================================================
+  // HELPER: REVIEW PERCORSO EFFETTUATO (Post-Arrivo)
+  // ===========================================================================
+
+  /// UI per la review del percorso camminato.
+  ///
+  /// Mostra la mappa con:
+  /// - Polyline BLU: percorso pianificato (dalla Directions API)
+  /// - Polyline VERDE: percorso effettivamente camminato (da GPS tracking)
+  /// - Bottom sheet con legenda colori e pulsante "Chiudi"
+  ///
+  /// La camera si posiziona automaticamente per mostrare entrambi i percorsi
+  /// in vista panoramica (tilt=0, bearing=0) tramite fitAllPoints().
+  Widget _buildWalkedPathReviewUI() {
+    return Stack(
+      children: [
+        // --- BOTTOM SHEET REVIEW ---
+        Positioned(
+          bottom: 0,
+          left: 0,
+          right: 0,
+          child: Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black26,
+                  blurRadius: 12,
+                  offset: Offset(0, -2),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Maniglia
+                Center(
+                  child: Container(
+                    margin: const EdgeInsets.only(top: 12, bottom: 16),
+                    height: 4,
+                    width: 40,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+
+                // --- TITOLO ---
+                const Text(
+                  'Il tuo percorso',
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black87,
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // --- LEGENDA COLORI ---
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Column(
+                    children: [
+                      // Linea BLU = percorso pianificato
+                      Row(
+                        children: [
+                          Container(
+                            width: 32,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: Colors.blue,
+                              borderRadius: BorderRadius.circular(3),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Text(
+                            'Percorso consigliato',
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: Colors.grey.shade700,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      // Linea VERDE = percorso effettuato
+                      Row(
+                        children: [
+                          Container(
+                            width: 32,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF34A853),
+                              borderRadius: BorderRadius.circular(3),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Text(
+                            'La strada che hai fatto',
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: Colors.grey.shade700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+
+                // --- INFO PERCORSO ---
+                if (_directionsResult != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.directions_walk,
+                          size: 24,
+                          color: Colors.green.shade700,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          '${_directionsResult!.totalDuration} • ${_directionsResult!.totalDistance}',
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: Colors.grey.shade600,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 20),
+
+                // --- PULSANTE CHIUDI ---
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 52,
+                    child: ElevatedButton.icon(
+                      onPressed: _dismissArrivalSheet,
+                      icon: const Icon(Icons.check, size: 24),
+                      label: const Text(
+                        'Fatto',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue.shade600,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(26),
+                        ),
+                        elevation: 0,
+                      ),
+                    ),
+                  ),
+                ),
+                SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
               ],
             ),
           ),
@@ -1388,24 +2664,146 @@ class _NavigationScreenState extends State<NavigationScreen> {
     );
   }
 
+  // ===========================================================================
+  // HELPER: ICONE E COLORI PER MANOVRE (Design Accessibile)
+  // ===========================================================================
+
+  /// Restituisce l'icona direzionale appropriata per il tipo di manovra.
+  ///
+  /// Le icone sono scelte per essere immediatamente riconoscibili:
+  /// - Frecce grandi e chiare
+  /// - Ogni direzione ha un'icona diversa
+  /// - Il fallback (dritto) è la situazione più comune
+  IconData _getManeuverIcon(String? maneuver) {
+    switch (maneuver) {
+      // Svolte
+      case 'turn-left':
+        return Icons.turn_left;
+      case 'turn-right':
+        return Icons.turn_right;
+      case 'turn-slight-left':
+        return Icons.turn_slight_left;
+      case 'turn-slight-right':
+        return Icons.turn_slight_right;
+      case 'turn-sharp-left':
+        return Icons.turn_sharp_left;
+      case 'turn-sharp-right':
+        return Icons.turn_sharp_right;
+
+      // Inversione
+      case 'uturn-left':
+      case 'uturn-right':
+        return Icons.u_turn_left;
+
+      // Tieni sinistra/destra
+      case 'keep-left':
+      case 'ramp-left':
+      case 'fork-left':
+        return Icons.turn_slight_left;
+      case 'keep-right':
+      case 'ramp-right':
+      case 'fork-right':
+        return Icons.turn_slight_right;
+
+      // Rotonde
+      case 'roundabout-left':
+      case 'roundabout-right':
+        return Icons.roundabout_left;
+
+      // Dritto / merge / sconosciuto
+      case 'straight':
+      case 'merge':
+      default:
+        return Icons.arrow_upward;
+    }
+  }
+
+  /// Restituisce il colore di sfondo del banner in base alla manovra.
+  ///
+  /// CODIFICA COLORE per comprensione immediata:
+  /// - VERDE     → vai dritto (tutto ok, nessuna azione)
+  /// - BLU       → vai a destra
+  /// - ARANCIONE → vai a sinistra
+  /// - ROSSO     → torna indietro (attenzione!)
+  /// - VIOLA     → rotonda (situazione speciale)
+  Color _getManeuverColor(String? maneuver) {
+    switch (maneuver) {
+      // Destra → blu
+      case 'turn-right':
+      case 'turn-slight-right':
+      case 'turn-sharp-right':
+      case 'keep-right':
+      case 'ramp-right':
+      case 'fork-right':
+        return Colors.blue.shade700;
+
+      // Sinistra → arancione
+      case 'turn-left':
+      case 'turn-slight-left':
+      case 'turn-sharp-left':
+      case 'keep-left':
+      case 'ramp-left':
+      case 'fork-left':
+        return Colors.orange.shade800;
+
+      // Inversione → rosso
+      case 'uturn-left':
+      case 'uturn-right':
+        return Colors.red.shade700;
+
+      // Rotonda → viola
+      case 'roundabout-left':
+      case 'roundabout-right':
+        return Colors.purple.shade700;
+
+      // Dritto / merge / sconosciuto → verde
+      case 'straight':
+      case 'merge':
+      default:
+        return Colors.green.shade800;
+    }
+  }
+
   /// Metodo Helper per estrarre la grafica di "Fallback" quando non c'è una rotta
   /// (usato se il _navigationMonitor non ha ancora sincronizzato i percorsi).
   Widget _buildFallbackBanner() {
     return Container(
-      color: Colors.green.shade800,
-      padding: EdgeInsets.only(
-        top: MediaQuery.of(context).padding.top + 16,
-        bottom: 16,
-        left: 16,
-        right: 16,
+      margin: EdgeInsets.only(
+        top: MediaQuery.of(context).padding.top + 8,
+        left: 12,
+        right: 12,
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+      decoration: BoxDecoration(
+        color: Colors.green.shade800,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black38,
+            blurRadius: 12,
+            offset: Offset(0, 4),
+          ),
+        ],
       ),
       child: Row(
         children: [
-          const Icon(Icons.arrow_upward, color: Colors.white, size: 40),
+          Container(
+            width: 80,
+            height: 80,
+            decoration: BoxDecoration(
+              color: Colors.white.withAlpha(50),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: const Icon(
+              Icons.arrow_upward,
+              color: Colors.white,
+              size: 56,
+            ),
+          ),
           const SizedBox(width: 16),
           const Expanded(
             child: Text(
-              'Procedi lungo il percorso',
+              'Vai dritto, stai andando bene!',
               style: TextStyle(
                 color: Colors.white,
                 fontSize: 24,
@@ -1413,39 +2811,33 @@ class _NavigationScreenState extends State<NavigationScreen> {
               ),
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.close, color: Colors.white),
-            onPressed: () {
-              _navigationMonitor.stopNavigation();
-              setState(() {
-                _appState = NavigationAppState.routePreview;
-                _isFollowingUser = false;
-              });
-            },
-          ),
         ],
       ),
     );
   }
 
-  /// Widget per mostrare errori
+  /// Widget per mostrare errori — tono rassicurante, non allarmante
   Widget _buildErrorMessage() {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.red.shade50,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.red.shade200),
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.orange.shade200),
       ),
       child: Row(
         children: [
-          Icon(Icons.error_outline, color: Colors.red.shade700),
-          const SizedBox(width: 8),
+          Icon(Icons.info_outline, color: Colors.orange.shade700, size: 28),
+          const SizedBox(width: 12),
           Expanded(
             child: Text(
               _errorMessage!,
-              style: TextStyle(color: Colors.red.shade700),
+              style: TextStyle(
+                color: Colors.orange.shade900,
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         ],

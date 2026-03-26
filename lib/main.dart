@@ -40,7 +40,7 @@ class NavigationApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       // Titolo dell'app (visibile nella tab del browser)
-      title: 'Navigation App',
+      title: 'La mia mappa',
 
       // Nasconde il banner di debug
       debugShowCheckedModeBanner: false,

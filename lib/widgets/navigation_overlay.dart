@@ -2,7 +2,7 @@
 ///
 /// Questo widget mostra un banner animato sulla mappa con due tipi di messaggio:
 /// 1. Istruzione di svolta (quando l'utente è fermo su un waypoint del percorso)
-/// 2. "vai diritto stronzo" (quando vengono rilevate strade laterali)
+/// 2. Messaggio "vai dritto" incoraggiante (quando vengono rilevate strade laterali)
 ///
 /// DESIGN PER ACCESSIBILITÀ:
 /// L'app è destinata a persone con disabilità cognitive, quindi l'overlay:
@@ -133,8 +133,17 @@ class _NavigationOverlayState extends State<NavigationOverlay>
     // Cancella un eventuale timer precedente ancora in corso
     _autoDismissTimer?.cancel();
 
+    // L'overlay di arrivo resta visibile più a lungo (15 secondi)
+    // perché è il momento di celebrazione: il ragazzo ha completato
+    // il percorso e merita di godersi il messaggio di congratulazioni.
+    // Gli altri overlay usano il timer standard (8 secondi).
+    final int dismissSeconds =
+        widget.state?.type == OverlayType.arrivalCelebration
+            ? 15
+            : kOverlayAutoDismissSeconds;
+
     _autoDismissTimer = Timer(
-      Duration(seconds: kOverlayAutoDismissSeconds),
+      Duration(seconds: dismissSeconds),
       () {
         // Verifica che il widget sia ancora montato (l'utente potrebbe
         // aver cambiato schermata durante il countdown)
@@ -203,23 +212,34 @@ class _NavigationOverlayState extends State<NavigationOverlay>
   /// Lo stile varia in base al tipo di overlay:
   /// - Istruzione di svolta: sfondo blu, icona della manovra
   /// - Strada laterale: sfondo arancione/rosso, icona freccia dritta
+  /// - Arrivo a destinazione: sfondo verde brillante, icona stella
   Widget _buildOverlayCard(NavigationOverlayState overlayState) {
     // Determina colori e icona in base al tipo di overlay
-    final bool isTurn = overlayState.type == OverlayType.turnInstruction;
+    final Color backgroundColor;
+    final IconData icon;
 
-    final Color backgroundColor = isTurn
-        ? Colors.blue.shade700
-        : Colors.orange.shade800;
-
-    final IconData icon = isTurn
-        ? _getManeuverIcon(overlayState.maneuver)
-        : Icons.arrow_upward;
+    switch (overlayState.type) {
+      case OverlayType.turnInstruction:
+        backgroundColor = Colors.blue.shade700;
+        icon = _getManeuverIcon(overlayState.maneuver);
+        break;
+      case OverlayType.lateralRoadDetected:
+        backgroundColor = Colors.orange.shade800;
+        icon = Icons.arrow_upward;
+        break;
+      case OverlayType.arrivalCelebration:
+        backgroundColor = Colors.green.shade700;
+        icon = Icons.emoji_events;
+        break;
+    }
 
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.all(
+        overlayState.type == OverlayType.arrivalCelebration ? 24 : 20,
+      ),
       decoration: BoxDecoration(
         color: backgroundColor,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withOpacity(0.3),
@@ -230,16 +250,22 @@ class _NavigationOverlayState extends State<NavigationOverlay>
       ),
       child: Row(
         children: [
-          // Icona
-          Icon(icon, color: Colors.white, size: 40),
+          // Icona — più grande per l'arrivo
+          Icon(
+            icon,
+            color: Colors.white,
+            size: overlayState.type == OverlayType.arrivalCelebration ? 56 : 40,
+          ),
           const SizedBox(width: 16),
-          // Testo del messaggio
+          // Testo del messaggio — più grande per l'arrivo
           Expanded(
             child: Text(
               overlayState.message,
-              style: const TextStyle(
+              style: TextStyle(
                 color: Colors.white,
-                fontSize: 22,
+                fontSize: overlayState.type == OverlayType.arrivalCelebration
+                    ? 26
+                    : 22,
                 fontWeight: FontWeight.bold,
                 height: 1.3,
               ),
