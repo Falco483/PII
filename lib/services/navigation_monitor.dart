@@ -34,8 +34,10 @@ library;
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'geo_utils.dart';
+import 'navigation_history_service.dart';
 import 'roads_service.dart';
 import 'directions_service.dart';
+import '../models/navigation_session.dart';
 
 // =============================================================================
 // MODELLO PER LO STATO DELL'OVERLAY
@@ -280,6 +282,16 @@ class NavigationMonitor {
   final ValueNotifier<int> currentStepNotifier = ValueNotifier<int>(0);
 
   // ===========================================================================
+  // TRACCIAMENTO SESSIONE DI NAVIGAZIONE
+  // ===========================================================================
+
+  /// Sessione di navigazione corrente.
+  ///
+  /// Viene creata in [startNavigation] e salvata in [stopNavigation].
+  /// È null quando la navigazione non è attiva.
+  NavigationSession? _currentSession;
+
+  // ===========================================================================
   // SERVIZI
   // ===========================================================================
 
@@ -289,6 +301,9 @@ class NavigationMonitor {
   /// Client per la Directions API. Usato nel Task 2c per ricalcolare il percorso
   /// quando l'utente devia e nessun percorso alternativo è compatibile.
   final DirectionsService _directionsService;
+
+  /// Servizio per la persistenza delle sessioni di navigazione.
+  final NavigationHistoryService _historyService;
 
   // ===========================================================================
   // COSTRUTTORE
@@ -304,8 +319,10 @@ class NavigationMonitor {
   NavigationMonitor({
     RoadsService? roadsService,
     DirectionsService? directionsService,
+    NavigationHistoryService? historyService,
   }) : _roadsService = roadsService ?? RoadsService(),
-       _directionsService = directionsService ?? DirectionsService() {
+       _directionsService = directionsService ?? DirectionsService(),
+       _historyService = historyService ?? NavigationHistoryService() {
     // Avvia subito il timer periodico per il campionamento del bearing
     _startBearingTimer();
   }
@@ -493,6 +510,15 @@ class NavigationMonitor {
     // Imposta il flag di navigazione attiva
     _isNavigating = true;
 
+    // Crea una nuova sessione di tracciamento per questa navigazione.
+    // L'ID è costruito come timestamp epoch in ms per semplicità (non richiede
+    // dipendenze esterne come uuid) garantendo comunque unicità pratica.
+    _currentSession = NavigationSession(
+      sessionId: DateTime.now().millisecondsSinceEpoch.toString(),
+      destination: destination,
+      startTime: DateTime.now().toIso8601String(),
+    );
+
     // Notifica la UI che il percorso attivo è stato impostato.
     // La UI aggiornerà la polyline sulla mappa e le indicazioni.
     activeRouteNotifier.value = _activeRoute;
@@ -513,7 +539,19 @@ class NavigationMonitor {
   ///
   /// Chiamato quando l'utente vuole interrompere la navigazione
   /// o quando la navigazione raggiunge la destinazione.
+  /// Salva la sessione corrente in [NavigationHistoryService].
   void stopNavigation() {
+    // Salva la sessione corrente prima di resettare lo stato.
+    // GUARD: se stopNavigation viene chiamato senza startNavigation,
+    // _currentSession è null e non facciamo nulla.
+    if (_currentSession != null) {
+      _currentSession!.endTime = DateTime.now().toIso8601String();
+      // Salvataggio asincrono: non blocchiamo il thread principale.
+      // unawaited è implicito — l'errore è già gestito dentro saveSession.
+      _historyService.saveSession(_currentSession!);
+      _currentSession = null;
+    }
+
     // Imposta il flag a false per fermare la logica di controllo
     _isNavigating = false;
 
@@ -527,7 +565,7 @@ class NavigationMonitor {
     _originalDestination = null;
     _consecutiveOffRouteDetects = 0;
     _routeCheckTicks = 0;
-    
+
     // Resetta lo stato di tracciamento degli Step
     _currentStepIndex = 0;
     _consecutiveCloseUpdates = 0;
@@ -545,7 +583,19 @@ class NavigationMonitor {
   /// DEVE essere chiamato in NavigationScreen.dispose() per evitare
   /// memory leak e timer orfani che continuano a girare dopo la
   /// distruzione del widget.
+  ///
+  /// CRASH GUARD:
+  /// Se la navigazione è ancora attiva quando dispose() viene chiamato
+  /// (es. chiusura forzata dell'app), stopNavigation() viene invocato
+  /// per salvare la sessione parziale prima di liberare le risorse.
   void dispose() {
+    // Se la navigazione è ancora in corso, salviamo la sessione parziale.
+    // Questo copre il caso in cui l'app viene chiusa/crashata senza
+    // che l'utente prema "Stop" esplicitamente.
+    if (_isNavigating) {
+      stopNavigation();
+    }
+
     // Cancella il timer di campionamento del bearing
     _bearingTimer?.cancel();
     _bearingTimer = null;
@@ -729,8 +779,9 @@ class NavigationMonitor {
 
       if (turnResult != null) {
         // L'utente è vicino a un waypoint di svolta!
-        // Mostra l'istruzione di navigazione e interrompi.
+        // Mostra l'istruzione di navigazione e registra nella sessione.
         overlayNotifier.value = turnResult;
+        _recordOverlayEvent(turnResult);
         return;
       }
 
@@ -795,10 +846,13 @@ class NavigationMonitor {
 
       if (snappedPoints.isNotEmpty) {
         // Strada laterale rilevata! Mostra l'overlay.
-        overlayNotifier.value = NavigationOverlayState(
+        final overlayState = NavigationOverlayState(
           type: OverlayType.lateralRoadDetected,
           message: 'vai diritto stronzo',
         );
+        overlayNotifier.value = overlayState;
+        // Registra l'overlay nella sessione corrente.
+        _recordOverlayEvent(overlayState);
       }
       // Se snappedPoints è vuoto, non facciamo nulla. Nessun overlay.
     } finally {
@@ -1047,11 +1101,14 @@ class NavigationMonitor {
         // Aggiorna gli step del percorso per il check dei waypoint di svolta
         _routeSteps = alternativeRoute.steps;
 
-        // Siccome ci siamo agganciati magicamente al percorso di scorta, 
+        // Siccome ci siamo agganciati magicamente al percorso di scorta,
         // azzeriamo tutti i conteggi per fargli ricalcolare dal rigo 0 le sue istruzioni
         _currentStepIndex = 0;
         _consecutiveCloseUpdates = 0;
         currentStepNotifier.value = 0;
+
+        // Incrementa il contatore ricalcoli nella sessione corrente (Task 2b).
+        _currentSession?.rerouteCount++;
 
         // Notifica la UI che il percorso attivo è cambiato.
         // La NavigationScreen si occuperà di aggiornare:
@@ -1167,6 +1224,9 @@ class NavigationMonitor {
       // Aggiorna gli step per il check dei waypoint di svolta
       _routeSteps = newResult.bestRoute.steps;
 
+      // Incrementa il contatore ricalcoli nella sessione corrente (Task 2c).
+      _currentSession?.rerouteCount++;
+
       // Notifica la UI che il percorso è cambiato.
       // La NavigationScreen aggiornerà mappa, indicazioni, ecc.
       activeRouteNotifier.value = _activeRoute;
@@ -1187,4 +1247,26 @@ class NavigationMonitor {
       _isRerouting = false;
     }
   }
+
+  // ===========================================================================
+  // METODI PRIVATI — TRACCIAMENTO SESSIONE
+  // ===========================================================================
+
+  /// Registra un evento overlay nella sessione di navigazione corrente.
+  ///
+  /// Se non c'è una sessione attiva (es. navigazione non avviata), non fa nulla.
+  void _recordOverlayEvent(NavigationOverlayState state) {
+    if (_currentSession == null) return;
+    _currentSession!.overlays.add(
+      OverlayRecord(
+        type: state.type.name, // 'turnInstruction' | 'lateralRoadDetected'
+        message: state.message,
+        timestamp: DateTime.now().toIso8601String(),
+      ),
+    );
+  }
+
+  /// Getter per la sessione corrente, esposto solo per i test.
+  @visibleForTesting
+  NavigationSession? get currentSessionForTest => _currentSession;
 }
