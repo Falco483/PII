@@ -267,6 +267,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
   bool _hasInitialFix = false;
 
   // ===========================================================================
+  // CRONOLOGIA RICERCHE
+  // ===========================================================================
+
+  /// Ultime 3 ricerche recenti caricate da SearchHistoryService.
+  /// Vengono mostrate nel SearchInput quando il campo di testo è vuoto.
+  List<SearchHistoryItem> _recentSearches = [];
+
+  // ===========================================================================
   // CICLO DI VITA
   // ===========================================================================
 
@@ -302,6 +310,25 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
     // Avvia il monitoraggio della bussola (magnetometro)
     _initCompass();
+
+    // Carica le ultime 3 ricerche recenti dalla cronologia persistente
+    _loadRecentSearches();
+  }
+
+  // ===========================================================================
+  // CRONOLOGIA RICERCHE
+  // ===========================================================================
+
+  /// Carica le ultime 3 ricerche dalla cronologia e aggiorna lo stato.
+  /// Viene chiamato in initState() e dopo ogni selezione destinazione,
+  /// così la lista è sempre aggiornata.
+  Future<void> _loadRecentSearches() async {
+    final history = await _searchHistoryService.loadHistory();
+    if (!mounted) return;
+    setState(() {
+      // Prendiamo solo le prime 3 (loadHistory già ordina per timestamp desc)
+      _recentSearches = history.take(3).toList();
+    });
   }
 
   // ===========================================================================
@@ -335,7 +362,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
     if (_compassStream == null) {
       print('⚠️ Bussola non disponibile su questo dispositivo. '
-            'La freccia userà il bearing GPS come fallback.');
+          'La freccia userà il bearing GPS come fallback.');
     }
   }
 
@@ -538,9 +565,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
         // risultato completo se disponibile, altrimenti manteniamo
         // le coordinate attuali (la destinazione non cambia mai)
         originLat:
-            _allRoutesResult?.originLat ?? _directionsResult?.originLat ?? 0,
+        _allRoutesResult?.originLat ?? _directionsResult?.originLat ?? 0,
         originLng:
-            _allRoutesResult?.originLng ?? _directionsResult?.originLng ?? 0,
+        _allRoutesResult?.originLng ?? _directionsResult?.originLng ?? 0,
         destLat: _allRoutesResult?.destLat ?? _directionsResult?.destLat ?? 0,
         destLng: _allRoutesResult?.destLng ?? _directionsResult?.destLng ?? 0,
       );
@@ -549,7 +576,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Log per debugging: segnala alla console che la UI è stata aggiornata
     print(
       'UI aggiornata con nuovo percorso: ${newRoute.totalDuration} '
-      '(${newRoute.totalDistance})',
+          '(${newRoute.totalDistance})',
     );
   }
 
@@ -627,15 +654,15 @@ class _NavigationScreenState extends State<NavigationScreen> {
             }
             // Caso 2: calcolo manuale dalla distanza/tempo
             else if (_prevLat != null &&
-                     _prevLng != null &&
-                     _prevTimestamp != null) {
+                _prevLng != null &&
+                _prevTimestamp != null) {
               // Calcola il tempo trascorso dall'ultimo aggiornamento.
               // Usiamo position.timestamp (momento della lettura GPS)
               // invece di DateTime.now() per evitare latenza di delivery.
               final DateTime currentTimestamp = position.timestamp;
               final double deltaSec =
                   currentTimestamp.difference(_prevTimestamp!).inMilliseconds /
-                  1000.0;
+                      1000.0;
 
               // Scarta campioni troppo ravvicinati: con Δt < 0.5s
               // la distanza è dominata dall'errore GPS (3-10m) e il
@@ -696,10 +723,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
             // DEBUG: mostra sorgente e valori per diagnostica
             final String source = position.speed > 0 ? 'CHIP' : 'MANUAL';
             print('🚶 SPEED DEBUG [$source]: '
-                  'raw=${rawSpeedKmH.toStringAsFixed(2)} '
-                  '→ EMA=${_currentSpeed.toStringAsFixed(2)} km/h '
-                  '(chip=${(position.speed * 3.6).toStringAsFixed(2)} km/h, '
-                  'acc=${position.accuracy.toStringAsFixed(1)}m)');
+                'raw=${rawSpeedKmH.toStringAsFixed(2)} '
+                '→ EMA=${_currentSpeed.toStringAsFixed(2)} km/h '
+                '(chip=${(position.speed * 3.6).toStringAsFixed(2)} km/h, '
+                'acc=${position.accuracy.toStringAsFixed(1)}m)');
 
             // --- Posizione ---
             _currentLat = position.latitude;
@@ -1091,10 +1118,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// - [destLng]: longitudine della destinazione
   /// - [destAddress]: indirizzo leggibile della destinazione (per display e ricalcolo)
   Future<void> _calculateRouteFromCoordinates(
-    double destLat,
-    double destLng,
-    String destAddress,
-  ) async {
+      double destLat,
+      double destLng,
+      String destAddress,
+      ) async {
     // Verifica che la posizione GPS sia disponibile.
     // Senza la posizione dell'utente, non possiamo calcolare un percorso
     // perché non sappiamo da dove partire.
@@ -1209,15 +1236,17 @@ class _NavigationScreenState extends State<NavigationScreen> {
     print('Destinazione selezionata da ricerca: $address ($lat, $lng)');
 
     // Salva subito in cronologia (fire-and-forget, dedup gestito dal service)
+    // Poi ricarica la cronologia aggiornata per riflettere la nuova ricerca.
     _searchHistoryService
         .recordSearch(
-          SearchHistoryItem(
-            address: address,
-            lat: lat,
-            lng: lng,
-            timestamp: DateTime.now().millisecondsSinceEpoch,
-          ),
-        )
+      SearchHistoryItem(
+        address: address,
+        lat: lat,
+        lng: lng,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ),
+    )
+        .then((_) => _loadRecentSearches())
         .catchError((e) => print('Errore salvataggio cronologia: $e'));
 
     setState(() {
@@ -1294,7 +1323,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
       // Altrimenti usiamo le coordinate come fallback leggibile.
       final String displayName = address ??
           '${position.latitude.toStringAsFixed(5)}, '
-          '${position.longitude.toStringAsFixed(5)}';
+              '${position.longitude.toStringAsFixed(5)}';
 
       setState(() {
         _selectedDestinationAddress = displayName;
@@ -1372,8 +1401,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
           walkedPath: _isReviewingWalkedPath ? _walkedPath : null,
           // TASK 3: callback per tap sulla mappa
           onMapTap:
-              _appState == NavigationAppState.search ||
-                  _appState == NavigationAppState.placeSelected
+          _appState == NavigationAppState.search ||
+              _appState == NavigationAppState.placeSelected
               ? _onMapTapped
               : null,
           // Callback pan manuale: disattiva il follow-mode
@@ -1397,6 +1426,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 destinationController: _destinationController,
                 onDestinationSelected: _onDestinationSelected,
                 isLoading: _isLoading,
+                recentSearches: _recentSearches,
               ),
             ),
           ),
@@ -1410,8 +1440,28 @@ class _NavigationScreenState extends State<NavigationScreen> {
             child: SafeArea(child: _buildErrorMessage()),
           ),
 
-        // --- LAYER 3: Overlay Navigazione Originale ---
-        // Mostra le istruzioni turn-by-turn vecchie o "vai dritto"
+        // --- LAYER 3: Overlay Velocità ---
+        // Modifichiamo la pozione in base allo stato in modo che non si sovrapponga ai bottom sheet
+        _buildSpeedOverlay(),
+
+        // --- LAYER 5: BOTTOM SHEETS & TOP BANNER ---
+        if (_appState == NavigationAppState.placeSelected)
+          _buildPlaceSelectedSheet(),
+
+        if (_appState == NavigationAppState.navigating)
+          _isArrived
+              ? _buildArrivalUI()
+              : _isReviewingWalkedPath
+              ? _buildWalkedPathReviewUI()
+              : _buildNavigatingUI(),
+
+        if (_appState == NavigationAppState.routePreview &&
+            _directionsResult != null)
+          _buildRoutePreviewSheet(),
+
+        // --- LAYER 6: Overlay Navigazione ---
+        // DEVE stare sopra il banner di navigazione (LAYER 5) per essere visibile.
+        // L'overlay arancione di incertezza deve coprire il riquadro verde delle istruzioni.
         NavigationOverlay(
           state: _overlayState,
           onDismiss: () {
@@ -1426,28 +1476,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
             });
           },
         ),
-
-        // --- LAYER 4: Overlay Velocità ---
-        // Modifichiamo la pozione in base allo stato in modo che non si sovrapponga ai bottom sheet
-        _buildSpeedOverlay(),
-
-        // --- LAYER 5: BOTTOM SHEETS & TOP BANNER ---
-        if (_appState == NavigationAppState.placeSelected)
-          _buildPlaceSelectedSheet(),
-
-        if (_appState == NavigationAppState.navigating)
-          _isArrived
-              ? _buildArrivalUI()
-              : _isReviewingWalkedPath
-                  ? _buildWalkedPathReviewUI()
-                  : _buildNavigatingUI(),
-
-        if (_appState == NavigationAppState.routePreview &&
-            _directionsResult != null)
-          _buildRoutePreviewSheet(),
       ],
     );
   }
+
 
   /// Layout per desktop (pannello laterale)
   Widget _buildDesktopLayout() {
@@ -1465,6 +1497,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   destinationController: _destinationController,
                   onDestinationSelected: _onDestinationSelected,
                   isLoading: _isLoading,
+                  recentSearches: _recentSearches,
                 ),
               ),
 
@@ -1678,7 +1711,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   totalDistance: _directionsResult!.totalDistance,
                   totalDuration: _directionsResult!.totalDuration,
                   shrinkWrap:
-                      true, // Impedisce all'interno di estendersi all'infinito spezzando lo scroll
+                  true, // Impedisce all'interno di estendersi all'infinito spezzando lo scroll
                   onStartPressed: _startActiveNavigation,
                 ),
               ],
@@ -2676,7 +2709,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// - Il fallback (dritto) è la situazione più comune
   IconData _getManeuverIcon(String? maneuver) {
     switch (maneuver) {
-      // Svolte
+    // Svolte
       case 'turn-left':
         return Icons.turn_left;
       case 'turn-right':
@@ -2690,12 +2723,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
       case 'turn-sharp-right':
         return Icons.turn_sharp_right;
 
-      // Inversione
+    // Inversione
       case 'uturn-left':
       case 'uturn-right':
         return Icons.u_turn_left;
 
-      // Tieni sinistra/destra
+    // Tieni sinistra/destra
       case 'keep-left':
       case 'ramp-left':
       case 'fork-left':
@@ -2705,12 +2738,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
       case 'fork-right':
         return Icons.turn_slight_right;
 
-      // Rotonde
+    // Rotonde
       case 'roundabout-left':
       case 'roundabout-right':
         return Icons.roundabout_left;
 
-      // Dritto / merge / sconosciuto
+    // Dritto / merge / sconosciuto
       case 'straight':
       case 'merge':
       default:
@@ -2728,7 +2761,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// - VIOLA     → rotonda (situazione speciale)
   Color _getManeuverColor(String? maneuver) {
     switch (maneuver) {
-      // Destra → blu
+    // Destra → blu
       case 'turn-right':
       case 'turn-slight-right':
       case 'turn-sharp-right':
@@ -2737,7 +2770,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
       case 'fork-right':
         return Colors.blue.shade700;
 
-      // Sinistra → arancione
+    // Sinistra → arancione
       case 'turn-left':
       case 'turn-slight-left':
       case 'turn-sharp-left':
@@ -2746,17 +2779,17 @@ class _NavigationScreenState extends State<NavigationScreen> {
       case 'fork-left':
         return Colors.orange.shade800;
 
-      // Inversione → rosso
+    // Inversione → rosso
       case 'uturn-left':
       case 'uturn-right':
         return Colors.red.shade700;
 
-      // Rotonda → viola
+    // Rotonda → viola
       case 'roundabout-left':
       case 'roundabout-right':
         return Colors.purple.shade700;
 
-      // Dritto / merge / sconosciuto → verde
+    // Dritto / merge / sconosciuto → verde
       case 'straight':
       case 'merge':
       default:

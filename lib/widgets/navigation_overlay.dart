@@ -78,6 +78,11 @@ class _NavigationOverlayState extends State<NavigationOverlay>
   /// Con Timer possiamo cancellare il countdown precedente ogni volta che
   /// arriva un nuovo overlay, resettando il conteggio da zero.
   Timer? _autoDismissTimer;
+
+  /// Flag per prevenire chiamate multiple a reverse() o forward() durante
+  /// la chiusura dell'overlay causata dall'utente (X) o dal timer.
+  bool _isDismissing = false;
+
   @override
   void initState() {
     super.initState();
@@ -103,11 +108,11 @@ class _NavigationOverlayState extends State<NavigationOverlay>
     // FIX: Quando lo stato passa da non-null a un ALTRO non-null
     // (il monitor ha emesso un nuovo overlay mentre il precedente era ancora
     // visibile), resettiamo il timer di auto-dismiss e assicuriamoci che
-    // l'animazione sia in forward. Senza questo ramo, il vecchio timer
-    // (non cancellabile con Future.delayed) poteva chiudere prematuramente
-    // il nuovo overlay, e l'animazione restava nel suo stato corrente
-    // senza mai fare forward sul nuovo messaggio.
-    else if (widget.state != null && oldWidget.state != null) {
+    // l'animazione sia in forward. 
+    // AGGIUNTA: Verifichiamo che widget.state != oldWidget.state per non
+    // bloccare un fade-out in corso se il parent fa rebuild con lo stesso state.
+    else if (widget.state != null && oldWidget.state != null && widget.state != oldWidget.state) {
+      _isDismissing = false;
       _animController.forward();
       _startAutoDismissTimer();
     }
@@ -158,6 +163,9 @@ class _NavigationOverlayState extends State<NavigationOverlay>
   ///
   /// Chiamato sia dal tap dell'utente che dal timer di auto-dismiss.
   void _dismiss() {
+    if (_isDismissing) return;
+    _isDismissing = true;
+
     // Cancella il timer di auto-dismiss per evitare un secondo _dismiss()
     // se l'utente chiude manualmente l'overlay prima dello scadere.
     _autoDismissTimer?.cancel();
@@ -168,6 +176,8 @@ class _NavigationOverlayState extends State<NavigationOverlay>
       // Se chiamassimo onDismiss subito, lo stato verrebbe resettato
       // e l'overlay sparirebbe bruscamente senza animazione.
       if (mounted) {
+        // Resetta il flag in caso di futuri overlay
+        _isDismissing = false;
         widget.onDismiss();
       }
     });
