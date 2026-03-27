@@ -453,9 +453,8 @@ class MapWidgetState extends State<MapWidget> {
   /// direzione di marcia).
   ///
   /// ACCESSIBILITÀ:
-  /// - Zoom 19 (era 17.5): l'utente vede ~50m intorno a sé, una strada
-  ///   alla volta. Riduce il sovraccarico visivo eliminando strade lontane.
-  /// - Tilt 55° (era 45°): prospettiva più immersiva, aiuta a percepire
+  /// - Zoom 17 (ridotto di 2 da 19)
+  /// - Tilt 55°: prospettiva più immersiva, aiuta a percepire
   ///   la profondità e la direzione "avanti". Effetto "corridoio".
   void followUser(double lat, double lng, double bearing) {
     _isProgrammaticMove = true;
@@ -463,7 +462,7 @@ class MapWidgetState extends State<MapWidget> {
       CameraUpdate.newCameraPosition(
         CameraPosition(
           target: LatLng(lat, lng),
-          zoom: 19,
+          zoom: 17,
           bearing: bearing,
           tilt: 55,
         ),
@@ -483,7 +482,7 @@ class MapWidgetState extends State<MapWidget> {
       CameraUpdate.newCameraPosition(
         CameraPosition(
           target: LatLng(lat, lng),
-          zoom: 19,
+          zoom: 17,
           bearing: bearing,
           tilt: 55,
         ),
@@ -756,8 +755,32 @@ class MapWidgetState extends State<MapWidget> {
       ));
     }
 
+    // --- 3. PERCORSO COMPLESSIVO (sfondo blu chiaro) ---
+    // Disegna l'intera overview_polyline come linea di base.
+    // In questo modo, indipendentemente dagli step o dal ricalcolo,
+    // l'utente vedrà sempre l'intero percorso fino alla destinazione.
+    // I segmenti corrente e successivo verranno disegnati SOPRA questa linea
+    // (grazie a zIndex maggiore) coprendola dove serve.
+    if (widget.encodedPolyline != null) {
+      final List<LatLng> allPoints = _decodePolyline(widget.encodedPolyline!);
+      if (allPoints.isNotEmpty) {
+        polylines.add(Polyline(
+          polylineId: const PolylineId('remaining_route'),
+          points: allPoints,
+          color: const Color(0x884285F4), // Blu semitrasparente
+          width: 6,
+          geodesic: true,
+          jointType: JointType.round,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          zIndex: 0,
+        ));
+      }
+    }
+
     return polylines;
   }
+
 
   /// Centra la vista della mappa sul punto di partenza (anziché allargare a tutto il percorso) con zoom a 15
   void _fitBounds() {
@@ -893,7 +916,7 @@ class MapWidgetState extends State<MapWidget> {
       // Polyline sulla mappa
       polylines: _polylines,
       // Abilita zoom e rotazione
-      zoomControlsEnabled: true,
+      zoomControlsEnabled: false,
 
       // --- PALLINO BLU DI GOOGLE ---
       // In navigazione: DISABILITATO perché usiamo la freccia arancione custom
