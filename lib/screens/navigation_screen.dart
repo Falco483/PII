@@ -27,6 +27,9 @@ import '../services/navigation_monitor.dart';
 import '../services/search_history_service.dart';
 import '../services/geo_utils.dart';
 import '../services/places_service.dart';
+import '../services/navigation_history_service.dart';
+import 'dart:io' show Platform;
+import 'package:flutter/services.dart';
 import '../widgets/map_widget.dart';
 import '../widgets/search_input.dart';
 import '../widgets/directions_list.dart';
@@ -69,10 +72,17 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Servizio Places API per reverse geocoding (nome del posto da coordinate).
   final PlacesService _placesService = PlacesService();
 
+  /// Nodo di focus per il campo di testo della destinazione.
+  /// Controllato qui per poter chiudere la testiera da _handleBack o _onMapTapped.
+  final FocusNode _searchFocusNode = FocusNode();
+
   /// Monitor di navigazione — gestisce tutta la logica di business:
   /// bearing affidabile, trigger velocità zero, analisi strade laterali.
   /// Viene inizializzato in initState() e distrutto in dispose().
   late final NavigationMonitor _navigationMonitor;
+
+  /// Servizio per la gestione della cronologia di navigazione (Back Stack).
+  late final NavigationHistoryService<NavigationAppState> _historyService;
 
   // ===========================================================================
   // STATO DELL'APP
@@ -299,6 +309,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
     // Crea il NavigationMonitor che gestisce tutta la logica di business
     _navigationMonitor = NavigationMonitor();
+
+    // Inizializza il servizio di cronologia e imposta lo stato radice
+    _historyService = NavigationHistoryService<NavigationAppState>();
+    _historyService.clearToRoot(NavigationAppState.search);
 
     // Ascolta gli eventi del NavigationMonitor per mostrare/nascondere l'overlay.
     // Quando il monitor emette un nuovo stato (es. "Continua dritto!"),
@@ -927,8 +941,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Distrugge il NavigationMonitor (cancella tutti i timer interni)
     _navigationMonitor.dispose();
 
-    // Distrugge il controller del campo di testo
+    // Distrugge il controller e il nodo di focus del campo di testo
     _destinationController.dispose();
+    _searchFocusNode.dispose();
 
     super.dispose();
   }
@@ -1064,6 +1079,95 @@ class _NavigationScreenState extends State<NavigationScreen> {
   }
 
   // ===========================================================================
+  // GESTORE NAVIGAZIONE: STORICO E PULSANTE INDIETRO
+  // ===========================================================================
+
+  /// Salva lo stato corrente nella cronologia prima di passare a uno nuovo.
+  void _saveCurrentStateToHistory() {
+    _historyService.pushState(
+      _appState,
+      data: {
+        'address': _selectedDestinationAddress,
+        'directions': _directionsResult,
+        'allRoutes': _allRoutesResult,
+      },
+    );
+  }
+
+  /// Gestisce il tasto back (fisico Android, swipe iOS, pulsante UI).
+  /// Restituisce true se l'app deve chiudersi, false se l'azione è assorbita internamente.
+  Future<bool> _handleBack() async {
+    // 1. Se la tastiera è aperta o la barra di ricerca ha il focus, chiudiamo tutto.
+    if (FocusManager.instance.primaryFocus?.hasFocus ?? false) {
+      FocusManager.instance.primaryFocus?.unfocus();
+      if (_appState == NavigationAppState.search) {
+        _destinationController.clear();
+      }
+      return false; // Intercettato, non si esce dall'app
+    }
+
+    if (!_historyService.canGoBack) {
+      // 2. Controllo testuale: se siamo nella home ma la barra ha del testo scritto,
+      // puliamola invece di uscire bruscamente.
+      if (_appState == NavigationAppState.search && _destinationController.text.isNotEmpty) {
+         _destinationController.clear();
+         return false;
+      }
+
+      // Siamo alla root (search). Mostriamo popup conferma uscita.
+      final bool? exit = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Uscire dall\'app?'),
+          content: const Text('Sei sicuro di voler chiudere l\'applicazione?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Annulla'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red.shade600,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Esci'),
+            ),
+          ],
+        ),
+      );
+      return exit ?? false;
+    }
+
+    final previousEntry = _historyService.goBack();
+    if (previousEntry != null) {
+      // Se eravamo in navigazione, fermiamola
+      if (_appState == NavigationAppState.navigating) {
+        _navigationMonitor.stopNavigation();
+        _routeChangedAnimTimer?.cancel();
+        _arrivalAnimTimer?.cancel();
+      }
+
+      setState(() {
+        _appState = previousEntry.state;
+        if (previousEntry.data != null) {
+          if (previousEntry.data!.containsKey('address')) {
+            _selectedDestinationAddress = previousEntry.data!['address'] as String?;
+            _destinationController.text = _selectedDestinationAddress ?? '';
+          }
+          if (previousEntry.data!.containsKey('directions')) {
+            _directionsResult = previousEntry.data!['directions'] as DirectionsResult?;
+          }
+          if (previousEntry.data!.containsKey('allRoutes')) {
+            _allRoutesResult = previousEntry.data!['allRoutes'] as AllRoutesResult?;
+          }
+        }
+      });
+    }
+    return false;
+  }
+
+  // ===========================================================================
   // RESET NAVIGAZIONE
   // ===========================================================================
 
@@ -1097,6 +1201,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
       _isReviewingWalkedPath = false;
       _destinationController.clear();
     });
+    // Ripulisce lo stack e riparte dalla home
+    _historyService.clearToRoot(NavigationAppState.search);
   }
 
   void _showTemporaryError(String message) {
@@ -1134,9 +1240,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
     // Se ha calcolato correttamente
     if (_directionsResult != null) {
+      _saveCurrentStateToHistory();
       setState(() {
         _appState = NavigationAppState.routePreview;
       });
+      _saveCurrentStateToHistory(); // <-- Aggiunge il nuovo stato alla cima
     }
   }
 
@@ -1157,6 +1265,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     }
 
     if (_allRoutesResult != null) {
+      _saveCurrentStateToHistory();
       setState(() {
         _appState = NavigationAppState.navigating;
         _isFollowingUser = true;
@@ -1166,6 +1275,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
         _arrivalAnimStep = 0;
         _isReviewingWalkedPath = false;
       });
+      _saveCurrentStateToHistory();
 
       // FIX: Passa le COORDINATE della destinazione (formato "lat,lng"),
       // NON l'indirizzo testuale. Il monitor usa _originalDestination per
@@ -1340,6 +1450,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
         .then((_) => _loadRecentSearches())
         .catchError((e) => print('Errore salvataggio cronologia: $e'));
 
+    _saveCurrentStateToHistory();
     setState(() {
       _selectedDestinationAddress = address;
       _appState = NavigationAppState.placeSelected;
@@ -1358,6 +1469,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
       );
       _allRoutesResult = null; // Resetta i percorsi vecchi se presenti
     });
+    _saveCurrentStateToHistory(); // <-- Aggiunge il nuovo stato alla cima
   }
 
   /// Callback chiamato quando l'utente tocca un punto sulla mappa (TASK 3).
@@ -1371,6 +1483,15 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// PARAMETRI:
   /// - [position]: coordinate del punto toccato sulla mappa
   void _onMapTapped(LatLng position) {
+    // Se la barra di ricerca è attiva, un tap sulla mappa serve solo a chiudere la ricerca
+    if (FocusManager.instance.primaryFocus?.hasFocus ?? false) {
+      FocusManager.instance.primaryFocus?.unfocus();
+      if (_appState == NavigationAppState.search) {
+        _destinationController.clear();
+      }
+      return; // Interrompe qui, non seleziona un nuovo luogo
+    }
+
     // Placeholder temporaneo mentre la geocodifica è in corso
     const String loadingText = 'Cerco il nome del posto...';
 
@@ -1397,6 +1518,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
       );
       _allRoutesResult = null;
     });
+    _saveCurrentStateToHistory(); // <-- Aggiunge il nuovo stato alla cima
 
     // STEP 2: Chiama reverse geocoding in background.
     // Non usiamo await perché non vogliamo bloccare la UI.
@@ -1434,21 +1556,44 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Determina se siamo su un dispositivo mobile (schermo stretto)
     final isMobile = MediaQuery.of(context).size.width < 800;
 
-    return Scaffold(
-      // App Bar
-      appBar: AppBar(
-        title: const Text(
-          'La mia mappa',
-          style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) async {
+        if (didPop) return;
+        final bool shouldExit = await _handleBack();
+        if (shouldExit && mounted) {
+          SystemNavigator.pop();
+        }
+      },
+      child: Scaffold(
+        // App Bar
+        appBar: AppBar(
+          leading: _historyService.canGoBack
+              ? IconButton(
+                  icon: Icon(
+                    Platform.isIOS ? Icons.arrow_back_ios_new : Icons.arrow_back,
+                  ),
+                  onPressed: () async {
+                    final bool shouldExit = await _handleBack();
+                    if (shouldExit && mounted) {
+                      SystemNavigator.pop();
+                    }
+                  },
+                )
+              : null,
+          title: const Text(
+            'La mia mappa',
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          ),
+          backgroundColor: Colors.blue,
+          foregroundColor: Colors.white,
+          elevation: 0,
         ),
-        backgroundColor: Colors.blue,
-        foregroundColor: Colors.white,
-        elevation: 0,
+        // Corpo principale
+        body: isMobile
+            ? _buildMobileLayout() // Layout verticale per mobile
+            : _buildDesktopLayout(), // Layout orizzontale per desktop
       ),
-      // Corpo principale
-      body: isMobile
-          ? _buildMobileLayout() // Layout verticale per mobile
-          : _buildDesktopLayout(), // Layout orizzontale per desktop
     );
   }
 
@@ -1515,6 +1660,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
             child: SafeArea(
               child: SearchInput(
                 destinationController: _destinationController,
+                focusNode: _searchFocusNode,
                 onDestinationSelected: _onDestinationSelected,
                 isLoading: _isLoading,
                 recentSearches: _recentSearches,
@@ -1586,6 +1732,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 padding: const EdgeInsets.all(12.0),
                 child: SearchInput(
                   destinationController: _destinationController,
+                  focusNode: _searchFocusNode,
                   onDestinationSelected: _onDestinationSelected,
                   isLoading: _isLoading,
                   recentSearches: _recentSearches,

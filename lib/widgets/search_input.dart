@@ -47,6 +47,10 @@ class SearchInput extends StatefulWidget {
   /// Mentre il percorso è in fase di calcolo, il widget viene disabilitato.
   final bool isLoading;
 
+  /// Nodo di focus per il campo di testo.
+  /// Gestito dal parent per sapere quando la barra di ricerca è attiva.
+  final FocusNode focusNode;
+
   /// Ultime ricerche recenti (massimo 3) da mostrare quando il campo è vuoto.
   /// Passate dalla NavigationScreen che le carica dal SearchHistoryService.
   final List<SearchHistoryItem> recentSearches;
@@ -56,6 +60,7 @@ class SearchInput extends StatefulWidget {
     super.key,
     required this.destinationController,
     required this.onDestinationSelected,
+    required this.focusNode,
     this.isLoading = false,
     this.recentSearches = const [],
   });
@@ -131,10 +136,6 @@ class _SearchInputState extends State<SearchInput> {
   /// che è per il calcolo del percorso).
   bool _isLoadingSuggestions = false;
 
-  /// Nodo di focus per il campo di testo.
-  /// Serve per mostrare la cronologia SOLO quando il campo viene toccato/focalizzato.
-  final FocusNode _focusNode = FocusNode();
-
   // ===========================================================================
   // CICLO DI VITA
   // ===========================================================================
@@ -143,8 +144,12 @@ class _SearchInputState extends State<SearchInput> {
   void initState() {
     super.initState();
     // Ascolta i cambiamenti di focus per mostrare/nascondere la cronologia
-    _focusNode.addListener(() {
+    widget.focusNode.addListener(() {
       if (mounted) {
+        // Quando perde il focus chiudiamo anche eventuali suggerimenti rimasti aperti
+        if (!widget.focusNode.hasFocus) {
+          _suggestions = [];
+        }
         setState(() {}); // Ricostruisce per aggiornare la visibilità della history
       }
     });
@@ -157,7 +162,6 @@ class _SearchInputState extends State<SearchInput> {
     // il callback del timer tenterà di chiamare setState() su un widget
     // non più montato, causando un errore.
     _debounceTimer?.cancel();
-    _focusNode.dispose();
 
     // Chiama il dispose del parent (StatefulWidget)
     super.dispose();
@@ -360,7 +364,7 @@ class _SearchInputState extends State<SearchInput> {
           TextFormField(
             // Controller passato dal parent per leggere/scrivere il testo
             controller: widget.destinationController,
-            focusNode: _focusNode,
+            focusNode: widget.focusNode,
             enabled: !widget.isLoading, // Disabilita durante il calcolo
             // Callback chiamato ad ogni modifica del testo (ogni battitura)
             onChanged: _onTextChanged,
@@ -451,7 +455,7 @@ class _SearchInputState extends State<SearchInput> {
           //  2. Il campo di testo è vuoto (l'utente non sta digitando)
           //  3. Non ci sono suggerimenti API in corso
           //  4. Ci sono ricerche recenti da mostrare
-          if (_focusNode.hasFocus &&
+          if (widget.focusNode.hasFocus &&
               _suggestions.isEmpty &&
               widget.destinationController.text.isEmpty &&
               widget.recentSearches.isNotEmpty)
@@ -489,7 +493,7 @@ class _SearchInputState extends State<SearchInput> {
                   // senza chiamare nessuna API (è già tutto in memoria)
                   onTap: () {
                     // Toglie il focus per chiudere la tendina
-                    _focusNode.unfocus();
+                    widget.focusNode.unfocus();
                     
                     widget.destinationController.text = item.address;
                     setState(() {
