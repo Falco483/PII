@@ -133,7 +133,7 @@ class MapWidgetState extends State<MapWidget> {
 
   // Posizione iniziale: centro Italia
   static const LatLng _initialPosition = LatLng(45.4836315, 9.2249375);
-  static const double _initialZoom = 15;
+  static const double _initialZoom = 18;
 
   // =========================================================================
   // FRECCIA DIREZIONALE CUSTOM — BITMAP CACHE
@@ -462,7 +462,7 @@ class MapWidgetState extends State<MapWidget> {
       CameraUpdate.newCameraPosition(
         CameraPosition(
           target: LatLng(lat, lng),
-          zoom: 17,
+          zoom: 18,
           bearing: bearing,
           tilt: 55,
         ),
@@ -482,7 +482,7 @@ class MapWidgetState extends State<MapWidget> {
       CameraUpdate.newCameraPosition(
         CameraPosition(
           target: LatLng(lat, lng),
-          zoom: 17,
+          zoom: 18,
           bearing: bearing,
           tilt: 55,
         ),

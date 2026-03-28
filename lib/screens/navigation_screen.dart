@@ -113,6 +113,21 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Viene cancellata in dispose() per evitare memory leak.
   StreamSubscription<Position>? _positionStream;
 
+  /// Timer di "silenzio GPS": si avvia ad ogni aggiornamento GPS e viene
+  /// cancellato e riavviato al successivo. Se scade (nessun nuovo update
+  /// arriva entro N secondi, perché distanceFilter:2 sopprime le notifiche
+  /// da fermo), azzera _currentSpeed a 0.0 e notifica il NavigationMonitor.
+  ///
+  /// PERCHÉ QUESTO RISOLVE IL BUG:
+  /// Con distanceFilter=2, il chip GPS smette di emettere eventi quando
+  /// l'utente è fermo. Senza questo timer, _currentSpeed rimane "congelata"
+  /// all'ultima velocità di marcia (es. 3.5 km/h), impedendo al monitor
+  /// di avviare il countdown dell'overlay arancione.
+  Timer? _gpsTimeoutTimer;
+
+  /// Secondi di silenzio GPS dopo i quali la velocità viene azzerata.
+  static const int _gpsTimeoutSeconds = 3;
+
   /// Velocità corrente dell'utente in km/h (filtrata con EMA).
   ///
   /// Calcolata con approccio IBRIDO:
@@ -773,6 +788,34 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 '(chip=${(position.speed * 3.6).toStringAsFixed(2)} km/h, '
                 'acc=${position.accuracy.toStringAsFixed(1)}m)');
 
+            // --- TIMER SILENZIO GPS ---
+            // Ad ogni aggiornamento GPS valido, resettiamo il timer.
+            // Il timer è un one-shot: se non arriva nessun update entro
+            // _gpsTimeoutSeconds, l'utente è fermo e azzeriamo la velocità.
+            _gpsTimeoutTimer?.cancel();
+            _gpsTimeoutTimer = Timer(
+              Duration(seconds: _gpsTimeoutSeconds),
+              () {
+                // Nessun update GPS da N secondi → l'utente è fermo.
+                // Azzeriamo la velocità a schermo e notifichiamo il monitor.
+                if (mounted && _currentSpeed > 0.0) {
+                  setState(() {
+                    _currentSpeed = 0.0;
+                  });
+                  if (_currentLat != null && _currentLng != null) {
+                    _navigationMonitor.updatePosition(
+                      _currentLat!,
+                      _currentLng!,
+                      0.0,
+                      _rawBearing,
+                    );
+                  }
+                  print('⏱️ GPS TIMEOUT: nessun update da $_gpsTimeoutSeconds s — '
+                      'velocità azzerata a 0.0 km/h');
+                }
+              },
+            );
+
             // --- Posizione ---
             _currentLat = position.latitude;
             _currentLng = position.longitude;
@@ -849,6 +892,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
   void dispose() {
     // Cancella lo stream GPS per evitare memory leak e consumo batteria
     _positionStream?.cancel();
+
+    // Cancella il timer di silenzio GPS
+    _gpsTimeoutTimer?.cancel();
 
     // Cancella lo stream della bussola
     _compassStream?.cancel();
