@@ -392,7 +392,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Se il monitor ha emesso un arrivalCelebration, NON mostriamo il
     // solito overlay banner ma passiamo allo stato "arrivato" con
     // il bottom sheet animato progressivo (come per il ricalcolo).
+    //
+    // FIX: Controlliamo _isArrived per evitare di riavviare l'animazione.
+    // Prima, ogni aggiornamento GPS entro la soglia riemetteva l'evento,
+    // resettando il timer e impedendo a step 2 ("Rivedi percorso") di
+    // apparire. Ora il monitor emette una sola volta (flag _hasArrived),
+    // ma per sicurezza aggiungiamo anche un guard qui nella UI.
     if (newState?.type == OverlayType.arrivalCelebration) {
+      if (_isArrived) return; // Già in stato arrivo, non resettare l'animazione
       setState(() {
         _isArrived = true;
         _overlayState = null; // Non mostrare il banner overlay vecchio
@@ -453,6 +460,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
   }
 
   /// Chiude il bottom sheet di ricalcolo e resetta lo stato.
+  ///
+  /// Usato INTERNAMENTE per le fasi offRoute/rerouting (se l'utente
+  /// torna da solo sul percorso). Per la fase routeChanged, l'utente
+  /// deve usare i pulsanti dedicati (conferma o ripristino).
   void _dismissRerouteSheet() {
     _routeChangedAnimTimer?.cancel();
     setState(() {
@@ -460,6 +471,40 @@ class _NavigationScreenState extends State<NavigationScreen> {
       _routeChangedAnimStep = 0;
     });
     _navigationMonitor.reroutePhaseNotifier.value = ReroutePhase.none;
+  }
+
+  /// L'utente ha scelto "Continua col nuovo percorso".
+  ///
+  /// Il nuovo percorso è già attivo sulla mappa (applicato dal monitor
+  /// al momento del ricalcolo). Qui confermiamo la scelta:
+  /// 1. Chiudiamo il bottom sheet
+  /// 2. Il monitor cancella il backup del vecchio percorso
+  /// 3. La navigazione prosegue normalmente col nuovo percorso
+  void _confirmNewRoute() {
+    _routeChangedAnimTimer?.cancel();
+    _navigationMonitor.confirmNewRoute();
+    setState(() {
+      _reroutePhase = ReroutePhase.none;
+      _routeChangedAnimStep = 0;
+    });
+  }
+
+  /// L'utente ha scelto "Torna al vecchio percorso".
+  ///
+  /// Il monitor ripristina il percorso precedente come attivo e notifica
+  /// la UI tramite activeRouteNotifier. La mappa torna a mostrare il
+  /// vecchio percorso con le vecchie indicazioni.
+  ///
+  /// NOTA: l'utente potrebbe non essere fisicamente sul vecchio percorso.
+  /// Il monitor continuerà a controllare la posizione e, se necessario,
+  /// scatterà un nuovo ricalcolo in futuro.
+  void _restorePreviousRoute() {
+    _routeChangedAnimTimer?.cancel();
+    _navigationMonitor.restorePreviousRoute();
+    setState(() {
+      _reroutePhase = ReroutePhase.none;
+      _routeChangedAnimStep = 0;
+    });
   }
 
   // ===========================================================================
@@ -1733,11 +1778,22 @@ class _NavigationScreenState extends State<NavigationScreen> {
         // - Colore sfondo cambia in base alla direzione (verde=dritto, arancione=sinistra...)
         // - Testo grande e semplice (solo istruzione corrente, nessun "Poi:")
         // - Card arrotonata con ombra per distinguerla dalla mappa
+        //
+        // FIX SOVRAPPOSIZIONE: il banner viene nascosto con AnimatedOpacity
+        // quando un NavigationOverlay è attivo (_overlayState != null).
+        // L'overlay (svolta, strada laterale) occupa la stessa posizione
+        // in alto; senza questo fade-out i due widget si accavallano
+        // rendendo illeggibili entrambi.
         Positioned(
           top: 0,
           left: 0,
           right: 0,
-          child: ValueListenableBuilder<int>(
+          child: IgnorePointer(
+            ignoring: _overlayState != null,
+            child: AnimatedOpacity(
+              opacity: _overlayState != null ? 0.0 : 1.0,
+              duration: const Duration(milliseconds: 250),
+              child: ValueListenableBuilder<int>(
             valueListenable: _navigationMonitor.currentStepNotifier,
             builder: (context, currentStepIndex, child) {
               final steps = _directionsResult?.steps ?? [];
@@ -1840,6 +1896,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 ),
               );
             },
+          ),
+            ),
           ),
         ),
         // --- TASTO RECENTER ---
@@ -2074,15 +2132,17 @@ class _NavigationScreenState extends State<NavigationScreen> {
     );
   }
 
-  /// Bottom sheet BIANCO con animazione progressiva "Va tutto bene".
+  /// Bottom sheet BIANCO con animazione progressiva e SCELTA UTENTE.
   ///
-  /// DESIGN (da Immagine 2 — 3 fasi):
+  /// DESIGN — 3 fasi progressive:
   /// 1. Mascotte mappa + "Va tutto bene." (subito)
-  /// 2. + "Sembra che il percorso sia cambiato." (dopo 1.5s)
-  /// 3. + Pulsanti "Mostra il nuovo percorso" / "Controllo la mappa" (dopo 3s)
+  /// 2. + "Il percorso è cambiato. Cosa vuoi fare?" (dopo 1.5s)
+  /// 3. + Pulsanti "Continua col nuovo" / "Torna al vecchio" (dopo 3s)
   ///
-  /// Ogni fase appare con un'animazione fade per non sovraccaricare
-  /// cognitivamente il ragazzo con troppe informazioni simultanee.
+  /// IMPORTANTE: il bottom sheet NON ha maniglia e NON è dismissabile
+  /// con swipe/tap esterno. L'utente DEVE fare una scelta esplicita.
+  /// Questo è fondamentale per utenti con disabilità cognitive: nessuna
+  /// azione ambigua, nessun dismiss accidentale.
   Widget _buildRouteChangedSheet() {
     return Positioned(
       bottom: 0,
@@ -2099,22 +2159,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Maniglia
-            Center(
-              child: Container(
-                margin: const EdgeInsets.only(top: 12, bottom: 16),
-                height: 4,
-                width: 40,
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
+            const SizedBox(height: 24),
 
             // --- MASCOTTE MAPPA ---
-            // Icona stilizzata che ricorda una mappa felice (come nello screenshot).
-            // Usiamo un Container circolare con icona mappa + freccia di refresh.
             Container(
               width: 100,
               height: 100,
@@ -2130,7 +2177,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
                     size: 56,
                     color: Colors.blue.shade400,
                   ),
-                  // Pin rosso in alto a destra (come nello screenshot)
                   Positioned(
                     top: 14,
                     right: 18,
@@ -2140,7 +2186,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
                       color: Colors.red.shade400,
                     ),
                   ),
-                  // Freccia di refresh intorno alla mappa
                   Positioned(
                     bottom: 12,
                     right: 12,
@@ -2166,7 +2211,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
             ),
             const SizedBox(height: 8),
 
-            // --- TESTO 2: "Sembra che il percorso sia cambiato." (step >= 1) ---
+            // --- TESTO 2: "Il percorso è cambiato. Cosa vuoi fare?" (step >= 1) ---
             AnimatedOpacity(
               opacity: _routeChangedAnimStep >= 1 ? 1.0 : 0.0,
               duration: const Duration(milliseconds: 500),
@@ -2176,18 +2221,23 @@ class _NavigationScreenState extends State<NavigationScreen> {
                     : const Offset(0, 0.3),
                 duration: const Duration(milliseconds: 500),
                 curve: Curves.easeOut,
-                child: Text(
-                  'Sembra che il percorso sia cambiato.',
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: Colors.grey.shade600,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Text(
+                    'Il percorso è cambiato.\nCosa vuoi fare?',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: Colors.grey.shade600,
+                      height: 1.4,
+                    ),
                   ),
                 ),
               ),
             ),
             const SizedBox(height: 24),
 
-            // --- PULSANTI (step >= 2) ---
+            // --- PULSANTI DI SCELTA (step >= 2) ---
             AnimatedOpacity(
               opacity: _routeChangedAnimStep >= 2 ? 1.0 : 0.0,
               duration: const Duration(milliseconds: 500),
@@ -2201,39 +2251,56 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: Column(
                     children: [
-                      // Pulsante principale — "Mostra il nuovo percorso"
+                      // Pulsante principale — "Continua col nuovo percorso"
+                      // VERDE: azione positiva, proseguire è la scelta più naturale
                       SizedBox(
                         width: double.infinity,
-                        height: 52,
-                        child: ElevatedButton(
-                          onPressed: _dismissRerouteSheet,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.blue.shade600,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(26),
-                            ),
-                            elevation: 0,
-                          ),
-                          child: const Text(
-                            'Mostra il nuovo percorso',
+                        height: 56,
+                        child: ElevatedButton.icon(
+                          onPressed: _confirmNewRoute,
+                          icon: const Icon(Icons.navigation, size: 24),
+                          label: const Text(
+                            'Continua col nuovo percorso',
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green.shade600,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(28),
+                            ),
+                            elevation: 0,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 12),
-                      // Pulsante secondario — "Controllo la mappa"
-                      TextButton(
-                        onPressed: _dismissRerouteSheet,
-                        child: Text(
-                          'Controllo la mappa',
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: Colors.blue.shade700,
-                            fontWeight: FontWeight.w500,
+                      // Pulsante secondario — "Torna al vecchio percorso"
+                      // OUTLINED ARANCIONE: azione di ritorno, meno prominente
+                      SizedBox(
+                        width: double.infinity,
+                        height: 56,
+                        child: OutlinedButton.icon(
+                          onPressed: _restorePreviousRoute,
+                          icon: Icon(Icons.undo, size: 24, color: Colors.orange.shade800),
+                          label: Text(
+                            'Torna al vecchio percorso',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.orange.shade800,
+                            ),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            side: BorderSide(
+                              color: Colors.orange.shade400,
+                              width: 2,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(28),
+                            ),
                           ),
                         ),
                       ),
@@ -2429,7 +2496,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
             ),
             const SizedBox(height: 12),
 
-            // --- TESTO 3: "Vuoi rivedere il percorso?" (step >= 2) ---
+            // --- PULSANTE "Rivedi il percorso" (step >= 2) ---
+            // Trasformato da link sottile a PULSANTE GRANDE per accessibilità.
+            // Per ragazzi con disabilità cognitive, un link di testo sottolineato
+            // è troppo facile da ignorare. Un pulsante con icona, colore e
+            // dimensione generosa è molto più chiaro e invitante.
             AnimatedOpacity(
               opacity: _arrivalAnimStep >= 2 ? 1.0 : 0.0,
               duration: const Duration(milliseconds: 500),
@@ -2439,16 +2510,29 @@ class _NavigationScreenState extends State<NavigationScreen> {
                     : const Offset(0, 0.3),
                 duration: const Duration(milliseconds: 500),
                 curve: Curves.easeOut,
-                child: GestureDetector(
-                  onTap: _showWalkedPathReview,
-                  child: Text(
-                    'Vuoi rivedere il percorso?',
-                    style: TextStyle(
-                      fontSize: 16,
-                      color: Colors.blue.shade600,
-                      fontWeight: FontWeight.w500,
-                      decoration: TextDecoration.underline,
-                      decorationColor: Colors.blue.shade600,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 56,
+                    child: ElevatedButton.icon(
+                      onPressed: _showWalkedPathReview,
+                      icon: const Icon(Icons.route, size: 24),
+                      label: const Text(
+                        'Rivedi il mio percorso',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue.shade600,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(28),
+                        ),
+                        elevation: 0,
+                      ),
                     ),
                   ),
                 ),

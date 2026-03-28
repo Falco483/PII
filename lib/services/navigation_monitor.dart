@@ -268,6 +268,50 @@ class NavigationMonitor {
   /// in attesa di risposta dalla API.
   bool _isRerouting = false;
 
+  /// Flag che indica se l'arrivo a destinazione è già stato emesso.
+  ///
+  /// FIX BUG ANIMAZIONE ARRIVO:
+  /// Senza questo flag, il monitor emetteva arrivalCelebration ad OGNI
+  /// aggiornamento GPS in cui l'utente era entro la soglia dall'ultimo
+  /// step. Ogni emissione riavviava l'animazione progressiva nel bottom
+  /// sheet di arrivo, impedendo a step 2 ("Vuoi rivedere il percorso?")
+  /// di apparire. Con il flag, emettiamo UNA SOLA VOLTA.
+  bool _hasArrived = false;
+
+  /// Contatore degli aggiornamenti GPS consecutivi in cui l'utente è
+  /// entro la soglia di arrivo dall'ultimo step.
+  ///
+  /// L'arrivo viene confermato solo dopo kArrivalConfirmations letture
+  /// consecutive (3 = circa 3 secondi). Questo evita falsi arrivi
+  /// causati da salti GPS momentanei.
+  int _consecutiveArrivalUpdates = 0;
+
+  // ===========================================================================
+  // STATO "SCELTA PERCORSO" — Percorso precedente salvato
+  // ===========================================================================
+  //
+  // Quando il monitor trova un nuovo percorso (Task 2b alternativo o Task 2c
+  // ricalcolo API), NON lo impone silenziosamente. Salva il vecchio percorso
+  // in queste variabili, applica il nuovo sulla mappa, e la UI mostra un
+  // bottom sheet che chiede all'utente: "Vuoi continuare col nuovo percorso
+  // o tornare al vecchio?".
+  //
+  // Se l'utente conferma → _previousRoute viene azzerato.
+  // Se l'utente rifiuta → _previousRoute viene ripristinato come attivo.
+
+  /// Percorso precedente (prima del ricalcolo). Null se non c'è stata
+  /// nessuna deviazione o l'utente ha già confermato/rifiutato.
+  RouteData? _previousRoute;
+
+  /// Step del percorso precedente (per ripristino completo).
+  List<DirectionStep> _previousRouteSteps = [];
+
+  /// Indice dello step in cui l'utente si trovava prima del ricalcolo.
+  int _previousStepIndex = 0;
+
+  /// Lista di percorsi alternativi del percorso precedente (per ripristino).
+  List<RouteData> _previousAlternativeRoutes = [];
+
   /// Timestamp di quando la navigazione è stata avviata.
   /// Usato per il grace period: nei primi 15 secondi dopo l'avvio,
   /// il controllo di deviazione viene ignorato per dare all'utente
@@ -523,33 +567,60 @@ class NavigationMonitor {
           currentStep.endLng,
         );
 
-        // Soglia di prossimità: 40 metri
-        // - 25m era troppo stretto: il pedone vedeva l'istruzione troppo tardi
-        // - 40m dà ~8-10 secondi di preavviso a passo normale (5 km/h)
-        if (distanceToEnd < 40.0) {
-          // L'utente è abbastanza vicino alla fine dello step corrente.
-          // Proviamo ad avanzare al successivo.
-          if (_currentStepIndex + 1 < _routeSteps.length) {
+        // --- CASO A: step intermedi (non l'ultimo) ---
+        // Soglia 40m: dà ~8-10 secondi di preavviso a passo normale (5 km/h)
+        if (_currentStepIndex + 1 < _routeSteps.length) {
+          if (distanceToEnd < 40.0) {
             _currentStepIndex++;
             didAdvance = true;
             // Continua il loop: verifica se anche il prossimo step
             // è già stato superato (step corti in sequenza)
           } else {
-            // Ultimo step raggiunto → l'utente è arrivato a destinazione!
-            // Emettiamo un overlay di celebrazione per congratularci.
-            // Questo è il momento più importante dell'intera esperienza:
-            // il ragazzo ha completato il percorso autonomamente.
-            final String arrivalMsg = kArrivalMessages[
-                _random.nextInt(kArrivalMessages.length)];
-            print("🎉 Navigazione ultimata! Messaggio: $arrivalMsg");
-            overlayNotifier.value = NavigationOverlayState(
-              type: OverlayType.arrivalCelebration,
-              message: arrivalMsg,
-            );
-            break;
+            break; // Ancora lontano → fermati
           }
-        } else {
-          // L'utente è ancora lontano dalla fine di questo step → fermati
+        }
+        // --- CASO B: ULTIMO step → rilevamento ARRIVO ---
+        //
+        // SOGLIA PIÙ STRETTA (20m invece di 40m):
+        // L'arrivo è un evento irreversibile e importante. A 40m il ragazzo
+        // può essere ancora in mezzo a una strada, non davanti alla destinazione.
+        // 20m con GPS accuracy tipica (5-15m) è un buon compromesso.
+        //
+        // CONFERMA MULTIPLA (3 letture consecutive):
+        // Evitiamo falsi arrivi da salti GPS. 3 letture a ~1 GPS/sec =
+        // circa 3 secondi di permanenza entro la soglia.
+        //
+        // FLAG _hasArrived:
+        // L'arrivo viene emesso UNA SOLA VOLTA. Senza questo flag,
+        // ogni aggiornamento GPS successivo riemetteva arrivalCelebration,
+        // resettando l'animazione del bottom sheet e impedendo a
+        // "Vuoi rivedere il percorso?" di apparire (step 2 mai raggiunto).
+        else {
+          if (_hasArrived) {
+            break; // Già emesso, non ripetere
+          }
+
+          if (distanceToEnd < 20.0) {
+            _consecutiveArrivalUpdates++;
+            print('📍 ARRIVO DEBUG: entro 20m dalla destinazione '
+                '(${distanceToEnd.toStringAsFixed(1)}m, '
+                'conferma $_consecutiveArrivalUpdates/3)');
+
+            if (_consecutiveArrivalUpdates >= 3) {
+              // ARRIVO CONFERMATO! L'utente è a destinazione.
+              _hasArrived = true;
+              final String arrivalMsg = kArrivalMessages[
+                  _random.nextInt(kArrivalMessages.length)];
+              print("🎉 Navigazione ultimata! Messaggio: $arrivalMsg");
+              overlayNotifier.value = NavigationOverlayState(
+                type: OverlayType.arrivalCelebration,
+                message: arrivalMsg,
+              );
+            }
+          } else {
+            // Troppo lontano dalla destinazione: resetta le conferme
+            _consecutiveArrivalUpdates = 0;
+          }
           break;
         }
       }
@@ -622,6 +693,17 @@ class NavigationMonitor {
     // Imposta il flag di navigazione attiva
     _isNavigating = true;
 
+    // Resetta lo stato di arrivo per una nuova navigazione
+    _hasArrived = false;
+    _consecutiveArrivalUpdates = 0;
+
+    // Resetta la progressione step
+    _currentStepIndex = 0;
+    _consecutiveCloseUpdates = 0;
+    currentStepNotifier.value = 0;
+    _consecutiveOffRouteDetects = 0;
+    _routeCheckTicks = 0;
+
     // FIX 3: Registra il momento di avvio della navigazione.
     // I primi 15 secondi sono un "grace period" in cui il controllo
     // di deviazione viene saltato, per dare all'utente il tempo di
@@ -684,6 +766,10 @@ class NavigationMonitor {
     _consecutiveCloseUpdates = 0;
     currentStepNotifier.value = 0;
 
+    // Resetta lo stato di arrivo
+    _hasArrived = false;
+    _consecutiveArrivalUpdates = 0;
+
     // Resetta l'overlay: se un overlay era visibile, lo rimuoviamo
     // per evitare che resti appeso dopo lo stop.
     overlayNotifier.value = null;
@@ -691,11 +777,96 @@ class NavigationMonitor {
     // Resetta la fase di ricalcolo (chiude eventuali bottom sheet aperti)
     reroutePhaseNotifier.value = ReroutePhase.none;
 
+    // Resetta il percorso precedente salvato (scelta utente non più necessaria)
+    _previousRoute = null;
+    _previousRouteSteps = [];
+    _previousStepIndex = 0;
+    _previousAlternativeRoutes = [];
+
     // Notifica la UI che non c'è più un percorso attivo
     activeRouteNotifier.value = null;
 
     // Log per debugging
     print('Navigazione fermata. Timer e overlay azzerati.');
+  }
+
+  // ===========================================================================
+  // SCELTA PERCORSO — CONFERMA O RIPRISTINO
+  // ===========================================================================
+
+  /// L'utente ha scelto di CONTINUARE con il nuovo percorso.
+  ///
+  /// Il nuovo percorso è GIÀ attivo (applicato al momento del ricalcolo),
+  /// quindi qui ci limitiamo a:
+  /// 1. Cancellare il backup del vecchio percorso (non serve più)
+  /// 2. Chiudere il bottom sheet di scelta
+  /// 3. Resettare i contatori di deviazione per il nuovo percorso
+  void confirmNewRoute() {
+    print('✅ Utente ha confermato il nuovo percorso.');
+
+    // Il vecchio percorso non serve più
+    _previousRoute = null;
+    _previousRouteSteps = [];
+    _previousStepIndex = 0;
+    _previousAlternativeRoutes = [];
+
+    // Resetta i contatori di deviazione per ricominciare da zero
+    // col nuovo percorso (altrimenti il primo tick potrebbe scattare
+    // come "off route" dal vecchio conteggio).
+    _consecutiveOffRouteDetects = 0;
+    _routeCheckTicks = 0;
+
+    // Chiude il bottom sheet
+    reroutePhaseNotifier.value = ReroutePhase.none;
+  }
+
+  /// L'utente ha scelto di TORNARE al vecchio percorso.
+  ///
+  /// Ripristina il percorso che era attivo prima del ricalcolo:
+  /// 1. Rimette _activeRoute al percorso precedente
+  /// 2. Ripristina steps, step index, e alternative
+  /// 3. Notifica la UI per aggiornare mappa e indicazioni
+  /// 4. Chiude il bottom sheet
+  ///
+  /// NOTA: l'utente potrebbe NON essere fisicamente sul vecchio percorso.
+  /// Il sistema di monitoraggio continuerà a controllare la posizione
+  /// e se necessario scatterà un nuovo ricalcolo.
+  void restorePreviousRoute() {
+    if (_previousRoute == null) {
+      print('⚠️ Nessun percorso precedente da ripristinare.');
+      reroutePhaseNotifier.value = ReroutePhase.none;
+      return;
+    }
+
+    print('↩️ Utente ha scelto di tornare al vecchio percorso.');
+
+    // Ripristina il percorso precedente come attivo
+    _activeRoute = _previousRoute;
+    _routeSteps = List<DirectionStep>.from(_previousRouteSteps);
+    _alternativeRoutes = List<RouteData>.from(_previousAlternativeRoutes);
+
+    // Ripristina l'indice dello step (dove era arrivato l'utente)
+    _currentStepIndex = _previousStepIndex;
+    _consecutiveCloseUpdates = 0;
+    currentStepNotifier.value = _previousStepIndex;
+
+    // Cancella il backup (ripristino completato)
+    _previousRoute = null;
+    _previousRouteSteps = [];
+    _previousStepIndex = 0;
+    _previousAlternativeRoutes = [];
+
+    // Resetta i contatori di deviazione
+    _consecutiveOffRouteDetects = 0;
+    _routeCheckTicks = 0;
+
+    // Notifica la UI: la mappa deve mostrare di nuovo il vecchio percorso
+    activeRouteNotifier.value = _activeRoute;
+
+    // Chiude il bottom sheet
+    reroutePhaseNotifier.value = ReroutePhase.none;
+
+    print('✅ Percorso precedente ripristinato: ${_activeRoute!.totalDuration}');
   }
 
   /// Rilascia tutte le risorse (timer, listener).
@@ -1221,8 +1392,12 @@ class NavigationMonitor {
     // Se l'utente è sul percorso, tutto OK. Nessuna azione necessaria.
     if (onActiveRoute) {
       _consecutiveOffRouteDetects = 0; // Azzera strike di deviazione
-      // Se era in fase di ricalcolo, resetta (l'utente è tornato da solo)
-      if (reroutePhaseNotifier.value != ReroutePhase.none) {
+      // Se era in fase di ricalcolo (offRoute o rerouting), resetta
+      // perché l'utente è tornato da solo. MA se siamo in routeChanged,
+      // NON resettiamo: il bottom sheet di scelta deve restare visibile
+      // finché l'utente non decide (conferma nuovo o torna al vecchio).
+      if (reroutePhaseNotifier.value == ReroutePhase.offRoute ||
+          reroutePhaseNotifier.value == ReroutePhase.rerouting) {
         reroutePhaseNotifier.value = ReroutePhase.none;
       }
       return; // ← L'utente segue il percorso, aspettiamo il prossimo tick
@@ -1233,6 +1408,13 @@ class NavigationMonitor {
     // =========================================================================
     //
     // La distanza minima dalla polyline attiva è > 40 metri.
+
+    // Se il bottom sheet "routeChanged" è ancora aperto (l'utente non ha
+    // ancora scelto), NON lanciamo un altro ricalcolo. Aspettiamo che
+    // l'utente faccia la sua scelta prima di fare qualsiasi altra cosa.
+    if (reroutePhaseNotifier.value == ReroutePhase.routeChanged) {
+      return;
+    }
     
     // TASK 5 - Strikes System (Verifica su più letture)
     _consecutiveOffRouteDetects++;
@@ -1291,6 +1473,14 @@ class NavigationMonitor {
           'Durata: ${alternativeRoute.totalDuration}. '
           'Cambio percorso attivo.',
         );
+
+        // SALVA IL PERCORSO PRECEDENTE per dare all'utente la scelta
+        // di tornare indietro. Viene cancellato quando l'utente conferma
+        // (confirmNewRoute) o ripristinato (restorePreviousRoute).
+        _previousRoute = _activeRoute;
+        _previousRouteSteps = List<DirectionStep>.from(_routeSteps);
+        _previousStepIndex = _currentStepIndex;
+        _previousAlternativeRoutes = List<RouteData>.from(_alternativeRoutes);
 
         // Sostituisce il percorso attivo con l'alternativo
         _activeRoute = alternativeRoute;
@@ -1418,6 +1608,14 @@ class NavigationMonitor {
       }
 
       // --- AGGIORNAMENTO PERCORSI (stessa logica del TASK 1) ---
+
+      // SALVA IL PERCORSO PRECEDENTE per dare all'utente la scelta
+      // di tornare indietro. Viene cancellato quando l'utente conferma
+      // (confirmNewRoute) o ripristinato (restorePreviousRoute).
+      _previousRoute = _activeRoute;
+      _previousRouteSteps = List<DirectionStep>.from(_routeSteps);
+      _previousStepIndex = _currentStepIndex;
+      _previousAlternativeRoutes = List<RouteData>.from(_alternativeRoutes);
 
       // Il percorso migliore (durata minore) diventa il nuovo attivo
       _activeRoute = newResult.bestRoute;
