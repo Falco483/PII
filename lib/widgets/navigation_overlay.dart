@@ -219,10 +219,10 @@ class _NavigationOverlayState extends State<NavigationOverlay>
 
   /// Costruisce il widget card dell'overlay.
   ///
-  /// Lo stile varia in base al tipo di overlay:
-  /// - Istruzione di svolta: sfondo blu, icona della manovra
-  /// - Strada laterale: sfondo arancione/rosso, icona freccia dritta
-  /// - Arrivo a destinazione: sfondo verde brillante, icona stella
+  /// DESIGN SEMPLIFICATO: tutti gli overlay usano sfondo ARANCIONE.
+  /// Un solo colore per tutti gli overlay = l'utente associa subito
+  /// "arancione = messaggio importante dalla mappa". Le indicazioni
+  /// di percorso (banner verde) restano visivamente separate.
   Widget _buildOverlayCard(NavigationOverlayState overlayState) {
     // Determina colori e icona in base al tipo di overlay
     final Color backgroundColor;
@@ -230,7 +230,7 @@ class _NavigationOverlayState extends State<NavigationOverlay>
 
     switch (overlayState.type) {
       case OverlayType.turnInstruction:
-        backgroundColor = Colors.blue.shade700;
+        backgroundColor = Colors.orange.shade800;
         icon = _getManeuverIcon(overlayState.maneuver);
         break;
       case OverlayType.lateralRoadDetected:
@@ -238,7 +238,7 @@ class _NavigationOverlayState extends State<NavigationOverlay>
         icon = Icons.arrow_upward;
         break;
       case OverlayType.arrivalCelebration:
-        backgroundColor = Colors.green.shade700;
+        backgroundColor = Colors.orange.shade800;
         icon = Icons.emoji_events;
         break;
     }

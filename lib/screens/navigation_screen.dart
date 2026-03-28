@@ -1097,13 +1097,20 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Gestisce il tasto back (fisico Android, swipe iOS, pulsante UI).
   /// Restituisce true se l'app deve chiudersi, false se l'azione è assorbita internamente.
   Future<bool> _handleBack() async {
-    // 1. Se la tastiera è aperta o la barra di ricerca ha il focus, chiudiamo tutto.
-    if (FocusManager.instance.primaryFocus?.hasFocus ?? false) {
-      FocusManager.instance.primaryFocus?.unfocus();
+    // 1. Se la BARRA DI RICERCA ha il focus (tastiera aperta, suggerimenti visibili):
+    if (_searchFocusNode.hasFocus) {
+      _searchFocusNode.unfocus();
+      _destinationController.clear();
+
+      // Se siamo nella home (search), consumiamo il back qui — l'utente
+      // voleva solo chiudere la tastiera e i suggerimenti.
+      // Se siamo in un altro stato (placeSelected, routePreview),
+      // NON facciamo return: lasciamo che il codice sotto esegua
+      // il goBack() così l'utente torna indietro con UN SOLO tap.
       if (_appState == NavigationAppState.search) {
-        _destinationController.clear();
+        return false;
       }
-      return false; // Intercettato, non si esce dall'app
+      // Altrimenti: cade nel goBack sotto ↓
     }
 
     if (!_historyService.canGoBack) {
@@ -1141,7 +1148,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
     final previousEntry = _historyService.goBack();
     if (previousEntry != null) {
-      // Se eravamo in navigazione, fermiamola
+      // Se eravamo in navigazione, fermiamola e resetta TUTTO lo stato
+      // di navigazione. Senza questo cleanup l'overlay, il follow-mode,
+      // il banner di reroute e lo stato arrivo restano "fantasma" e la
+      // UI sembra non reagire al back.
       if (_appState == NavigationAppState.navigating) {
         _navigationMonitor.stopNavigation();
         _routeChangedAnimTimer?.cancel();
@@ -1150,6 +1160,28 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
       setState(() {
         _appState = previousEntry.state;
+
+        // --- Cleanup navigazione (allineato a _resetNavigation) ---
+        _overlayState = null;
+        _isFollowingUser = false;
+        _reroutePhase = ReroutePhase.none;
+        _routeChangedAnimStep = 0;
+        _isArrived = false;
+        _arrivalAnimStep = 0;
+        _walkedPath = [];
+        _isReviewingWalkedPath = false;
+
+        // --- Se torniamo alla ricerca, puliamo TUTTO ---
+        // L'entry root "search" non ha dati salvati, quindi senza questo
+        // blocco la destinazione e il percorso resterebbero fantasma.
+        if (previousEntry.state == NavigationAppState.search) {
+          _selectedDestinationAddress = null;
+          _destinationController.clear();
+          _directionsResult = null;
+          _allRoutesResult = null;
+        }
+
+        // --- Ripristino dati dallo stack ---
         if (previousEntry.data != null) {
           if (previousEntry.data!.containsKey('address')) {
             _selectedDestinationAddress = previousEntry.data!['address'] as String?;
@@ -1240,11 +1272,27 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
     // Se ha calcolato correttamente
     if (_directionsResult != null) {
-      _saveCurrentStateToHistory();
+      // Aggiorna i dati dell'entry corrente (placeSelected) con il percorso
+      // appena calcolato, così il back restaura dati coerenti.
+      _historyService.updateTopData({
+        'address': _selectedDestinationAddress,
+        'directions': _directionsResult,
+        'allRoutes': _allRoutesResult,
+      });
+
+      // Pusha il nuovo stato routePreview
+      _historyService.pushState(
+        NavigationAppState.routePreview,
+        data: {
+          'address': _selectedDestinationAddress,
+          'directions': _directionsResult,
+          'allRoutes': _allRoutesResult,
+        },
+      );
+
       setState(() {
         _appState = NavigationAppState.routePreview;
       });
-      _saveCurrentStateToHistory(); // <-- Aggiunge il nuovo stato alla cima
     }
   }
 
@@ -1265,7 +1313,26 @@ class _NavigationScreenState extends State<NavigationScreen> {
     }
 
     if (_allRoutesResult != null) {
-      _saveCurrentStateToHistory();
+      // PRIMA di pushare "navigating", aggiorna i dati dell'entry corrente
+      // (placeSelected o routePreview) con i dati FRESCHI post-calcolo.
+      // Senza questo, il goBack() restaurerebbe il placeholder vuoto
+      // che era stato salvato quando l'entry fu pushata la prima volta.
+      _historyService.updateTopData({
+        'address': _selectedDestinationAddress,
+        'directions': _directionsResult,
+        'allRoutes': _allRoutesResult,
+      });
+
+      // Ora pusha il nuovo stato "navigating"
+      _historyService.pushState(
+        NavigationAppState.navigating,
+        data: {
+          'address': _selectedDestinationAddress,
+          'directions': _directionsResult,
+          'allRoutes': _allRoutesResult,
+        },
+      );
+
       setState(() {
         _appState = NavigationAppState.navigating;
         _isFollowingUser = true;
@@ -1275,7 +1342,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
         _arrivalAnimStep = 0;
         _isReviewingWalkedPath = false;
       });
-      _saveCurrentStateToHistory();
 
       // FIX: Passa le COORDINATE della destinazione (formato "lat,lng"),
       // NON l'indirizzo testuale. Il monitor usa _originalDestination per
@@ -1469,7 +1535,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
       );
       _allRoutesResult = null; // Resetta i percorsi vecchi se presenti
     });
-    _saveCurrentStateToHistory(); // <-- Aggiunge il nuovo stato alla cima
+
+    // Pusha placeSelected con i dati appena impostati.
+    // Il push precedente salva lo stato da cui veniamo (search),
+    // questo salva il nuovo stato placeSelected.
+    _historyService.pushState(
+      NavigationAppState.placeSelected,
+      data: {
+        'address': _selectedDestinationAddress,
+        'directions': _directionsResult,
+        'allRoutes': _allRoutesResult,
+      },
+    );
   }
 
   /// Callback chiamato quando l'utente tocca un punto sulla mappa (TASK 3).
@@ -1483,13 +1560,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// PARAMETRI:
   /// - [position]: coordinate del punto toccato sulla mappa
   void _onMapTapped(LatLng position) {
-    // Se la barra di ricerca è attiva, un tap sulla mappa serve solo a chiudere la ricerca
+    // Se la tastiera è aperta, la chiudiamo MA procediamo comunque
+    // con la selezione del posto. Prima il tap veniva "consumato"
+    // solo per chiudere la tastiera, costringendo l'utente a tappare
+    // DUE volte — troppo confuso per ragazzi con disabilità cognitive.
     if (FocusManager.instance.primaryFocus?.hasFocus ?? false) {
       FocusManager.instance.primaryFocus?.unfocus();
-      if (_appState == NavigationAppState.search) {
-        _destinationController.clear();
-      }
-      return; // Interrompe qui, non seleziona un nuovo luogo
+    }
+
+    // Se eravamo in routePreview, puliamo il percorso precedente
+    // prima di selezionare il nuovo posto.
+    if (_appState == NavigationAppState.routePreview) {
+      _navigationMonitor.stopNavigation();
     }
 
     // Placeholder temporaneo mentre la geocodifica è in corso
@@ -1518,7 +1600,19 @@ class _NavigationScreenState extends State<NavigationScreen> {
       );
       _allRoutesResult = null;
     });
-    _saveCurrentStateToHistory(); // <-- Aggiunge il nuovo stato alla cima
+
+    // Se arriviamo da routePreview, il vecchio percorso non serve più.
+    // Ripuliamo lo stack e ripartiamo da search → placeSelected.
+    // Senza questo, il back tornerebbe alla routePreview del VECCHIO posto.
+    _historyService.clearToRoot(NavigationAppState.search);
+    _historyService.pushState(
+      NavigationAppState.placeSelected,
+      data: {
+        'address': loadingText,
+        'directions': _directionsResult,
+        'allRoutes': _allRoutesResult,
+      },
+    );
 
     // STEP 2: Chiama reverse geocoding in background.
     // Non usiamo await perché non vogliamo bloccare la UI.
@@ -1635,10 +1729,13 @@ class _NavigationScreenState extends State<NavigationScreen> {
           // PERCORSO EFFETTUATO: lista coordinate GPS registrate durante
           // la navigazione. Mostrate come polyline verde nella review.
           walkedPath: _isReviewingWalkedPath ? _walkedPath : null,
-          // TASK 3: callback per tap sulla mappa
+          // TASK 3: callback per tap sulla mappa.
+          // Attivo in search, placeSelected e routePreview — così l'utente
+          // può selezionare un nuovo posto anche mentre vede le indicazioni.
           onMapTap:
           _appState == NavigationAppState.search ||
-              _appState == NavigationAppState.placeSelected
+              _appState == NavigationAppState.placeSelected ||
+              _appState == NavigationAppState.routePreview
               ? _onMapTapped
               : null,
           // Callback pan manuale: disattiva il follow-mode
@@ -3028,50 +3125,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
     }
   }
 
-  /// Restituisce il colore di sfondo del banner in base alla manovra.
+  /// Restituisce il colore di sfondo del banner di indicazione.
   ///
-  /// CODIFICA COLORE per comprensione immediata:
-  /// - VERDE     → vai dritto (tutto ok, nessuna azione)
-  /// - BLU       → vai a destra
-  /// - ARANCIONE → vai a sinistra
-  /// - ROSSO     → torna indietro (attenzione!)
-  /// - VIOLA     → rotonda (situazione speciale)
+  /// DESIGN SEMPLIFICATO: tutte le indicazioni usano lo stesso colore
+  /// VERDE per ridurre il carico cognitivo. L'utente si orienta con
+  /// l'ICONA della freccia (che cambia per ogni manovra), non col colore.
+  /// Un solo colore = meno cose da processare = meno confusione.
   Color _getManeuverColor(String? maneuver) {
-    switch (maneuver) {
-    // Destra → blu
-      case 'turn-right':
-      case 'turn-slight-right':
-      case 'turn-sharp-right':
-      case 'keep-right':
-      case 'ramp-right':
-      case 'fork-right':
-        return Colors.blue.shade700;
-
-    // Sinistra → arancione
-      case 'turn-left':
-      case 'turn-slight-left':
-      case 'turn-sharp-left':
-      case 'keep-left':
-      case 'ramp-left':
-      case 'fork-left':
-        return Colors.orange.shade800;
-
-    // Inversione → rosso
-      case 'uturn-left':
-      case 'uturn-right':
-        return Colors.red.shade700;
-
-    // Rotonda → viola
-      case 'roundabout-left':
-      case 'roundabout-right':
-        return Colors.purple.shade700;
-
-    // Dritto / merge / sconosciuto → verde
-      case 'straight':
-      case 'merge':
-      default:
-        return Colors.green.shade800;
-    }
+    return Colors.green.shade800;
   }
 
   /// Metodo Helper per estrarre la grafica di "Fallback" quando non c'è una rotta

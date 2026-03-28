@@ -46,6 +46,19 @@ class NavigationHistoryService<T> extends ChangeNotifier {
     return _stack.last; // Return new state to be loaded
   }
 
+  /// Updates the data snapshot of the top entry WITHOUT pushing a new entry.
+  ///
+  /// Use case: after calculating a route while in [placeSelected], the
+  /// directions/allRoutes data has changed. We need to update the existing
+  /// entry so that going back restores the fresh data instead of the stale
+  /// placeholder that was stored when the entry was first pushed.
+  void updateTopData(Map<String, dynamic>? data) {
+    if (_stack.isEmpty) return;
+    final top = _stack.last;
+    _stack[_stack.length - 1] = NavigationHistoryEntry<T>(top.state, data);
+    // No notifyListeners — the state itself hasn't changed, only the snapshot.
+  }
+
   /// Resets the history stack to a single root state.
   void clearToRoot(T rootState, {Map<String, dynamic>? data}) {
     _stack.clear();
