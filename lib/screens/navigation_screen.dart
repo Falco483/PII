@@ -140,13 +140,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Velocità corrente dell'utente in km/h (filtrata con EMA).
   ///
-  /// Calcolata con approccio IBRIDO:
+  /// Calcolata con approccio CHIP-FIRST:
   /// 1. Se il chip GPS riporta position.speed > 0 → usa quello (più preciso)
-  /// 2. Se position.speed == 0 (chip non lo supporta) → calcola manualmente
-  ///    dalla distanza tra due posizioni GPS consecutive diviso il tempo
-  ///
-  /// In entrambi i casi il valore viene poi smorzato con un filtro EMA
-  /// per eliminare i picchi di drift da fermo.
+  /// 2. Se position.speed == 0 → l'utente è fermo. Usa il calcolo manuale
+  ///    SOLO come fallback se mostra velocità > 5 km/h (chip non supporta speed)
+  /// 3. In tutti i casi il valore viene poi smorzato con un filtro EMA
   double _currentSpeed = 0.0;
 
   /// Fattore di smoothing per il filtro EMA (Exponential Moving Average).
@@ -384,7 +382,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
     _compassStream = FlutterCompass.events?.listen((CompassEvent event) {
       if (event.heading != null && mounted) {
         setState(() {
-          _compassHeading = event.heading!;
+          // FIX: Normalizza a 0-360. Alcuni dispositivi restituiscono
+          // heading da -180 a 180 invece di 0-360, causando rotazione
+          // errata della freccia sulla mappa.
+          _compassHeading = (event.heading! + 360) % 360;
         });
       }
     });
@@ -722,39 +723,56 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
             double rawSpeedKmH;
 
-            // Caso 1: il chip GPS riporta la velocità
+            // Caso 1: il chip GPS riporta velocità > 0 → usiamo quello.
+            //   È il dato più preciso perché usa il Doppler shift del
+            //   segnale satellitare (errore tipico: ±0.1 m/s).
             if (position.speed > 0) {
               rawSpeedKmH = position.speed * 3.6; // m/s → km/h
             }
-            // Caso 2: calcolo manuale dalla distanza/tempo
+            // Caso 2: il chip riporta speed == 0.
+            //
+            //   FIX BUG OVERLAY CHE NON PARTE:
+            //   Prima, quando speed == 0 si ricadeva nel calcolo manuale
+            //   (distanza / tempo). Problema: con distanceFilter=2, il GPS
+            //   emette eventi solo quando il drift supera 2m. Questo produce
+            //   velocità manuali di 2–4 km/h anche da completamente fermi
+            //   (2m / 0.5s × 3.6 = 14 km/h, tipicamente ~3.5 km/h con EMA).
+            //   La velocità filtrata restava SOPRA la soglia di 2.5 km/h,
+            //   impedendo al timer di 10 secondi di partire → l'overlay
+            //   non appariva MAI.
+            //
+            //   FIX: quando il chip dice speed=0, fidiamoci: l'utente è fermo.
+            //   Il calcolo manuale serve SOLO come fallback quando il chip
+            //   non supporta affatto la velocità (rarissimo su smartphone
+            //   moderni). Lo usiamo solo se il calcolo manuale mostra una
+            //   velocità significativa (> 5 km/h), che indicherebbe che il
+            //   chip non riporta speed ma l'utente sta chiaramente camminando.
             else if (_prevLat != null &&
                 _prevLng != null &&
                 _prevTimestamp != null) {
-              // Calcola il tempo trascorso dall'ultimo aggiornamento.
-              // Usiamo position.timestamp (momento della lettura GPS)
-              // invece di DateTime.now() per evitare latenza di delivery.
               final DateTime currentTimestamp = position.timestamp;
               final double deltaSec =
                   currentTimestamp.difference(_prevTimestamp!).inMilliseconds /
                       1000.0;
 
-              // Scarta campioni troppo ravvicinati: con Δt < 0.5s
-              // la distanza è dominata dall'errore GPS (3-10m) e il
-              // rapporto d/t esplode (es. 3m / 0.2s = 54 km/h da fermo).
               if (deltaSec >= _minTimeDeltaSec) {
-                // Distanza geodetica tra la posizione precedente e attuale
                 final double distanceMeters = haversineDistance(
                   _prevLat!,
                   _prevLng!,
                   position.latitude,
                   position.longitude,
                 );
+                final double manualSpeedKmH = (distanceMeters / deltaSec) * 3.6;
 
-                // velocità = distanza / tempo, convertita in km/h
-                // distanceMeters / deltaSec = m/s, × 3.6 = km/h
-                rawSpeedKmH = (distanceMeters / deltaSec) * 3.6;
+                // Usa il calcolo manuale SOLO se mostra velocità significativa
+                // (> 5 km/h = camminata veloce). Sotto questa soglia, il chip
+                // dice speed=0 e i 2–4 km/h "manuali" sono puro GPS drift.
+                if (manualSpeedKmH > 5.0) {
+                  rawSpeedKmH = manualSpeedKmH;
+                } else {
+                  rawSpeedKmH = 0.0; // Fidiamoci del chip: utente fermo
+                }
               } else {
-                // Intervallo troppo breve, manteniamo il valore precedente
                 rawSpeedKmH = _currentSpeed;
               }
             }
@@ -795,7 +813,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
             _prevTimestamp = position.timestamp;
 
             // DEBUG: mostra sorgente e valori per diagnostica
-            final String source = position.speed > 0 ? 'CHIP' : 'MANUAL';
+            final String source = position.speed > 0
+                ? 'CHIP'
+                : (rawSpeedKmH > 0 ? 'MANUAL-FALLBACK' : 'CHIP-ZERO');
             print('🚶 SPEED DEBUG [$source]: '
                 'raw=${rawSpeedKmH.toStringAsFixed(2)} '
                 '→ EMA=${_currentSpeed.toStringAsFixed(2)} km/h '
@@ -876,6 +896,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
           // --- PRIMO FIX GPS: centra la mappa sulla posizione reale ---
           if (!_hasInitialFix) {
             _hasInitialFix = true;
+            // FIX: Impostiamo _isFollowingUser = true perché la mappa è
+            // centrata sulla posizione dell'utente. Il tasto "Io" apparirà
+            // solo DOPO che l'utente avrà fatto pan manuale (allontanandosi).
+            _isFollowingUser = true;
             _mapKey.currentState?.moveToLocation(
               _currentLat!,
               _currentLng!,
@@ -1793,7 +1817,80 @@ class _NavigationScreenState extends State<NavigationScreen> {
             _directionsResult != null)
           _buildRoutePreviewSheet(),
 
-        // --- LAYER 6: Overlay Navigazione ---
+        // --- LAYER 7: TASTO "IO" (RECENTER) ---
+        // Visibile in TUTTI gli stati dell'app quando il GPS è disponibile.
+        // "Io" è più intuitivo di un'icona astratta (mirino GPS) per
+        // ragazzi con disabilità cognitive: capiscono subito che il tasto
+        // li riporta alla PROPRIA posizione sulla mappa.
+        //
+        // In navigazione: riattiva il follow-mode (camera insegue GPS).
+        // Negli altri stati: centra la mappa sulla posizione corrente.
+        if (_currentLat != null && !_isFollowingUser)
+          Positioned(
+            bottom: _appState == NavigationAppState.navigating
+                ? 140.0
+                : _appState == NavigationAppState.placeSelected
+                    ? 180.0
+                    : _appState == NavigationAppState.routePreview
+                        ? MediaQuery.of(context).size.height * 0.35 + 16
+                        : 24.0,
+            right: 16,
+            child: GestureDetector(
+              onTap: () {
+                if (_currentLat != null && _currentLng != null) {
+                  if (_appState == NavigationAppState.navigating) {
+                    // In navigazione: riattiva follow-mode con bearing del percorso
+                    setState(() {
+                      _isFollowingUser = true;
+                    });
+                    _mapKey.currentState?.followUser(
+                      _currentLat!,
+                      _currentLng!,
+                      _getRouteBearing(),
+                    );
+                  } else {
+                    // Negli altri stati: centra la mappa sulla posizione GPS
+                    _mapKey.currentState?.moveToLocation(
+                      _currentLat!,
+                      _currentLng!,
+                    );
+                    // Nascondiamo il tasto dopo il recenter
+                    setState(() {
+                      _isFollowingUser = true;
+                    });
+                  }
+                }
+              },
+              child: Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade600,
+                  shape: BoxShape.circle,
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black26,
+                      blurRadius: 8,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: const Center(
+                  child: Text(
+                    'Io',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+        // --- LAYER 8: Overlay Navigazione ---
         // DEVE stare sopra il banner di navigazione (LAYER 5) per essere visibile.
         // L'overlay arancione di incertezza deve coprire il riquadro verde delle istruzioni.
         NavigationOverlay(
@@ -2083,10 +2180,21 @@ class _NavigationScreenState extends State<NavigationScreen> {
             child: AnimatedOpacity(
               opacity: _overlayState != null ? 0.0 : 1.0,
               duration: const Duration(milliseconds: 250),
-              child: ValueListenableBuilder<int>(
-            valueListenable: _navigationMonitor.currentStepNotifier,
-            builder: (context, currentStepIndex, child) {
-              final steps = _directionsResult?.steps ?? [];
+              // FIX: Rimosso ValueListenableBuilder.
+              // PROBLEMA: quando il percorso veniva ricalcolato (reroute),
+              // il monitor resettava currentStepNotifier.value a 0. Se era
+              // GIÀ 0 (primo step), il ValueListenableBuilder non si ricostruiva
+              // perché il valore non era cambiato → banner bloccato sulle
+              // vecchie istruzioni.
+              //
+              // SOLUZIONE: leggiamo currentStepNotifier.value direttamente.
+              // Qualsiasi setState (da _onActiveRouteChanged, _onStepChanged,
+              // o qualsiasi altra fonte) ricostruisce il banner con i dati
+              // aggiornati (nuovi step + indice corretto).
+              child: Builder(
+                builder: (context) {
+                  final int currentStepIndex = _navigationMonitor.currentStepNotifier.value;
+                  final steps = _directionsResult?.steps ?? [];
 
               if (steps.isEmpty) {
                 return _buildFallbackBanner();
@@ -2185,40 +2293,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   ],
                 ),
               );
-            },
-          ),
-            ),
-          ),
-        ),
-        // --- TASTO RECENTER ---
-        // Visibile SOLO quando il follow-mode è disattivato (pan manuale).
-        if (!_isFollowingUser)
-          Positioned(
-            bottom: 140,
-            right: 16,
-            child: FloatingActionButton(
-              heroTag: 'recenter_btn',
-              onPressed: () {
-                setState(() {
-                  _isFollowingUser = true;
-                });
-                if (_currentLat != null && _currentLng != null) {
-                  _mapKey.currentState?.followUser(
-                    _currentLat!,
-                    _currentLng!,
-                    _getRouteBearing(),
-                  );
-                }
-              },
-              backgroundColor: Colors.white,
-              elevation: 4,
-              child: Icon(
-                Icons.my_location,
-                color: Colors.blue.shade700,
-                size: 28,
+                },
               ),
             ),
           ),
+        ),
         // BOTTOM SHEET (Info navigazione minimale, pedone, tempo, km - senza pulsanti)
         Positioned(
           bottom: 0,

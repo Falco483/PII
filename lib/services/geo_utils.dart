@@ -122,16 +122,16 @@ const double kEarthRadiusMeters = 6371000.0;
 /// percorso attivo è MAGGIORE di questa soglia, l'utente è considerato
 /// "fuori percorso" (ha deviato).
 ///
-/// PERCHÉ 40 METRI:
+/// PERCHÉ 30 METRI:
 /// - La precisione tipica del GPS su smartphone è 3-10 m in condizioni normali
-/// - In ambienti urbani (edifici alti, gallerie) può peggiorare a 15-30 m
-/// - Una corsia autostradale è larga ~3.5 m, una strada urbana ~6-7 m
-/// - 40 m è abbastanza ampio da coprire l'imprecisione GPS + la larghezza
+/// - In ambienti urbani (edifici alti, gallerie) può peggiorare a 15-20 m
+/// - 30 m è abbastanza ampio da coprire l'imprecisione GPS + la larghezza
 ///   della strada, evitando falsi ricalcoli quando l'utente è sul percorso
-///   ma il GPS è leggermente impreciso
-/// - Allo stesso tempo, 40 m è abbastanza stretto da rilevare una vera
-///   deviazione (es. svolta su una strada laterale)
-const double kRouteDeviationThresholdMeters = 40.0;
+/// - Più reattivo dei precedenti 40 m: rileva la deviazione ~10 m prima,
+///   cruciale per navigazione pedonale dove ogni metro conta
+/// - Con il sistema a 2 strike (conferma su 2 tick consecutivi), i falsi
+///   positivi da jitter GPS sono comunque filtrati
+const double kRouteDeviationThresholdMeters = 30.0;
 
 /// Intervallo in secondi tra un controllo e l'altro della posizione
 /// rispetto al percorso attivo (TASK 2).

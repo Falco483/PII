@@ -1363,7 +1363,10 @@ class NavigationMonitor {
     _routeCheckTicks++;
     int requiredTicks = 1; // >60km/h: ogni 2 secondi (1 tick)
     if (_currentSpeed <= 15.0) {
-      requiredTicks = 3; // <=15km/h o fermo: ogni 6 secondi (3 tick)
+      requiredTicks = 1; // <=15km/h (pedonale): ogni 2 secondi (1 tick)
+      // FIX: era 3 (6 secondi). Troppo lento per navigazione pedonale.
+      // A piedi servono risposte rapide, l'utente potrebbe aver già
+      // imboccato una strada sbagliata dopo 6 secondi.
     } else if (_currentSpeed <= 60.0) {
       requiredTicks = 2; // 15-60km/h: ogni 4 secondi (2 tick)
     }
