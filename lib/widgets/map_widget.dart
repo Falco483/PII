@@ -464,7 +464,7 @@ class MapWidgetState extends State<MapWidget> {
           target: LatLng(lat, lng),
           zoom: 18,
           bearing: bearing,
-          tilt: 55,
+          tilt: 40,
         ),
       ),
     );
@@ -484,7 +484,7 @@ class MapWidgetState extends State<MapWidget> {
           target: LatLng(lat, lng),
           zoom: 18,
           bearing: bearing,
-          tilt: 55,
+          tilt: 40,
         ),
       ),
     );
@@ -767,7 +767,7 @@ class MapWidgetState extends State<MapWidget> {
         polylines.add(Polyline(
           polylineId: const PolylineId('remaining_route'),
           points: allPoints,
-          color: const Color(0x884285F4), // Blu semitrasparente
+          color: const Color(0xFF1A56C4), // Blu scuro (visibile e chiaro)
           width: 6,
           geodesic: true,
           jointType: JointType.round,

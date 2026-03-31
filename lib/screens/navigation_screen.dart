@@ -1828,9 +1828,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
         if (_currentLat != null && !_isFollowingUser)
           Positioned(
             bottom: _appState == NavigationAppState.navigating
-                ? 140.0
+                ? 210.0
                 : _appState == NavigationAppState.placeSelected
-                    ? 180.0
+                    ? 240.0
                     : _appState == NavigationAppState.routePreview
                         ? MediaQuery.of(context).size.height * 0.35 + 16
                         : 24.0,

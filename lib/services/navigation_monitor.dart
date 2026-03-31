@@ -1096,104 +1096,18 @@ class NavigationMonitor {
 
       print('⬜ OVERLAY DEBUG: Nessun waypoint di svolta vicino '
             '(${_routeSteps.length} step controllati, raggio=${kTurnWaypointRadiusMeters}m). '
-            'Procedo con analisi laterale...');
+            'Nessun overlay emesso.');
 
-      // =====================================================================
-      // CHECK BEARING — necessario SOLO per i punti laterali (step 2.4+)
-      // =====================================================================
+      // FIX: L'utente NON è su un incrocio di svolta del percorso.
+      // PRIMA procedevamo con il rilevamento strade laterali (Roads API),
+      // che causava overlay arancioni frequenti e distraenti ogni volta
+      // che l'utente si fermava 10 secondi in qualsiasi punto del percorso.
       //
-      // Se direction è null, nessun bearing affidabile è stato ancora acquisito.
-      // Non possiamo calcolare i punti laterali (non sappiamo dove è "destra"
-      // e dove è "sinistra"). L'overlay di svolta (sopra) funziona comunque.
-      // Solo la parte laterale (Roads API) resta in standby.
-      if (snapshotDirection == null) {
-        print('❌ OVERLAY DEBUG: ABORT analisi laterale — direction è NULL '
-              '(bearing mai acquisito). Il check waypoint sopra è già passato. '
-              'Cammina a ≥${kSpeedThresholdKmH} km/h per ≥${kBearingUpdateIntervalSec}s '
-              'per abilitare anche il rilevamento strade laterali.');
-        return;
-      }
+      // ORA: l'overlay si mostra SOLO quando l'utente è fermo vicino a
+      // un waypoint di svolta. Nessun altro overlay viene emesso.
+      // Questo riduce drasticamente il carico cognitivo: l'utente vede
+      // l'overlay arancione SOLO quando c'è un'azione da compiere (svoltare).
 
-      print('📍 OVERLAY DEBUG: Snapshot acquisito — '
-            'pos=($snapshotLat, $snapshotLng), bearing=$snapshotDirection°, '
-            'speed=$_currentSpeed km/h');
-
-      // L'utente NON è su un incrocio di svolta del percorso.
-      // Procediamo con il rilevamento delle strade laterali.
-
-      // =====================================================================
-      // STEP 2.4 — CALCOLO DEI PUNTI LATERALI
-      // =====================================================================
-      //
-      // Calcoliamo 10 punti attorno alla posizione dell'utente usando
-      // la direction come riferimento. Vedi computeAllLateralPoints()
-      // in geo_utils.dart per i dettagli sulla disposizione dei punti.
-
-      final lateralPoints = computeAllLateralPoints(
-        snapshotLat,
-        snapshotLng,
-        snapshotDirection,
-      );
-
-      print('📐 OVERLAY DEBUG: ${lateralPoints.length} punti laterali calcolati. '
-            'Chiamo Roads API...');
-
-      // =====================================================================
-      // STEP 2.5 — CHIAMATA ROADS API
-      // =====================================================================
-      //
-      // Inviamo tutti i 10 punti in una SINGOLA chiamata alla Roads API.
-      // Questo è ottimale perché:
-      // 1. Riduce la latenza (una chiamata invece di 10)
-      // 2. Riduce il consumo di quota API
-      // 3. La Roads API supporta fino a 100 punti per chiamata
-
-      final snappedPoints = await _roadsService.findNearestRoads(lateralPoints);
-
-      // =====================================================================
-      // STEP 2.6 — ANALISI DELLA RISPOSTA E OUTPUT VISIVO
-      // =====================================================================
-      //
-      // INTERPRETAZIONE DELLA RISPOSTA:
-      // La Roads API restituisce `snappedPoints`: un array dei punti per cui
-      // ha trovato una strada nelle vicinanze.
-      //
-      // - Se snappedPoints è null → la chiamata è fallita (errore di rete/API).
-      //   Non facciamo nulla per non disturbare l'utente con errori.
-      //
-      // - Se snappedPoints è vuoto → nessuna strada laterale trovata.
-      //   Questo è un CASO LEGITTIMO, non un errore. Significa che l'utente
-      //   è fermo in una zona senza strade laterali (es. autostrada,
-      //   campagna, zona pedonale). Non mostriamo nulla.
-      //
-      // - Se snappedPoints contiene almeno un elemento → c'è una strada
-      //   laterale! Mostriamo l'overlay con messaggio di incoraggiamento.
-      //
-      // NOTA: controlliamo la PRESENZA di elementi (isNotEmpty), non il NUMERO.
-      // Anche un singolo punto snappato è sufficiente per concludere che
-      // c'è una strada laterale nelle vicinanze.
-
-      if (snappedPoints == null) {
-        // Chiamata fallita — fallback silenzioso.
-        print('❌ OVERLAY DEBUG: Roads API FALLITA (null). Nessun overlay mostrato.');
-        return;
-      }
-
-      if (snappedPoints.isNotEmpty) {
-        // Strada laterale rilevata! Mostra l'overlay con messaggio
-        // di incoraggiamento randomizzato per non annoiare il ragazzo.
-        final String message = kLateralRoadMessages[
-            _random.nextInt(kLateralRoadMessages.length)];
-        print('🟠 OVERLAY DEBUG: STRADA LATERALE RILEVATA! '
-              '${snappedPoints.length} punti snappati. Messaggio: "$message"');
-        overlayNotifier.value = NavigationOverlayState(
-          type: OverlayType.lateralRoadDetected,
-          message: message,
-        );
-      } else {
-        print('⬜ OVERLAY DEBUG: Roads API OK ma 0 strade trovate. Nessun overlay.');
-      }
-      // Se snappedPoints è vuoto, non facciamo nulla. Nessun overlay.
     } finally {
       // Assicuriamoci di resettare il flag anche in caso di eccezioni
       // non gestite. Il blocco finally viene eseguito SEMPRE, sia che
@@ -1225,7 +1139,15 @@ class NavigationMonitor {
     double closestDistance = double.infinity;
     String closestInstruction = '';
 
-    for (final step in _routeSteps) {
+    // FIX: Iteriamo SOLO sugli step da _currentStepIndex in poi.
+    // Prima iteravamo su TUTTI gli step, compresi quelli già completati
+    // (dietro l'utente). Se l'utente passava vicino alla endLocation di
+    // uno step passato (es. "Vai a destra" di 50m fa), l'overlay si
+    // riattivava con l'istruzione sbagliata. Ora controlliamo solo
+    // gli step futuri: quelli che l'utente deve ancora percorrere.
+    for (int i = _currentStepIndex; i < _routeSteps.length; i++) {
+      final step = _routeSteps[i];
+
       // Calcola la distanza tra la posizione dell'utente e la end_location
       // dello step. La end_location è il punto dove termina il segmento
       // corrente e inizia il segmento successivo — ovvero il punto dove
