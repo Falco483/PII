@@ -191,6 +191,15 @@ class NavigationMonitor {
   /// Posizione corrente dell'utente (longitudine).
   double? _currentLng;
 
+  /// Posizione (latitudine) dell'ultima analisi per l'overlay (cooldown spaziale).
+  double? _lastAnalysisLat;
+
+  /// Posizione (longitudine) dell'ultima analisi per l'overlay (cooldown spaziale).
+  double? _lastAnalysisLng;
+
+  /// Timestamp dell'ultima chiamata alla Roads API (cooldown temporale).
+  DateTime? _lastApiCallTime;
+
   /// Velocità corrente dell'utente in km/h.
   double _currentSpeed = 0.0;
 
@@ -226,11 +235,11 @@ class NavigationMonitor {
 
   /// Contatore degli aggiornamenti GPS consecutivi in cui l'utente risulta
   /// vicino (< 15 metri) all'incrocio di destinazione dello step corrente.
-  /// 
+  ///
   /// PERCHÉ SERVE QUESTO CONTATORE:
-  /// Il GPS non è perfetto. Un singolo sbalzo temporaneo del segnale (es. 
-  /// riflesso su un palazzo) potrebbe porre falsamente l'utente a 5m 
-  /// dall'incrocio per un solo istante. Per evitare che l'interfaccia 
+  /// Il GPS non è perfetto. Un singolo sbalzo temporaneo del segnale (es.
+  /// riflesso su un palazzo) potrebbe porre falsamente l'utente a 5m
+  /// dall'incrocio per un solo istante. Per evitare che l'interfaccia
   /// avanzi prematuramente d'istruzione, richiediamo che la vicinanza sia
   /// "confermata" per almeno N aggiornamenti GPS consecutivi (noi usiamo 2).
   int _consecutiveCloseUpdates = 0;
@@ -396,13 +405,13 @@ class NavigationMonitor {
 
   /// Notifier che comunica in tempo reale alla UI l'indice dello step corrente.
   ///
-  /// Questo notifier emette solo un numero intero (`int`), che rappresenta 
+  /// Questo notifier emette solo un numero intero (`int`), che rappresenta
   /// quale passo (step) l'utente sta percorrendo. Viene usato dal NavigationScreen
-  /// per cambiare l'istruzione in alto (es. "Svolta a destra tra 50m") 
+  /// per cambiare l'istruzione in alto (es. "Svolta a destra tra 50m")
   /// man mano che l'utente si sposta fisicamente.
   ///
-  /// Usiamo un notifier separato (anziché forzare un setState enorme di tutto 
-  /// lo schermo) per migliorare le performance. Solo il banner in alto 
+  /// Usiamo un notifier separato (anziché forzare un setState enorme di tutto
+  /// lo schermo) per migliorare le performance. Solo il banner in alto
   /// ascolterà questo valore per aggiornarsi fluidamente.
   final ValueNotifier<int> currentStepNotifier = ValueNotifier<int>(0);
 
@@ -519,8 +528,10 @@ class NavigationMonitor {
       // Controllare _zeroSpeedTimer != null evita di creare timer multipli
       // che causerebbero analisi duplicate.
       if (_zeroSpeedTimer == null && !_isAnalysisRunning) {
-        print('⏱️ OVERLAY DEBUG: Velocità ${speedKmH.toStringAsFixed(1)} km/h < soglia. '
-              'Avvio countdown ${kZeroSpeedDelayMs}ms...');
+        print(
+          '⏱️ OVERLAY DEBUG: Velocità ${speedKmH.toStringAsFixed(1)} km/h < soglia. '
+          'Avvio countdown ${kZeroSpeedDelayMs}ms...',
+        );
         _startZeroSpeedCountdown();
       }
     } else {
@@ -530,15 +541,17 @@ class NavigationMonitor {
       // Senza questa cancellazione, il timer continuerebbe a contare e
       // l'analisi partirebbe anche se l'utente è in movimento.
       if (_zeroSpeedTimer != null) {
-        print('🏃 OVERLAY DEBUG: Velocità ${speedKmH.toStringAsFixed(1)} km/h — '
-            'utente in moto, ANNULLO countdown.');
+        print(
+          '🏃 OVERLAY DEBUG: Velocità ${speedKmH.toStringAsFixed(1)} km/h — '
+          'utente in moto, ANNULLO countdown.',
+        );
       }
       _cancelZeroSpeedCountdown();
     }
 
     // --- LOGICA AVANZAMENTO STEP DINAMICO ---
     //
-    // Questa procedura controlla se l'utente sta raggiungendo la fine 
+    // Questa procedura controlla se l'utente sta raggiungendo la fine
     // della via in cui si trova, per dirgli di compiere la svolta successiva.
     // Viene eseguita ad ogni singolo aggiornamento GPS, fintanto che
     // ci sono step validi ed è attiva una rotta.
@@ -602,15 +615,17 @@ class NavigationMonitor {
 
           if (distanceToEnd < 20.0) {
             _consecutiveArrivalUpdates++;
-            print('📍 ARRIVO DEBUG: entro 20m dalla destinazione '
-                '(${distanceToEnd.toStringAsFixed(1)}m, '
-                'conferma $_consecutiveArrivalUpdates/3)');
+            print(
+              '📍 ARRIVO DEBUG: entro 20m dalla destinazione '
+              '(${distanceToEnd.toStringAsFixed(1)}m, '
+              'conferma $_consecutiveArrivalUpdates/3)',
+            );
 
             if (_consecutiveArrivalUpdates >= 3) {
               // ARRIVO CONFERMATO! L'utente è a destinazione.
               _hasArrived = true;
-              final String arrivalMsg = kArrivalMessages[
-                  _random.nextInt(kArrivalMessages.length)];
+              final String arrivalMsg =
+                  kArrivalMessages[_random.nextInt(kArrivalMessages.length)];
               print("🎉 Navigazione ultimata! Messaggio: $arrivalMsg");
               overlayNotifier.value = NavigationOverlayState(
                 type: OverlayType.arrivalCelebration,
@@ -630,8 +645,10 @@ class NavigationMonitor {
       if (didAdvance) {
         _consecutiveCloseUpdates = 0;
         currentStepNotifier.value = _currentStepIndex;
-        print('📍 Step avanzato → $_currentStepIndex '
-              '(${_routeSteps[_currentStepIndex].instruction})');
+        print(
+          '📍 Step avanzato → $_currentStepIndex '
+          '(${_routeSteps[_currentStepIndex].instruction})',
+        );
       }
     }
   }
@@ -760,7 +777,7 @@ class NavigationMonitor {
     _originalDestination = null;
     _consecutiveOffRouteDetects = 0;
     _routeCheckTicks = 0;
-    
+
     // Resetta lo stato di tracciamento degli Step
     _currentStepIndex = 0;
     _consecutiveCloseUpdates = 0;
@@ -773,6 +790,11 @@ class NavigationMonitor {
     // Resetta l'overlay: se un overlay era visibile, lo rimuoviamo
     // per evitare che resti appeso dopo lo stop.
     overlayNotifier.value = null;
+
+    // Resetta le variabili di cooldown spaziale dell'analisi
+    _lastAnalysisLat = null;
+    _lastAnalysisLng = null;
+    _lastApiCallTime = null;
 
     // Resetta la fase di ricalcolo (chiude eventuali bottom sheet aperti)
     reroutePhaseNotifier.value = ReroutePhase.none;
@@ -928,9 +950,11 @@ class NavigationMonitor {
           final bool wasNull = _direction == null;
           _direction = _rawBearing;
           if (wasNull) {
-            print('🧭 OVERLAY DEBUG: PRIMO bearing acquisito! '
-                  'direction=$_direction° (speed=$_currentSpeed km/h). '
-                  'L\'analisi overlay è ora ABILITATA.');
+            print(
+              '🧭 OVERLAY DEBUG: PRIMO bearing acquisito! '
+              'direction=$_direction° (speed=$_currentSpeed km/h). '
+              'L\'analisi overlay è ora ABILITATA.',
+            );
           }
         }
         // Se la velocità è sotto soglia, NON aggiorniamo _direction.
@@ -955,6 +979,10 @@ class NavigationMonitor {
   /// 3. Si controlla che _isAnalysisRunning sia false
   /// Solo se tutte le condizioni sono soddisfatte si procede con l'analisi.
   void _startZeroSpeedCountdown() {
+    // Salviamo la posizione in cui l'utente si è fermato
+    final double startLat = _currentLat ?? 0.0;
+    final double startLng = _currentLng ?? 0.0;
+
     _zeroSpeedTimer = Timer(
       const Duration(milliseconds: kZeroSpeedDelayMs),
       () {
@@ -962,18 +990,33 @@ class NavigationMonitor {
         // non è più cancellabile (è già scaduto).
         _zeroSpeedTimer = null;
 
-        // Doppia verifica: anche se abbiamo avviato il timer quando la
-        // velocità era sotto soglia, controlliamo di nuovo. Potrebbe essere
-        // cambiata nel frattempo a causa di un aggiornamento GPS arrivato
-        // tra l'ultimo check e lo scadere del timer.
-        if (_currentSpeed < kZeroSpeedThresholdKmH) {
-          print('⏱️ OVERLAY DEBUG: Countdown ${kZeroSpeedDelayMs}ms SCADUTO — '
-                'velocità ancora ${_currentSpeed.toStringAsFixed(1)} km/h. '
-                'Lancio _executeAnalysis()...');
+        // Calcoliamo la distanza percorsa nei 10 secondi per capire se
+        // l'utente è davvero fermo o sta solo scendendo sotto i 2.5 km/h
+        // (es. camminando molto lentamente o con segnale GPS disturbato).
+        final double distMoved = haversineDistance(
+          startLat,
+          startLng,
+          _currentLat ?? 0.0,
+          _currentLng ?? 0.0,
+        );
+
+        // Doppia verifica: controlliamo che la velocità istantanea sia ancora
+        // bassa E che l'utente non si sia mosso di più di 4 metri.
+        // 4 metri in 10 secondi = 0.4 m/s (1.4 km/h), palesemente in movimento.
+        if (_currentSpeed < kZeroSpeedThresholdKmH && distMoved <= 6.0) {
+          print(
+            '⏱️ OVERLAY DEBUG: Countdown ${kZeroSpeedDelayMs}ms SCADUTO — '
+            'velocità: ${_currentSpeed.toStringAsFixed(1)} km/h, '
+            'spostamento: ${distMoved.toStringAsFixed(1)}m. '
+            'Lancio _executeAnalysis()...',
+          );
           _executeAnalysis();
         } else {
-          print('⏱️ OVERLAY DEBUG: Countdown scaduto MA velocità è salita a '
-                '${_currentSpeed.toStringAsFixed(1)} km/h — analisi SALTATA.');
+          print(
+            '⏱️ OVERLAY DEBUG: Countdown scaduto MA utente in movimento '
+            '(speed: ${_currentSpeed.toStringAsFixed(1)} km/h, '
+            'spostamento: ${distMoved.toStringAsFixed(1)}m) — analisi SALTATA.',
+          );
         }
       },
     );
@@ -1014,7 +1057,9 @@ class NavigationMonitor {
     // Evita analisi concorrenti. Se un'analisi è già in corso (es. la
     // chiamata Roads API è lenta), non ne lanciamo una seconda.
     if (_isAnalysisRunning) {
-      print('🔒 OVERLAY DEBUG: _executeAnalysis bloccata — analisi già in corso');
+      print(
+        '🔒 OVERLAY DEBUG: _executeAnalysis bloccata — analisi già in corso',
+      );
       return;
     }
 
@@ -1023,7 +1068,9 @@ class NavigationMonitor {
     // l'analisi. Senza questo check, il timer scadeva e l'overlay appariva
     // anche dopo lo stop della navigazione.
     if (!_isNavigating) {
-      print('🔒 OVERLAY DEBUG: _executeAnalysis bloccata — navigazione non attiva');
+      print(
+        '🔒 OVERLAY DEBUG: _executeAnalysis bloccata — navigazione non attiva',
+      );
       return;
     }
 
@@ -1049,7 +1096,9 @@ class NavigationMonitor {
 
       // Se la posizione non è disponibile, non possiamo fare nulla.
       if (snapshotLat == null || snapshotLng == null) {
-        print('❌ OVERLAY DEBUG: ABORT — posizione GPS non disponibile (lat=$snapshotLat, lng=$snapshotLng)');
+        print(
+          '❌ OVERLAY DEBUG: ABORT — posizione GPS non disponibile (lat=$snapshotLat, lng=$snapshotLng)',
+        );
         return;
       }
 
@@ -1087,27 +1136,90 @@ class NavigationMonitor {
         // Questo garantisce che NavigationOverlay.didUpdateWidget() veda
         // sempre la transizione null → non-null e riavvii animazione + timer.
         overlayNotifier.value = null;
-        print('🔵 OVERLAY DEBUG: WAYPOINT DI SVOLTA RILEVATO! '
-              'Messaggio: "${turnResult.message}", maneuver: ${turnResult.maneuver}');
+        print(
+          '🔵 OVERLAY DEBUG: WAYPOINT DI SVOLTA RILEVATO! '
+          'Messaggio: "${turnResult.message}", maneuver: ${turnResult.maneuver}',
+        );
         overlayNotifier.value = turnResult;
         print('🟢 Overlay impostato: turnInstruction');
         return;
       }
 
-      print('⬜ OVERLAY DEBUG: Nessun waypoint di svolta vicino '
-            '(${_routeSteps.length} step controllati, raggio=${kTurnWaypointRadiusMeters}m). '
-            'Nessun overlay emesso.');
+      print(
+        '⬜ OVERLAY DEBUG: Nessun waypoint di svolta vicino '
+        '(${_routeSteps.length} step controllati, raggio=${kTurnWaypointRadiusMeters}m). '
+        'Nessun overlay emesso.',
+      );
 
-      // FIX: L'utente NON è su un incrocio di svolta del percorso.
-      // PRIMA procedevamo con il rilevamento strade laterali (Roads API),
-      // che causava overlay arancioni frequenti e distraenti ogni volta
-      // che l'utente si fermava 10 secondi in qualsiasi punto del percorso.
+      // =====================================================================
+      // STEP 2.4 — CONTROLLO COOLDOWN SPAZIALE (ANTI-SPAM)
+      // =====================================================================
       //
-      // ORA: l'overlay si mostra SOLO quando l'utente è fermo vicino a
-      // un waypoint di svolta. Nessun altro overlay viene emesso.
-      // Questo riduce drasticamente il carico cognitivo: l'utente vede
-      // l'overlay arancione SOLO quando c'è un'azione da compiere (svoltare).
+      // Evitiamo di spammare l'utente con continui overlay se rimane fermo
+      // nella stessa area (es. seduto su una panchina) per molti minuti.
+      if (_lastAnalysisLat != null && _lastAnalysisLng != null) {
+        final double distFromLastAnalysis = haversineDistance(
+          snapshotLat,
+          snapshotLng,
+          _lastAnalysisLat!,
+          _lastAnalysisLng!,
+        );
 
+        if (distFromLastAnalysis < 20.0) {
+          print(
+            '⏸️ OVERLAY DEBUG: Utente fermo nello stesso posto '
+            '(distanza ${distFromLastAnalysis.toStringAsFixed(1)}m < 20m). '
+            'Skip analisi per non spammare la UI e la API.',
+          );
+          return;
+        }
+      }
+
+      if (snapshotDirection == null) {
+        print(
+          '❌ OVERLAY DEBUG: direction null — skip rilevamento strade laterali',
+        );
+        return;
+      }
+
+      // =====================================================================
+      // LIMITATORE CHIAMATE API (Anti-Spam se fermi dove non ci sono strade)
+      // =====================================================================
+      if (_lastApiCallTime != null) {
+        final int elapsedSeconds = DateTime.now().difference(_lastApiCallTime!).inSeconds;
+        if (elapsedSeconds < 30) {
+          print(
+            '⏸️ OVERLAY DEBUG: Rate limit Google API ($elapsedSeconds s < 30s). Skip analisi.',
+          );
+          return;
+        }
+      }
+
+      final lateralPoints = computeAllLateralPoints(
+        snapshotLat,
+        snapshotLng,
+        snapshotDirection,
+      );
+
+      _lastApiCallTime = DateTime.now(); // Registra il momento della chiamata
+      final snappedPoints = await _roadsService.findNearestRoads(lateralPoints);
+
+      if (snappedPoints != null && snappedPoints.isNotEmpty) {
+        final msg =
+            kLateralRoadMessages[_random.nextInt(kLateralRoadMessages.length)];
+        overlayNotifier.value = null; // force refresh
+        overlayNotifier.value = NavigationOverlayState(
+          type: OverlayType.lateralRoadDetected,
+          message: msg,
+        );
+        print('🟠 OVERLAY DEBUG: Strada laterale rilevata. Messaggio: "$msg"');
+
+        // Salva la posizione per evitare di ripetere l'overlay SOLO se trovato in quest'area
+        _lastAnalysisLat = snapshotLat;
+        _lastAnalysisLng = snapshotLng;
+      } else {
+        print('⬜ OVERLAY DEBUG: Nessuna strada laterale rilevata in questo punto.');
+      }
     } finally {
       // Assicuriamoci di resettare il flag anche in caso di eccezioni
       // non gestite. Il blocco finally viene eseguito SEMPRE, sia che
@@ -1132,7 +1244,9 @@ class NavigationMonitor {
   /// - null se l'utente non è vicino a nessun waypoint
   NavigationOverlayState? _checkNearTurnWaypoint(double lat, double lng) {
     if (_routeSteps.isEmpty) {
-      print('🔍 OVERLAY DEBUG: _checkNearTurnWaypoint — 0 step nel percorso, skip.');
+      print(
+        '🔍 OVERLAY DEBUG: _checkNearTurnWaypoint — 0 step nel percorso, skip.',
+      );
       return null;
     }
 
@@ -1170,8 +1284,10 @@ class NavigationMonitor {
         // randomizzato per rendere l'esperienza più positiva e rassicurante.
         //
         // ESEMPIO: "Ci siamo quasi! Svolta a destra in Via Roma"
-        final String prefix = kTurnEncouragementPrefixes[
-            _random.nextInt(kTurnEncouragementPrefixes.length)];
+        final String prefix =
+            kTurnEncouragementPrefixes[_random.nextInt(
+              kTurnEncouragementPrefixes.length,
+            )];
         return NavigationOverlayState(
           type: OverlayType.turnInstruction,
           message: '$prefix${step.instruction}',
@@ -1180,8 +1296,10 @@ class NavigationMonitor {
       }
     }
 
-    print('🔍 OVERLAY DEBUG: Waypoint più vicino a ${closestDistance.toStringAsFixed(1)}m '
-          '(soglia=${kTurnWaypointRadiusMeters}m) — "$closestInstruction"');
+    print(
+      '🔍 OVERLAY DEBUG: Waypoint più vicino a ${closestDistance.toStringAsFixed(1)}m '
+      '(soglia=${kTurnWaypointRadiusMeters}m) — "$closestInstruction"',
+    );
 
     // Nessun waypoint di svolta è abbastanza vicino
     return null;
@@ -1269,7 +1387,9 @@ class NavigationMonitor {
     // Nei primi 15 secondi saltiamo il controllo di deviazione per dare
     // all'utente il tempo di mettersi in cammino e allinearsi alla polyline.
     if (_navigationStartTime != null) {
-      final elapsed = DateTime.now().difference(_navigationStartTime!).inSeconds;
+      final elapsed = DateTime.now()
+          .difference(_navigationStartTime!)
+          .inSeconds;
       if (elapsed < 15) {
         return;
       }
@@ -1277,7 +1397,9 @@ class NavigationMonitor {
 
     // TASK 5 - Filtro Signal Drift basato sull'accuratezza GPS
     if (_currentAccuracy > 30.0) {
-      print('⚠️ Segnale GPS debole (accuracy: ${_currentAccuracy}m). Ignoro controllo percorso.');
+      print(
+        '⚠️ Segnale GPS debole (accuracy: ${_currentAccuracy}m). Ignoro controllo percorso.',
+      );
       return;
     }
 
@@ -1340,11 +1462,13 @@ class NavigationMonitor {
     if (reroutePhaseNotifier.value == ReroutePhase.routeChanged) {
       return;
     }
-    
+
     // TASK 5 - Strikes System (Verifica su più letture)
     _consecutiveOffRouteDetects++;
     if (_consecutiveOffRouteDetects < 2) {
-      print('⚠️ Deviazione rilevata (Strike $_consecutiveOffRouteDetects). Attendo conferma...');
+      print(
+        '⚠️ Deviazione rilevata (Strike $_consecutiveOffRouteDetects). Attendo conferma...',
+      );
       return;
     }
     _consecutiveOffRouteDetects = 0; // Azzera prima del varo ricalcolo
@@ -1413,7 +1537,7 @@ class NavigationMonitor {
         // Aggiorna gli step del percorso per il check dei waypoint di svolta
         _routeSteps = alternativeRoute.steps;
 
-        // Siccome ci siamo agganciati magicamente al percorso di scorta, 
+        // Siccome ci siamo agganciati magicamente al percorso di scorta,
         // azzeriamo tutti i conteggi per fargli ricalcolare dal rigo 0 le sue istruzioni
         _currentStepIndex = 0;
         _consecutiveCloseUpdates = 0;
