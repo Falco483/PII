@@ -1,98 +1,68 @@
-library;
+import 'package:flutter/foundation.dart';
 
-import 'dart:convert';
+/// Represents a single entry in the navigation history stack.
+/// [T] is the type of the state enum (e.g. NavigationAppState).
+class NavigationHistoryEntry<T> {
+  final T state;
+  final Map<String, dynamic>? data;
 
-import 'package:shared_preferences/shared_preferences.dart';
+  NavigationHistoryEntry(this.state, [this.data]);
+}
 
-import '../models/navigation_session.dart';
+/// A centralized service to manage the back stack history for single-page apps
+/// driven by an internal state machine (like NavigationAppState).
+/// Works identically on Android and iOS.
+class NavigationHistoryService<T> extends ChangeNotifier {
+  final List<NavigationHistoryEntry<T>> _stack = [];
 
-/// Servizio per la persistenza dello storico delle sessioni di navigazione.
-///
-/// Salva e recupera una lista di [NavigationSession] in `shared_preferences`
-/// come stringa JSON. Le sessioni sono ordinate per `startTime` decrescente
-/// (la più recente per prima).
-///
-/// PATTERN DI UTILIZZO:
-/// ```dart
-/// final service = NavigationHistoryService();
-/// await service.saveSession(session);
-/// final history = await service.getHistory();
-/// ```
-class NavigationHistoryService {
-  static const String _storageKey = 'navigation_history_v1';
+  /// The current full history stack.
+  List<NavigationHistoryEntry<T>> get stack => List.unmodifiable(_stack);
 
-  /// Numero massimo di sessioni salvate in memoria.
-  /// Le sessioni più vecchie vengono scartate quando si supera questo limite.
-  static const int maxStoredSessions = 50;
+  /// Whether there is a previous screen to go back to.
+  bool get canGoBack => _stack.length > 1;
 
-  /// Salva una sessione di navigazione aggiungendola alla cronologia esistente.
-  ///
-  /// Se la cronologia supera [maxStoredSessions], le sessioni più vecchie
-  /// (per `startTime`) vengono eliminate.
-  ///
-  /// EDGE CASE:
-  /// - Se [SharedPreferences.getInstance] fallisce, l'errore viene silenziosamente
-  ///   inghiottito per non crashare l'app durante lo stop della navigazione.
-  /// - Se la sessione ha campi non serializzabili in [extraData], l'errore
-  ///   viene catturato e loggato.
-  Future<void> saveSession(NavigationSession session) async {
-    try {
-      final current = await getHistory();
+  /// The current active state in the history.
+  NavigationHistoryEntry<T>? get currentState => _stack.isNotEmpty ? _stack.last : null;
 
-      // Aggiunge la nuova sessione e ordina per startTime decrescente.
-      final updated = [...current, session]
-        ..sort((a, b) => b.startTime.compareTo(a.startTime));
-
-      // Mantiene solo le ultime maxStoredSessions.
-      final limited = updated.take(maxStoredSessions).toList(growable: false);
-
-      final prefs = await SharedPreferences.getInstance();
-      final encoded = jsonEncode(limited.map((s) => s.toJson()).toList());
-      await prefs.setString(_storageKey, encoded);
-
-      // Log di debug per verifica manuale.
-      print('✅ Sessione salvata: ${session.sessionId} '
-          '| overlays: ${session.overlays.length} '
-          '| reroute: ${session.rerouteCount} '
-          '| endTime: ${session.endTime}');
-    } catch (e) {
-      // Fallback silenzioso: salvare la sessione è non-critico.
-      // L'app non deve crashare per un errore di persistenza.
-      print('⚠️ Errore nel salvataggio della sessione di navigazione: $e');
+  /// Pushes a new state into the history stack.
+  /// If the new state is the same as the current state, it is ignored
+  /// to prevent duplicate consecutive entries.
+  void pushState(T state, {Map<String, dynamic>? data}) {
+    if (_stack.isNotEmpty && _stack.last.state == state) {
+      return; 
     }
+    
+    _stack.add(NavigationHistoryEntry<T>(state, data));
+    notifyListeners();
   }
 
-  /// Recupera la cronologia completa delle sessioni di navigazione.
-  ///
-  /// Restituisce una lista vuota in tutti i casi di errore:
-  /// - Dati mancanti in `shared_preferences`
-  /// - JSON corrotto o non parsabile
-  /// - Eccezioni impreviste
-  Future<List<NavigationSession>> getHistory() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_storageKey);
-
-      if (raw == null || raw.isEmpty) return const [];
-
-      final decoded = jsonDecode(raw) as List<dynamic>;
-      return decoded
-          .whereType<Map<String, dynamic>>()
-          .map(NavigationSession.fromJson)
-          .toList();
-    } catch (_) {
-      // JSON corrotto o SharedPreferences non disponibile.
-      return const [];
-    }
+  /// Removes the current state and returns the previous state entry.
+  /// Returns null if the stack is empty or at the root state.
+  NavigationHistoryEntry<T>? goBack() {
+    if (!canGoBack) return null;
+    
+    _stack.removeLast(); // Remove current state
+    notifyListeners();
+    return _stack.last; // Return new state to be loaded
   }
 
-  /// Cancella tutta la cronologia delle sessioni di navigazione.
-  Future<void> clearHistory() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(_storageKey);
-    } catch (e) {
-      print('⚠️ Errore nella cancellazione della cronologia: $e');
-    }
+  /// Updates the data snapshot of the top entry WITHOUT pushing a new entry.
+  ///
+  /// Use case: after calculating a route while in [placeSelected], the
+  /// directions/allRoutes data has changed. We need to update the existing
+  /// entry so that going back restores the fresh data instead of the stale
+  /// placeholder that was stored when the entry was first pushed.
+  void updateTopData(Map<String, dynamic>? data) {
+    if (_stack.isEmpty) return;
+    final top = _stack.last;
+    _stack[_stack.length - 1] = NavigationHistoryEntry<T>(top.state, data);
+    // No notifyListeners — the state itself hasn't changed, only the snapshot.
+  }
+
+  /// Resets the history stack to a single root state.
+  void clearToRoot(T rootState, {Map<String, dynamic>? data}) {
+    _stack.clear();
+    _stack.add(NavigationHistoryEntry<T>(rootState, data));
+    notifyListeners();
   }
 }

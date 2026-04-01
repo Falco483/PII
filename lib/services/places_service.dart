@@ -196,6 +196,10 @@ class PlacesService {
   static const String _detailsUrl =
       'https://maps.googleapis.com/maps/api/place/details/json';
 
+  // URL base per la Geocoding API (Reverse Geocoding)
+  static const String _geocodeUrl =
+      'https://maps.googleapis.com/maps/api/geocode/json';
+
   /// Ottiene i suggerimenti di autocomplete dalla Places API.
   ///
   /// Questa funzione viene chiamata ogni volta che l'utente digita
@@ -379,6 +383,131 @@ class PlacesService {
     } catch (e) {
       // Gestisce qualsiasi eccezione non prevista
       print('Errore details non gestito: $e');
+      return null;
+    }
+  }
+
+  /// Ottiene il NOME del posto (o l'indirizzo come fallback) da coordinate.
+  ///
+  /// FLUSSO A 2 STEP:
+  /// 1. Reverse Geocoding → ottiene il place_id più vicino alle coordinate
+  /// 2. Places Details → usa il place_id per ottenere il NOME del POI
+  ///    (es. "Hotel Belvedere", "Ristorante Da Mario")
+  ///
+  /// Se il POI non ha un nome (es. un punto generico sulla strada),
+  /// ritorna l'indirizzo formattato come fallback.
+  ///
+  /// PARAMETRI:
+  /// - [lat]: latitudine
+  /// - [lng]: longitudine
+  ///
+  /// RETURN:
+  /// - Nome del POI se disponibile (es. "Hotel Belvedere")
+  /// - Indirizzo formattato come fallback (es. "Via Roma 15, Termini Imerese")
+  /// - null se entrambe le chiamate falliscono
+  Future<String?> reverseGeocode(double lat, double lng) async {
+    try {
+      // --- STEP 1: Reverse Geocoding → ottieni place_id ---
+      final uri = Uri.parse(_geocodeUrl).replace(
+        queryParameters: {
+          'latlng': '$lat,$lng',
+          'key': apiKey,
+          'language': 'it',
+        },
+      );
+
+      final response = await http.get(uri);
+
+      if (response.statusCode != 200) {
+        print('Errore HTTP Geocode: ${response.statusCode}');
+        return null;
+      }
+
+      final data = json.decode(response.body);
+
+      if (data['status'] != 'OK') {
+        if (data['status'] == 'ZERO_RESULTS') return null;
+        print('Errore API Geocode: ${data["status"]}');
+        return null;
+      }
+
+      final results = data['results'] as List<dynamic>;
+      if (results.isEmpty) return null;
+
+      final firstResult = results.first;
+      final String? formattedAddress = firstResult['formatted_address'] as String?;
+      final String? placeId = firstResult['place_id'] as String?;
+
+      // --- STEP 2: Places Details → ottieni il NOME del POI ---
+      // Se abbiamo un place_id, proviamo a ottenere il nome del posto.
+      // Questo trasforma "Via Roma 15" in "Hotel Belvedere".
+      if (placeId != null && placeId.isNotEmpty) {
+        try {
+          final detailsUri = Uri.parse(_detailsUrl).replace(
+            queryParameters: {
+              'place_id': placeId,
+              'key': apiKey,
+              'language': 'it',
+              // Solo il nome — campo Basic, costo minimo
+              'fields': 'name,types',
+            },
+          );
+
+          final detailsResponse = await http.get(detailsUri);
+
+          if (detailsResponse.statusCode == 200) {
+            final detailsData = json.decode(detailsResponse.body);
+
+            if (detailsData['status'] == 'OK') {
+              final result = detailsData['result'];
+              final String? name = result['name'] as String?;
+              final List<dynamic>? types = result['types'] as List<dynamic>?;
+
+              // Usa il nome SOLO se è un POI reale (non una via o un codice postale).
+              // I tipi che indicano un POI reale includono:
+              // establishment, point_of_interest, restaurant, lodging, store, ecc.
+              // I tipi che indicano un indirizzo generico:
+              // street_address, route, postal_code, political, ecc.
+              final bool isPoi = types != null && types.any((t) =>
+                  t == 'establishment' ||
+                  t == 'point_of_interest' ||
+                  t == 'restaurant' ||
+                  t == 'lodging' ||
+                  t == 'store' ||
+                  t == 'food' ||
+                  t == 'cafe' ||
+                  t == 'bar' ||
+                  t == 'pharmacy' ||
+                  t == 'hospital' ||
+                  t == 'school' ||
+                  t == 'church' ||
+                  t == 'museum' ||
+                  t == 'park' ||
+                  t == 'bus_station' ||
+                  t == 'train_station' ||
+                  t == 'subway_station' ||
+                  t == 'transit_station' ||
+                  t == 'shopping_mall' ||
+                  t == 'supermarket' ||
+                  t == 'gas_station');
+
+              if (isPoi && name != null && name.isNotEmpty) {
+                print('📍 Reverse geocode: POI trovato → "$name"');
+                return name;
+              }
+            }
+          }
+        } catch (e) {
+          // Se la chiamata Details fallisce, usiamo il fallback sotto
+          print('⚠️ Places Details fallita per place_id=$placeId: $e');
+        }
+      }
+
+      // --- FALLBACK: indirizzo formattato dalla Geocoding API ---
+      print('📍 Reverse geocode: nessun POI, uso indirizzo → "$formattedAddress"');
+      return formattedAddress;
+    } catch (e) {
+      print('Eccezione in reverseGeocode: $e');
       return null;
     }
   }

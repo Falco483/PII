@@ -40,6 +40,18 @@ class DirectionStep {
   /// Può essere null se lo step non ha una manovra specifica.
   final String? maneuver;
 
+  /// Polyline codificata per QUESTO singolo step.
+  ///
+  /// La Directions API restituisce una polyline per ogni step nel campo
+  /// `step.polyline.points`. Questa è più dettagliata della overview_polyline
+  /// e permette di evidenziare il segmento corrente sulla mappa.
+  ///
+  /// UTILIZZO ACCESSIBILITÀ:
+  /// In modalità navigazione, il MapWidget usa questa polyline per mostrare
+  /// SOLO il segmento corrente in verde brillante (spesso 14px) e il prossimo
+  /// in grigio chiaro, riducendo il sovraccarico cognitivo.
+  final String? encodedStepPolyline;
+
   DirectionStep({
     required this.instruction,
     required this.distance,
@@ -49,6 +61,7 @@ class DirectionStep {
     required this.endLat,
     required this.endLng,
     this.maneuver,
+    this.encodedStepPolyline,
   });
 
   /// Crea un DirectionStep dal JSON della risposta API
@@ -63,43 +76,154 @@ class DirectionStep {
   ///   "end_location": { "lat": 45.124, "lng": 9.457 }
   /// }
   factory DirectionStep.fromJson(Map<String, dynamic> json) {
+    // Il campo maneuver è opzionale nel JSON: se assente, resta null
+    final String? maneuver = json['maneuver'] as String?;
+
     return DirectionStep(
-      // Rimuove i tag HTML e personalizza il testo dell'istruzione
-      // Il testo pulito è quello che verrà mostrato sull'overlay
-      instruction: _cleanInstruction(json['html_instructions'] ?? ''),
+      // Genera un'istruzione SEMPLIFICATA per utenti con disabilità cognitive.
+      // Priorità: maneuver (codice stabile) > html_instructions (testo Google)
+      instruction: _simplifyInstruction(
+        json['html_instructions'] ?? '',
+        maneuver,
+      ),
       distance: json['distance']['text'] ?? '',
       duration: json['duration']['text'] ?? '',
       startLat: json['start_location']['lat'].toDouble(),
       startLng: json['start_location']['lng'].toDouble(),
       endLat: json['end_location']['lat'].toDouble(),
       endLng: json['end_location']['lng'].toDouble(),
-      // Il campo maneuver è opzionale nel JSON: se assente, resta null
-      maneuver: json['maneuver'] as String?,
+      maneuver: maneuver,
+      // Estrae la polyline codificata dello step dal campo 'polyline.points'.
+      // Ogni step della Directions API contiene la propria polyline dettagliata
+      // che descrive il tracciato esatto di quel segmento del percorso.
+      encodedStepPolyline: json['polyline']?['points'] as String?,
     );
   }
 
-  /// Rimuove i tag HTML e adatta il testo dell'istruzione
-  static String _cleanInstruction(String html) {
-    // 1. Rimuove tutti i log HTML (es. <b>, </b>, <div ...>)
+  /// Genera istruzioni SEMPLIFICATE per utenti con disabilità cognitive.
+  ///
+  /// STRATEGIA A DUE LIVELLI:
+  /// 1. Se `maneuver` è disponibile → mappa il codice a una frase breve e chiara
+  ///    (es. "turn-right" → "Vai a destra"). Questo è il caso migliore perché
+  ///    il codice è stabile e non dipende dalla lingua/formato di Google.
+  ///
+  /// 2. Se `maneuver` è null → pulisce il testo HTML di Google rimuovendo:
+  ///    - Tag HTML
+  ///    - Nomi delle strade (inutili per chi segue la linea sulla mappa)
+  ///    - Direzioni cardinali (nord, sud, est, ovest)
+  ///    - Frasi complesse ("per rimanere su", "in direzione di")
+  ///
+  /// DESIGN ACCESSIBILE:
+  /// - Frasi cortissime (2-4 parole)
+  /// - Verbi semplici e diretti ("Vai", "Torna", "Tieni")
+  /// - Nessun nome di strada (l'utente segue la linea blu sulla mappa)
+  /// - Linguaggio quotidiano, non tecnico
+  static String _simplifyInstruction(String html, String? maneuver) {
+    // ---------------------------------------------------------------
+    // LIVELLO 1: Mappatura basata su maneuver (preferita)
+    // ---------------------------------------------------------------
+    if (maneuver != null) {
+      final String? simple = _maneuverToSimple[maneuver];
+      if (simple != null) return simple;
+    }
+
+    // ---------------------------------------------------------------
+    // LIVELLO 2: Pulizia aggressiva del testo HTML (fallback)
+    // ---------------------------------------------------------------
+
+    // Rimuove tutti i tag HTML (es. <b>, </b>, <div ...>)
     String text = html.replaceAll(RegExp(r'<[^>]*>'), '');
-    
-    // 2. Personalizzazione specifica richiesta dall'utente:
-    
-    // "Procedi in direzione nord su" -> "Procedi in diritto su"
-    text = text.replaceAll(RegExp(r'Procedi in direzione (nord|sud|est|ovest|nord-est|nord-ovest|sud-est|sud-ovest)(-est|-ovest)?\b', caseSensitive: false), 'Procedi in diritto');
-    
-    // "Fai un'inversione a U" -> "Torna indietro "
-    text = text.replaceAll(RegExp(r"Fai un'inversione a U\b", caseSensitive: false), 'Torna indietro ');
-    
-    // "Svolta a destra per rimanere su Via Roma" -> "Svolta a destra"
-    text = text.replaceAll(RegExp(r' per rimanere su .*', caseSensitive: false), '');
-    
-    // Assicuriamoci che Svolta e Mantieni non venissero sovrascritte dalle vecchie regex
-    // (L'utente ha chiesto esplicitamente "Svolta a destra", ecc. quindi lo lasciamo invariato
-    // invece di scambiarlo in "Gira" come nella modifica precedente)
-    
-    return text;
+
+    // Rimuove i nomi delle strade dopo "su" / "in" / "verso"
+    // "Svolta a destra su Via Giuseppe Garibaldi" → "Svolta a destra"
+    text = text.replaceAll(RegExp(r'\s+su\s+.*', caseSensitive: false), '');
+    text = text.replaceAll(RegExp(r'\s+in\s+Via\b.*', caseSensitive: false), '');
+    text = text.replaceAll(RegExp(r'\s+in\s+Viale\b.*', caseSensitive: false), '');
+    text = text.replaceAll(RegExp(r'\s+in\s+Piazza\b.*', caseSensitive: false), '');
+    text = text.replaceAll(RegExp(r'\s+in\s+Corso\b.*', caseSensitive: false), '');
+    text = text.replaceAll(RegExp(r'\s+verso\s+.*', caseSensitive: false), '');
+
+    // "Procedi in direzione nord/sud/..." → "Vai dritto"
+    text = text.replaceAll(
+      RegExp(r'Procedi in direzione\s+\S+', caseSensitive: false),
+      'Vai dritto',
+    );
+
+    // "Fai un'inversione a U" → "Torna indietro"
+    text = text.replaceAll(
+      RegExp(r"Fai un'inversione a U", caseSensitive: false),
+      'Torna indietro',
+    );
+
+    // "per rimanere su ..." → rimuovi
+    text = text.replaceAll(
+      RegExp(r'\s+per rimanere\s+.*', caseSensitive: false),
+      '',
+    );
+
+    // "Continua" → "Vai dritto"
+    text = text.replaceAll(
+      RegExp(r'^Continua\b', caseSensitive: false),
+      'Vai dritto',
+    );
+
+    // "Svolta" → "Vai" (più semplice)
+    text = text.replaceAll(
+      RegExp(r'Svolta\b', caseSensitive: false),
+      'Vai',
+    );
+
+    // "leggermente" → "un po'" (più colloquiale e chiaro)
+    text = text.replaceAll(
+      RegExp(r'leggermente', caseSensitive: false),
+      'un po\'',
+    );
+
+    // Rimuovi spazi multipli e trim finale
+    text = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+    return text.isEmpty ? 'Vai dritto' : text;
   }
+
+  /// Mappa dei codici maneuver → frasi semplici.
+  ///
+  /// I codici sono definiti dalla Google Directions API e sono stabili
+  /// (non cambiano con la lingua). Ogni frase è pensata per essere
+  /// immediatamente comprensibile da un ragazzo con disabilità cognitive.
+  static const Map<String, String> _maneuverToSimple = {
+    // Svolte base
+    'turn-left': 'Vai a sinistra',
+    'turn-right': 'Vai a destra',
+    'turn-slight-left': 'Vai un po\' a sinistra',
+    'turn-slight-right': 'Vai un po\' a destra',
+    'turn-sharp-left': 'Gira forte a sinistra',
+    'turn-sharp-right': 'Gira forte a destra',
+
+    // Inversione
+    'uturn-left': 'Torna indietro',
+    'uturn-right': 'Torna indietro',
+
+    // Dritto
+    'straight': 'Vai dritto',
+
+    // Tieni sinistra/destra (bivi, corsie)
+    'keep-left': 'Tieni la sinistra',
+    'keep-right': 'Tieni la destra',
+
+    // Rotonde
+    'roundabout-left': 'Alla rotonda vai a sinistra',
+    'roundabout-right': 'Alla rotonda vai a destra',
+
+    // Raccordi e rampe (più per auto, ma gestiamo comunque)
+    'ramp-left': 'Tieni la sinistra',
+    'ramp-right': 'Tieni la destra',
+    'fork-left': 'Al bivio vai a sinistra',
+    'fork-right': 'Al bivio vai a destra',
+    'merge': 'Vai dritto',
+
+    // Traghetto (raro ma previsto dall'API)
+    'ferry': 'Prendi il traghetto',
+  };
 }
 
 /// Modello per il risultato completo delle indicazioni

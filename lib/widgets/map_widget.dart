@@ -13,6 +13,9 @@
 
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'dart:ui' as ui;
+import 'dart:math' as math;
+import '../services/directions_service.dart';
 
 /// Widget che visualizza la mappa Google Maps
 class MapWidget extends StatefulWidget {
@@ -25,19 +28,67 @@ class MapWidget extends StatefulWidget {
   // Polyline codificata per il percorso
   final String? encodedPolyline;
 
+  /// Coordinate GPS iniziali: se fornite, la camera si posizionerà qui
+  /// appena la mappa è pronta (al posto del centro Italia fisso).
+  final double? initialLat;
+  final double? initialLng;
+
   /// Callback chiamato quando l'utente tocca un punto sulla mappa (TASK 3).
-  ///
-  /// Gestisce entrambi i casi di TASK 3:
-  /// - Caso 1 (POI): su Google Maps Flutter, anche il tap su un POI genera
-  ///   un evento onTap con le coordinate. Il parent può usare le coordinate
-  ///   direttamente per calcolare il percorso.
-  /// - Caso 2 (punto generico): restituisce le coordinate lat/lng del punto
-  ///   toccato. NON serve chiamare Places Details API.
-  ///
-  /// In entrambi i casi, le coordinate lat/lng sono sufficienti per la
-  /// Directions API (TASK 4). Il parent (NavigationScreen) deciderà se
-  /// usare le coordinate direttamente o effettuare una reverse geocoding.
   final void Function(LatLng position)? onMapTap;
+
+  /// Callback chiamato quando l'utente sposta manualmente la mappa (pan/pinch).
+  final VoidCallback? onUserInteraction;
+
+  // =========================================================================
+  // PARAMETRI ACCESSIBILITÀ — NAVIGAZIONE SEGMENTATA
+  // =========================================================================
+
+  /// Se true, la mappa è in modalità navigazione attiva.
+  /// In questa modalità, il percorso viene visualizzato a SEGMENTI:
+  /// - Segmento corrente: verde brillante, spesso 14px, bordo bianco
+  /// - Segmento successivo: grigio chiaro, spesso 8px (anteprima)
+  /// - Resto del percorso: nascosto
+  ///
+  /// Questo riduce drasticamente il sovraccarico cognitivo perché l'utente
+  /// vede solo "dove deve andare ADESSO" e non l'intero percorso.
+  final bool isNavigating;
+
+  /// Indice dello step corrente (0-based).
+  /// Usato per decidere quale segmento colorare in verde (corrente)
+  /// e quale in grigio (successivo). Aggiornato dal NavigationMonitor.
+  final int currentStepIndex;
+
+  /// Lista degli step con le polyline individuali.
+  /// Ogni step contiene `encodedStepPolyline` che descrive il tracciato
+  /// esatto di quel segmento. Se null o vuota, fallback alla overview polyline.
+  final List<DirectionStep>? steps;
+
+  // =========================================================================
+  // PARAMETRI POSIZIONE UTENTE — FRECCIA DIREZIONALE CUSTOM
+  // =========================================================================
+
+  /// Latitudine corrente dell'utente (da GPS).
+  /// Usata per posizionare la freccia direzionale sulla mappa.
+  /// Se null, la freccia non viene mostrata.
+  final double? userLat;
+
+  /// Longitudine corrente dell'utente (da GPS).
+  final double? userLng;
+
+  /// Bearing corrente dell'utente (gradi 0-360, 0=Nord).
+  /// La freccia ruota per puntare in questa direzione.
+  /// Se 0, la freccia punta verso nord (default).
+  final double userBearing;
+
+  // =========================================================================
+  // PARAMETRO PERCORSO EFFETTUATO — REVIEW POST-ARRIVO
+  // =========================================================================
+
+  /// Lista di coordinate GPS registrate durante la navigazione.
+  /// Quando non è null/vuota, viene disegnata come polyline VERDE
+  /// sulla mappa per mostrare il percorso effettivamente camminato.
+  /// Usata nella schermata "Rivedi il percorso" dopo l'arrivo.
+  final List<LatLng>? walkedPath;
 
   const MapWidget({
     super.key,
@@ -47,53 +98,409 @@ class MapWidget extends StatefulWidget {
     this.destLng,
     this.encodedPolyline,
     this.onMapTap,
+    this.onUserInteraction,
+    this.initialLat,
+    this.initialLng,
+    this.isNavigating = false,
+    this.currentStepIndex = 0,
+    this.steps,
+    this.userLat,
+    this.userLng,
+    this.userBearing = 0,
+    this.walkedPath,
   });
 
   @override
-  State<MapWidget> createState() => _MapWidgetState();
+  State<MapWidget> createState() => MapWidgetState();
 }
 
-class _MapWidgetState extends State<MapWidget> {
+class MapWidgetState extends State<MapWidget> {
   // Controller per la mappa Google
   GoogleMapController? _mapController;
 
-  // Set di marker sulla mappa
-  Set<Marker> _markers = {};
+  // Set di marker sulla mappa (percorso: origine + destinazione)
+  Set<Marker> _routeMarkers = {};
+
+  // Marker freccia utente (separato per aggiornamento indipendente)
+  Marker? _userArrowMarker;
 
   // Set di polyline sulla mappa
   Set<Polyline> _polylines = {};
 
+  /// Flag per distinguere i movimenti di camera programmatici
+  /// da quelli causati dal gesto dell'utente (pan/pinch).
+  bool _isProgrammaticMove = false;
+
   // Posizione iniziale: centro Italia
   static const LatLng _initialPosition = LatLng(45.4836315, 9.2249375);
-  static const double _initialZoom = 15;
+  static const double _initialZoom = 18;
+
+  // =========================================================================
+  // FRECCIA DIREZIONALE CUSTOM — BITMAP CACHE
+  // =========================================================================
+
+  /// Bitmap della freccia direzionale, creata una volta e riutilizzata.
+  ///
+  /// La freccia viene disegnata con Canvas di Flutter al primo avvio e
+  /// cachata come BitmapDescriptor. La rotazione è gestita dalla proprietà
+  /// `Marker.rotation`, quindi il bitmap è sempre orientato verso l'alto.
+  ///
+  /// DESIGN (replica Google Maps Navigation):
+  /// - Cerchio BLU grande (120x120 dp) con bordo bianco spesso
+  /// - Freccia/chevron bianca all'interno — indica la direzione
+  /// - Colore BLU (#4285F4) come la freccia di navigazione Google Maps
+  /// - Ombra sottile per staccarsi dalla mappa
+  BitmapDescriptor? _arrowBitmap;
+
+  /// Bitmap per le frecce direzionali PICCOLE lungo la polyline.
+  /// Sono le piccole chevron bianche che indicano la direzione di marcia
+  /// sulla linea blu del percorso (come in Google Maps navigation).
+  BitmapDescriptor? _directionChevronBitmap;
+
+  /// Set di marker per le frecce direzionali lungo la polyline.
+  /// Vengono rigenerati ogni volta che cambia lo step corrente.
+  Set<Marker> _chevronMarkers = {};
+
+  @override
+  void initState() {
+    super.initState();
+    // Crea la freccia utente e i chevron direzionali in background.
+    _createArrowBitmap();
+    _createChevronBitmap();
+  }
+
+  /// Crea il bitmap della freccia direzionale usando Canvas.
+  ///
+  /// La freccia è un cerchio arancione con una freccia bianca dentro.
+  /// Dimensione: 120x120 pixel (scalata automaticamente dal device pixel ratio).
+  ///
+  /// NOTA: Usiamo dart:ui per disegnare direttamente, senza dipendere
+  /// da asset esterni (immagini PNG). Questo garantisce che la freccia
+  /// sia sempre disponibile e ad alta risoluzione su qualsiasi dispositivo.
+  Future<void> _createArrowBitmap() async {
+    const double size = 120;
+
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(
+      recorder,
+      const Rect.fromLTWH(0, 0, size, size),
+    );
+
+    final double center = size / 2;
+    final double radius = size / 2 - 3;
+
+    // --- 1. OMBRA (cerchio grigio sotto, spostato di 3px) ---
+    // Dà profondità e stacca la freccia dalla mappa
+    canvas.drawCircle(
+      Offset(center, center + 3),
+      radius,
+      Paint()..color = const Color(0x40000000), // nero al 25%
+    );
+
+    // --- 2. BORDO BIANCO ESTERNO ---
+    // Contrasto con qualsiasi sfondo mappa (chiaro o scuro)
+    canvas.drawCircle(
+      Offset(center, center),
+      radius,
+      Paint()..color = const Color(0xFFFFFFFF),
+    );
+
+    // --- 3. CERCHIO BLU (sfondo freccia — come Google Maps) ---
+    // Blu #4285F4: identico al pallino di navigazione Google Maps
+    canvas.drawCircle(
+      Offset(center, center),
+      radius - 5,
+      Paint()..color = const Color(0xFF4285F4),
+    );
+
+    // --- 4. FRECCIA BIANCA (punta verso l'alto) ---
+    // La rotazione è gestita da Marker.rotation, NON dal disegno.
+    // La freccia è un chevron/triangolo che punta chiaramente "avanti".
+    final Path arrowPath = Path()
+      ..moveTo(center, 22)             // Punta superiore (la direzione)
+      ..lineTo(center + 28, 78)        // Angolo basso-destro
+      ..lineTo(center + 6, 62)         // Rientranza destra
+      ..lineTo(center, 70)             // Centro basso (tacca)
+      ..lineTo(center - 6, 62)         // Rientranza sinistra
+      ..lineTo(center - 28, 78)        // Angolo basso-sinistro
+      ..close();
+
+    canvas.drawPath(
+      arrowPath,
+      Paint()
+        ..color = const Color(0xFFFFFFFF)
+        ..style = PaintingStyle.fill,
+    );
+
+    // --- 5. BORDO SOTTILE SULLA FRECCIA (per definizione) ---
+    canvas.drawPath(
+      arrowPath,
+      Paint()
+        ..color = const Color(0x30000000) // bordo semi-trasparente
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5,
+    );
+
+    // Converte il disegno in immagine raster e poi in BitmapDescriptor
+    final ui.Picture picture = recorder.endRecording();
+    final ui.Image image = await picture.toImage(size.toInt(), size.toInt());
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+
+    if (byteData != null && mounted) {
+      setState(() {
+        _arrowBitmap = BitmapDescriptor.bytes(
+          byteData.buffer.asUint8List(),
+          width: 56, // Dimensione logica su schermo (dp)
+          height: 56,
+        );
+      });
+
+      // Se siamo già in navigazione, aggiorna subito il marker
+      if (widget.isNavigating) {
+        _updateUserMarker();
+      }
+    }
+  }
+
+  /// Crea il bitmap del chevron direzionale (freccia bianca sulla polyline).
+  ///
+  /// Replica le frecce bianche grandi che Google Maps mostra dentro la
+  /// linea blu del percorso. Sono frecce PIENE (non solo contorno),
+  /// grandi e ben visibili — identiche a quelle nello screenshot.
+  /// Dimensione: 80x80 pixel → 32dp su schermo.
+  Future<void> _createChevronBitmap() async {
+    const double size = 80;
+
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(
+      recorder,
+      const Rect.fromLTWH(0, 0, size, size),
+    );
+
+    final double center = size / 2;
+
+    // Freccia bianca PIENA (triangolo/chevron come Google Maps nav)
+    // Punta verso l'alto — la rotazione è gestita dal Marker.
+    final Path chevronPath = Path()
+      ..moveTo(center, 16)               // Punta superiore
+      ..lineTo(center + 20, 52)          // Angolo basso-destro
+      ..lineTo(center + 4, 40)           // Rientranza destra
+      ..lineTo(center, 46)               // Centro basso
+      ..lineTo(center - 4, 40)           // Rientranza sinistra
+      ..lineTo(center - 20, 52)          // Angolo basso-sinistro
+      ..close();
+
+    canvas.drawPath(
+      chevronPath,
+      Paint()
+        ..color = const Color(0xCCFFFFFF) // Bianco semi-trasparente (80%)
+        ..style = PaintingStyle.fill,
+    );
+
+    final ui.Picture picture = recorder.endRecording();
+    final ui.Image image = await picture.toImage(size.toInt(), size.toInt());
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+
+    if (byteData != null && mounted) {
+      _directionChevronBitmap = BitmapDescriptor.bytes(
+        byteData.buffer.asUint8List(),
+        width: 32, // Grande come in Google Maps
+        height: 32,
+      );
+    }
+  }
+
+  /// Posiziona i chevron direzionali lungo i punti della polyline.
+  ///
+  /// I chevron vengono piazzati ogni ~30 metri lungo il segmento corrente.
+  /// Ogni chevron è ruotato per puntare nella direzione del segmento
+  /// su cui si trova (dal punto N al punto N+1).
+  ///
+  /// COME GOOGLE MAPS: le piccole frecce bianche ">" sulla linea blu
+  /// indicano "stai andando in questa direzione". Aiutano l'utente
+  /// a capire il verso di marcia, soprattutto nelle curve.
+  Set<Marker> _buildChevronMarkers(List<LatLng> points) {
+    if (_directionChevronBitmap == null || points.length < 2) return {};
+
+    final Set<Marker> chevrons = {};
+    double accumulatedDistance = 0;
+    const double chevronInterval = 40; // Un chevron ogni ~40 metri (come Google Maps)
+    int chevronId = 0;
+
+    for (int i = 0; i < points.length - 1; i++) {
+      final LatLng p1 = points[i];
+      final LatLng p2 = points[i + 1];
+
+      // Distanza tra i due punti (in metri, approssimazione)
+      final double dLat = (p2.latitude - p1.latitude) * 111320;
+      final double dLng = (p2.longitude - p1.longitude) * 111320 *
+          math.cos(p1.latitude * math.pi / 180);
+      final double segmentDist = math.sqrt(dLat * dLat + dLng * dLng);
+
+      // Bearing del segmento (gradi, 0=nord)
+      final double bearing = math.atan2(dLng, dLat) * 180 / math.pi;
+
+      accumulatedDistance += segmentDist;
+
+      // Piazza un chevron ogni chevronInterval metri
+      if (accumulatedDistance >= chevronInterval) {
+        accumulatedDistance = 0;
+        chevrons.add(Marker(
+          markerId: MarkerId('chevron_$chevronId'),
+          position: p2,
+          icon: _directionChevronBitmap!,
+          rotation: bearing,
+          flat: true,
+          anchor: const Offset(0.5, 0.5),
+          zIndex: 3,
+        ));
+        chevronId++;
+      }
+    }
+
+    return chevrons;
+  }
 
   @override
   void didUpdateWidget(MapWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Aggiorna la mappa quando cambiano i parametri
+
+    // Aggiorna le polyline e i marker di percorso quando cambiano i dati route
     if (widget.encodedPolyline != oldWidget.encodedPolyline ||
         widget.originLat != oldWidget.originLat ||
-        widget.destLat != oldWidget.destLat) {
+        widget.destLat != oldWidget.destLat ||
+        widget.isNavigating != oldWidget.isNavigating ||
+        widget.currentStepIndex != oldWidget.currentStepIndex ||
+        widget.walkedPath != oldWidget.walkedPath) {
       _updateRoute();
     }
+
+    // Aggiorna SOLO il marker utente quando cambia la posizione GPS.
+    // Questo è separato da _updateRoute per efficienza: la posizione GPS
+    // cambia ogni ~500ms, ma il percorso cambia raramente.
+    if (widget.userLat != oldWidget.userLat ||
+        widget.userLng != oldWidget.userLng ||
+        widget.userBearing != oldWidget.userBearing ||
+        widget.isNavigating != oldWidget.isNavigating) {
+      _updateUserMarker();
+    }
   }
+
+  // =========================================================================
+  // STILE MAPPA — BIANCA CLASSICA CON POI VISIBILI
+  // =========================================================================
+
+  /// Stile mappa pulito: sfondo bianco, scritte nere, POI visibili.
+  ///
+  /// PRINCIPI:
+  /// 1. Mappa bianca classica — niente colori sabbia, tutto leggibile
+  /// 2. POI visibili — bar, farmacie, hotel sono punti di riferimento utili
+  /// 3. Scritte scure — massima leggibilità su sfondo chiaro
+  /// 4. Solo le icone stradali (scudi autostrada) sono nascoste
+  ///
+  /// NOTA: Questo stile SOSTITUISCE il cloudMapId.
+  static const String _accessibleMapStyle = '''
+[
+  {
+    "featureType": "road",
+    "elementType": "labels.icon",
+    "stylers": [{"visibility": "off"}]
+  }
+]
+''';
 
   /// Callback quando la mappa è creata
   void _onMapCreated(GoogleMapController controller) {
     _mapController = controller;
     print('=== GOOGLE MAP CREATED SUCCESSFULLY ===');
+
+    // Applica lo stile mappa: bianco classico con POI visibili.
+    // Solo le icone stradali (scudi autostrada) vengono nascoste.
+    _mapController!.setMapStyle(_accessibleMapStyle);
+
+    // Se sono disponibili le coordinate GPS iniziali, centra la camera lì.
+    if (widget.initialLat != null && widget.initialLng != null) {
+      _isProgrammaticMove = true;
+      _mapController!.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: LatLng(widget.initialLat!, widget.initialLng!),
+            zoom: _initialZoom,
+          ),
+        ),
+      );
+    }
+
     // Se ci sono già dati del percorso, aggiorna la mappa
     if (widget.encodedPolyline != null) {
       _updateRoute();
     }
   }
 
+  /// Centra la camera sulla posizione fornita (chiamato dal parent per il
+  /// pulsante "Torna alla mia posizione").
+  void moveToLocation(double lat, double lng) {
+    _isProgrammaticMove = true;
+    _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(target: LatLng(lat, lng), zoom: _initialZoom),
+      ),
+    );
+  }
+
+  /// Centra la camera sulla posizione dell'utente con bearing e tilt
+  /// (visuale "navigazione guidata" — prospettiva 3D orientata nella
+  /// direzione di marcia).
+  ///
+  /// ACCESSIBILITÀ:
+  /// - Zoom 17 (ridotto di 2 da 19)
+  /// - Tilt 55°: prospettiva più immersiva, aiuta a percepire
+  ///   la profondità e la direzione "avanti". Effetto "corridoio".
+  void followUser(double lat, double lng, double bearing) {
+    _isProgrammaticMove = true;
+    _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(
+          target: LatLng(lat, lng),
+          zoom: 18,
+          bearing: bearing,
+          tilt: 40,
+        ),
+      ),
+    );
+  }
+
+  /// Posiziona ISTANTANEAMENTE la camera orientata verso il percorso.
+  ///
+  /// A differenza di followUser (che usa animateCamera con transizione
+  /// fluida), questo metodo usa moveCamera che è ISTANTANEO — nessun lag.
+  /// Viene chiamato quando l'utente preme "Avvia" per posizionare
+  /// immediatamente la vista nella direzione del percorso.
+  void snapToRoute(double lat, double lng, double bearing) {
+    _isProgrammaticMove = true;
+    _mapController?.moveCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(
+          target: LatLng(lat, lng),
+          zoom: 18,
+          bearing: bearing,
+          tilt: 40,
+        ),
+      ),
+    );
+  }
+
   /// Aggiorna marker e polyline sulla mappa
+  ///
+  /// In modalità navigazione (isNavigating=true), usa le polyline per-step
+  /// per evidenziare solo il segmento corrente e il successivo.
+  /// In modalità preview (isNavigating=false), mostra la overview polyline
+  /// classica con la linea blu standard.
   void _updateRoute() {
     // TASK 5: State Synchronization e Memory Leaks
     // Ripuliamo esplicitamente le vecchie risorse per forzare lo smaltimento
     // dei renderer sul layer nativo di Google Maps prima di ricalcolare.
-    _markers.clear();
+    _routeMarkers.clear();
     _polylines.clear();
 
     if (widget.originLat == null ||
@@ -124,34 +531,256 @@ class _MapWidgetState extends State<MapWidget> {
       ),
     };
 
-    // Decodifica la polyline
-    final List<LatLng> polylinePoints = _decodePolyline(
-      widget.encodedPolyline!,
-    );
+    // Crea le polyline — logica diversa in base alla modalità
+    final Set<Polyline> polylines;
 
-    // Crea la polyline
-    final Set<Polyline> polylines = {
-      Polyline(
-        polylineId: const PolylineId('route'),
-        points: polylinePoints,
-        color: Colors.blue,
-        width: 6,
+    if (widget.isNavigating && _hasStepPolylines()) {
+      // =====================================================================
+      // MODALITÀ NAVIGAZIONE ACCESSIBILE — SEGMENTI SEPARATI
+      // =====================================================================
+      // Mostra solo:
+      //   1. Segmento corrente → VERDE BRILLANTE, spesso (14px + bordo bianco)
+      //   2. Segmento successivo → GRIGIO CHIARO, medio (8px, anteprima)
+      //   3. Tutto il resto → NASCOSTO (non disegnato)
+      //
+      // PERCHÉ:
+      // Per un utente con disabilità cognitive, vedere 20 svolte su una mappa
+      // è sovraccarico. Mostrando solo "dove vai ORA" e "dove andrai DOPO",
+      // la mappa diventa immediatamente comprensibile.
+      // =====================================================================
+      polylines = _buildSegmentedPolylines();
+    } else {
+      // =====================================================================
+      // MODALITÀ PREVIEW / FALLBACK — OVERVIEW POLYLINE CLASSICA
+      // =====================================================================
+      // Usa la overview polyline completa (linea blu, 6px) quando:
+      // - Non siamo in navigazione (routePreview)
+      // - Gli step non hanno polyline individuali (fallback)
+      // =====================================================================
+      final List<LatLng> polylinePoints = _decodePolyline(
+        widget.encodedPolyline!,
+      );
+
+      polylines = {
+        Polyline(
+          polylineId: const PolylineId('route'),
+          points: polylinePoints,
+          color: Colors.blue,
+          width: 6,
+          geodesic: true,
+          jointType: JointType.round,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+        ),
+      };
+    }
+
+    // Aggiorna lo stato
+    setState(() {
+      _routeMarkers = markers;
+      _polylines = polylines;
+
+      // --- PERCORSO EFFETTUATO (walked path) ---
+      // Se presente, aggiunge una polyline VERDE che mostra il percorso
+      // effettivamente camminato dall'utente. Usata nella review post-arrivo.
+      // Ha zIndex alto per stare sopra la polyline pianificata.
+      if (widget.walkedPath != null && widget.walkedPath!.length >= 2) {
+        _polylines.add(Polyline(
+          polylineId: const PolylineId('walked_path'),
+          points: widget.walkedPath!,
+          color: const Color(0xFF34A853), // Verde Google
+          width: 8,
+          geodesic: true,
+          jointType: JointType.round,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          zIndex: 5, // Sopra tutto il resto
+        ));
+      }
+    });
+
+    // Aggiorna anche il marker utente (in caso di cambio modalità)
+    _updateUserMarker();
+
+    // Adatta la camera per mostrare il percorso.
+    // In modalità navigazione NON chiamiamo _fitBounds() perché:
+    // 1. snapToRoute() ha già posizionato la camera a zoom 19 + tilt 55
+    //    orientata verso il percorso
+    // 2. _fitBounds() resetterebbe a zoom 15 senza tilt, annullando
+    //    l'orientamento impostato da snapToRoute()
+    // 3. Il follow-mode si occupa di aggiornare la camera continuamente
+    if (!widget.isNavigating) {
+      _fitBounds();
+    }
+  }
+
+  // =========================================================================
+  // MARKER UTENTE — FRECCIA DIREZIONALE
+  // =========================================================================
+
+  /// Aggiorna il marker freccia dell'utente sulla mappa.
+  ///
+  /// Chiamato ad ogni aggiornamento GPS (~500ms) e quando cambia la modalità.
+  /// - In navigazione: mostra la freccia BLU custom al posto del pallino
+  /// - Fuori navigazione: nessun marker custom (usa il pallino blu di Google)
+  ///
+  /// PERFORMANCE: Questo metodo crea solo un oggetto Marker (leggero) e
+  /// chiama setState. Non ricostruisce le polyline né gli altri marker.
+  void _updateUserMarker() {
+    if (!widget.isNavigating ||
+        widget.userLat == null ||
+        widget.userLng == null ||
+        _arrowBitmap == null) {
+      // Fuori navigazione o dati mancanti: nessun marker custom
+      if (_userArrowMarker != null) {
+        setState(() {
+          _userArrowMarker = null;
+        });
+      }
+      return;
+    }
+
+    setState(() {
+      _userArrowMarker = Marker(
+        markerId: const MarkerId('user_arrow'),
+        position: LatLng(widget.userLat!, widget.userLng!),
+        icon: _arrowBitmap!,
+
+        // --- ROTAZIONE ---
+        // La freccia ruota per puntare nella direzione di marcia.
+        // Il bitmap è disegnato con la punta verso l'alto (nord/0°),
+        // quindi `rotation` lo orienta direttamente sul bearing GPS.
+        rotation: widget.userBearing,
+
+        // --- FLAT = TRUE ---
+        // Il marker giace piatto sulla mappa (come un adesivo sul pavimento),
+        // non come un cartello verticale. Questo è fondamentale perché:
+        // 1. Con tilt 55° un marker verticale apparirebbe storto e confuso
+        // 2. Un marker piatto ruota naturalmente con la mappa
+        // 3. L'effetto "sto camminando su questa freccia" è più intuitivo
+        flat: true,
+
+        // --- ANCHOR AL CENTRO ---
+        // Il marker è ancorato al centro (0.5, 0.5) anziché al fondo.
+        // Così la posizione GPS corrisponde al CENTRO della freccia,
+        // non alla base — l'utente si sente "dentro" la freccia.
+        anchor: const Offset(0.5, 0.5),
+
+        // --- PRIORITÀ Z ---
+        // Il marker utente deve stare SOPRA tutto: sopra i marker di
+        // percorso, sopra le polyline. Non deve mai essere coperto.
+        zIndex: 10,
+      );
+    });
+  }
+
+  /// Controlla se gli step hanno polyline individuali disponibili.
+  bool _hasStepPolylines() {
+    final steps = widget.steps;
+    if (steps == null || steps.isEmpty) return false;
+    // Verifica che almeno lo step corrente abbia una polyline
+    final idx = widget.currentStepIndex;
+    if (idx >= steps.length) return false;
+    return steps[idx].encodedStepPolyline != null;
+  }
+
+  /// Costruisce le polyline segmentate per la navigazione.
+  ///
+  /// STILE GOOGLE MAPS NAVIGATION:
+  /// 1. BORDO (ombra) dello step corrente (zIndex=1): polyline scura, 18px
+  ///    → contorno che stacca il percorso dalla mappa
+  /// 2. SEGMENTO CORRENTE (zIndex=2): polyline BLU #4285F4, 14px
+  ///    → identico al colore della navigazione Google Maps
+  /// 3. SEGMENTO SUCCESSIVO (zIndex=0): polyline GRIGIA, 8px
+  ///    → anteprima del percorso futuro (come le frecce grigie in foto)
+  /// 4. CHEVRON DIREZIONALI: marker freccia bianca lungo la polyline
+  ///    → indicano la direzione di marcia (come le ">" in Google Maps)
+  Set<Polyline> _buildSegmentedPolylines() {
+    final steps = widget.steps!;
+    final idx = widget.currentStepIndex;
+    final Set<Polyline> polylines = {};
+
+    // Reset chevron markers
+    _chevronMarkers.clear();
+
+    // --- 1. SEGMENTO CORRENTE (blu Google Maps con bordo scuro) ---
+    if (idx < steps.length && steps[idx].encodedStepPolyline != null) {
+      final currentPoints = _decodePolyline(steps[idx].encodedStepPolyline!);
+
+      // Bordo scuro (ombra sotto, più largo)
+      polylines.add(Polyline(
+        polylineId: const PolylineId('current_border'),
+        points: currentPoints,
+        color: const Color(0xFF1A56C4), // Blu scuro (ombra)
+        width: 18,
         geodesic: true,
         jointType: JointType.round,
         startCap: Cap.roundCap,
         endCap: Cap.roundCap,
-      ),
-    };
+        zIndex: 1,
+      ));
 
-    // Aggiorna lo stato
-    setState(() {
-      _markers = markers;
-      _polylines = polylines;
-    });
+      // Linea blu Google Maps (sopra, più stretta)
+      polylines.add(Polyline(
+        polylineId: const PolylineId('current_step'),
+        points: currentPoints,
+        color: const Color(0xFF4285F4), // Blu Google Maps
+        width: 14,
+        geodesic: true,
+        jointType: JointType.round,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        zIndex: 2,
+      ));
 
-    // Adatta la camera per mostrare tutto il percorso
-    _fitBounds();
+      // Chevron direzionali bianchi lungo il segmento corrente
+      _chevronMarkers = _buildChevronMarkers(currentPoints);
+    }
+
+    // --- 2. SEGMENTO SUCCESSIVO (grigio, anteprima) ---
+    final nextIdx = idx + 1;
+    if (nextIdx < steps.length && steps[nextIdx].encodedStepPolyline != null) {
+      final nextPoints = _decodePolyline(steps[nextIdx].encodedStepPolyline!);
+
+      polylines.add(Polyline(
+        polylineId: const PolylineId('next_step'),
+        points: nextPoints,
+        color: Colors.grey.shade400,
+        width: 8,
+        geodesic: true,
+        jointType: JointType.round,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        zIndex: 0,
+      ));
+    }
+
+    // --- 3. PERCORSO COMPLESSIVO (sfondo blu chiaro) ---
+    // Disegna l'intera overview_polyline come linea di base.
+    // In questo modo, indipendentemente dagli step o dal ricalcolo,
+    // l'utente vedrà sempre l'intero percorso fino alla destinazione.
+    // I segmenti corrente e successivo verranno disegnati SOPRA questa linea
+    // (grazie a zIndex maggiore) coprendola dove serve.
+    if (widget.encodedPolyline != null) {
+      final List<LatLng> allPoints = _decodePolyline(widget.encodedPolyline!);
+      if (allPoints.isNotEmpty) {
+        polylines.add(Polyline(
+          polylineId: const PolylineId('remaining_route'),
+          points: allPoints,
+          color: const Color(0xFF1A56C4), // Blu scuro (visibile e chiaro)
+          width: 6,
+          geodesic: true,
+          jointType: JointType.round,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          zIndex: 0,
+        ));
+      }
+    }
+
+    return polylines;
   }
+
 
   /// Centra la vista della mappa sul punto di partenza (anziché allargare a tutto il percorso) con zoom a 15
   void _fitBounds() {
@@ -159,12 +788,60 @@ class _MapWidgetState extends State<MapWidget> {
       return;
     }
 
+    _isProgrammaticMove = true;
     _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
         CameraPosition(
           target: LatLng(widget.originLat!, widget.originLng!),
           zoom: _initialZoom,
         ),
+      ),
+    );
+  }
+
+  /// Adatta la camera per mostrare TUTTI i punti (percorso pianificato + camminato).
+  ///
+  /// Usata nella review post-arrivo: l'utente vede sia la linea blu
+  /// (percorso pianificato) sia la linea verde (percorso effettuato)
+  /// in un'unica vista panoramica con tilt=0 e bearing=0.
+  void fitAllPoints() {
+    if (_mapController == null) return;
+
+    final List<LatLng> allPoints = [];
+
+    // Aggiungi punti del percorso pianificato
+    if (widget.encodedPolyline != null && widget.encodedPolyline!.isNotEmpty) {
+      allPoints.addAll(_decodePolyline(widget.encodedPolyline!));
+    }
+
+    // Aggiungi punti del percorso effettuato
+    if (widget.walkedPath != null) {
+      allPoints.addAll(widget.walkedPath!);
+    }
+
+    if (allPoints.length < 2) return;
+
+    // Calcola i bounds che contengono tutti i punti
+    double minLat = allPoints.first.latitude;
+    double maxLat = allPoints.first.latitude;
+    double minLng = allPoints.first.longitude;
+    double maxLng = allPoints.first.longitude;
+
+    for (final point in allPoints) {
+      if (point.latitude < minLat) minLat = point.latitude;
+      if (point.latitude > maxLat) maxLat = point.latitude;
+      if (point.longitude < minLng) minLng = point.longitude;
+      if (point.longitude > maxLng) maxLng = point.longitude;
+    }
+
+    _isProgrammaticMove = true;
+    _mapController!.animateCamera(
+      CameraUpdate.newLatLngBounds(
+        LatLngBounds(
+          southwest: LatLng(minLat, minLng),
+          northeast: LatLng(maxLat, maxLng),
+        ),
+        60, // padding in pixel
       ),
     );
   }
@@ -212,10 +889,21 @@ class _MapWidgetState extends State<MapWidget> {
 
   @override
   Widget build(BuildContext context) {
+    // Unisce i marker del percorso, il marker freccia utente e i chevron.
+    // In navigazione: routeMarkers + userArrowMarker + chevronMarkers
+    // Fuori navigazione: routeMarkers + pallino blu di Google (myLocationEnabled)
+    final Set<Marker> allMarkers = {
+      ..._routeMarkers,
+      ..._chevronMarkers,
+      if (_userArrowMarker != null) _userArrowMarker!,
+    };
+
     return GoogleMap(
-      // ID della mappa creata su Google Cloud Console.
-      // Collega questa mappa allo stile cloud-based "mappa_di_prova".
-      cloudMapId: '15a5f409195f86af602a6c32',
+      // NOTA: cloudMapId rimosso. Lo stile è ora gestito da setMapStyle()
+      // in _onMapCreated con il JSON accessibile (_accessibleMapStyle).
+      // Per tornare allo stile Cloud: riaggiungere qui cloudMapId e
+      // rimuovere setMapStyle() da _onMapCreated.
+
       // Callback quando la mappa è pronta
       onMapCreated: _onMapCreated,
       // Posizione iniziale della camera
@@ -223,36 +911,34 @@ class _MapWidgetState extends State<MapWidget> {
         target: _initialPosition,
         zoom: _initialZoom,
       ),
-      // Marker sulla mappa
-      markers: _markers,
+      // Marker sulla mappa (percorso + freccia utente)
+      markers: allMarkers,
       // Polyline sulla mappa
       polylines: _polylines,
       // Abilita zoom e rotazione
-      zoomControlsEnabled: true,
-      myLocationEnabled: true,
-      myLocationButtonEnabled: true,
+      zoomControlsEnabled: false,
+
+      // --- PALLINO BLU DI GOOGLE ---
+      // In navigazione: DISABILITATO perché usiamo la freccia arancione custom
+      // che è più grande, più visibile e mostra la direzione.
+      // Fuori navigazione: ABILITATO (pallino blu standard, sufficiente).
+      myLocationEnabled: !widget.isNavigating,
+      myLocationButtonEnabled: false, // Usiamo il tasto Recenter custom
       // Tipo di mappa
       mapType: MapType.normal,
 
+      // --- RILEVAMENTO PAN MANUALE ---
+      onCameraMoveStarted: () {
+        if (!_isProgrammaticMove) {
+          widget.onUserInteraction?.call();
+        }
+      },
+      onCameraIdle: () {
+        _isProgrammaticMove = false;
+      },
+
       // --- TASK 3: GESTIONE TAP SULLA MAPPA ---
-
-      // onTap: chiamato quando l'utente tocca un punto GENERICO sulla mappa
-      // (non un POI). Restituisce le coordinate lat/lng del punto toccato.
-      // Se il callback è null (non fornito dal parent), il tap viene ignorato.
       onTap: widget.onMapTap,
-
-      // onLongPress: non usato per ora, ma disponibile per future estensioni
-      // (es. "tieni premuto per impostare un waypoint intermedio")
-
-      // NOTA SUL POI TAP:
-      // A partire da google_maps_flutter, il callback per il tap su POI
-      // è gestito tramite il parametro 'onTap' dei marker interni di Google.
-      // Su Android/iOS nativi, i POI sulla mappa (negozi, ristoranti, ecc.)
-      // generano un evento separato. In Flutter, questo è esposto tramite
-      // il parametro 'onTap' del GoogleMap widget SOLO se il POI non è
-      // coperto da un marker custom. Google Maps Flutter non espone
-      // direttamente un 'onPoiTap', quindi lo gestiamo attraverso l'onTap
-      // generico e lasciamo che il parent usi le coordinate direttamente.
     );
   }
 }
