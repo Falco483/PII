@@ -1253,7 +1253,65 @@ class NavigationMonitor {
     double closestDistance = double.infinity;
     String closestInstruction = '';
 
-    // FIX: Iteriamo SOLO sugli step da _currentStepIndex in poi.
+    // =====================================================================
+    // FIX BUG "VAI DRITTO": Check sulla startLocation dello step corrente
+    // =====================================================================
+    //
+    // PROBLEMA ORIGINALE:
+    // La logica di avanzamento step in updatePosition() incrementa
+    // _currentStepIndex quando l'utente è a < 40m dall'endLocation.
+    // Siccome 40m > kTurnWaypointRadiusMeters (25m), lo step viene
+    // "consumato" PRIMA che il check di prossimità lo rilevi.
+    // L'utente si trova quindi alla startLocation dello step corrente
+    // (= endLocation dello step precedente = l'incrocio), ma il ciclo
+    // sottostante controlla solo le endLocation → nessun match.
+    //
+    // FIX:
+    // Controlliamo ANCHE la startLocation dello step corrente.
+    // Se l'utente è entro kTurnWaypointRadiusMeters dalla start del
+    // suo step attuale, mostriamo l'istruzione di QUESTO step
+    // (che è esattamente ciò che l'utente deve fare ORA).
+    //
+    // ESEMPIO:
+    // Step i:   A → B  ("Vai verso nord")
+    // Step i+1: B → C  ("Continua dritto" / "Svolta a destra")
+    // L'utente è a B, _currentStepIndex = i+1.
+    // → Controlliamo distanza(utente, B) = distanza(utente, step[i+1].start)
+    // → Match! Mostriamo l'istruzione dello step i+1
+    if (_currentStepIndex < _routeSteps.length) {
+      final currentStep = _routeSteps[_currentStepIndex];
+      final double distToStart = haversineDistance(
+        lat,
+        lng,
+        currentStep.startLat,
+        currentStep.startLng,
+      );
+
+      if (distToStart <= kTurnWaypointRadiusMeters) {
+        final String prefix =
+            kTurnEncouragementPrefixes[_random.nextInt(
+              kTurnEncouragementPrefixes.length,
+            )];
+        print(
+          '🔵 OVERLAY DEBUG: Utente vicino alla START dello step corrente '
+          '(${distToStart.toStringAsFixed(1)}m ≤ ${kTurnWaypointRadiusMeters}m). '
+          'Istruzione: "${currentStep.instruction}"',
+        );
+        return NavigationOverlayState(
+          type: OverlayType.turnInstruction,
+          message: '$prefix${currentStep.instruction}',
+          maneuver: currentStep.maneuver,
+        );
+      }
+
+      // Traccia per debug anche se non ha matchato
+      if (distToStart < closestDistance) {
+        closestDistance = distToStart;
+        closestInstruction = '(start) ${currentStep.instruction}';
+      }
+    }
+
+    // FIX precedente: Iteriamo SOLO sugli step da _currentStepIndex in poi.
     // Prima iteravamo su TUTTI gli step, compresi quelli già completati
     // (dietro l'utente). Se l'utente passava vicino alla endLocation di
     // uno step passato (es. "Vai a destra" di 50m fa), l'overlay si
