@@ -3,15 +3,28 @@
 /// Questo file configura il tema dell'app e avvia la NavigationScreen.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_maps_flutter_android/google_maps_flutter_android.dart';
 import 'package:google_maps_flutter_platform_interface/google_maps_flutter_platform_interface.dart';
-import 'package:pii/screens/navigation_screen.dart';
+import 'screens/navigation_screen.dart';
+import 'widgets/debug_button.dart';
+
+/// Chiave globale per accedere al Navigator e al suo Overlay dopo runApp.
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 /// Entry point dell'applicazione
 void main() async {
   // Necessario per inizializzare i binding prima di usare plugin
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Carica variabili d'ambiente dal file .env
+  try {
+    await dotenv.load(fileName: '.env');
+  } catch (e) {
+    print('⚠️ Errore caricamento .env: $e. Continuando con valori di default...');
+  }
 
   // Inizializza il renderer Google Maps su Android.
   final GoogleMapsFlutterPlatform platform = GoogleMapsFlutterPlatform.instance;
@@ -29,12 +42,32 @@ void main() async {
     print('=== Google Maps renderer inizializzato: $renderer ===');
   }
 
-  runApp(const NavigationApp());
+  runApp(NavigationApp(navigatorKey: navigatorKey));
+
+  // Inserisce il tasto di debug nell'Overlay solo se:
+  // - siamo in debug mode (compile-time, mai attivo in release)
+  // - il file .env ha DEBUG_BUTTON_ENABLED=true
+  if (kDebugMode) {
+    try {
+      if (dotenv.env['DEBUG_BUTTON_ENABLED'] == 'true') {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          final overlay = navigatorKey.currentState?.overlay;
+          if (overlay != null) {
+            insertDebugButton(overlay, navigatorKey);
+          }
+        });
+      }
+    } catch (e) {
+      print('⚠️ Errore durante setup debug button: $e');
+    }
+  }
 }
 
 /// Widget root dell'applicazione
 class NavigationApp extends StatelessWidget {
-  const NavigationApp({super.key});
+  final GlobalKey<NavigatorState> navigatorKey;
+
+  const NavigationApp({super.key, required this.navigatorKey});
 
   @override
   Widget build(BuildContext context) {
@@ -44,6 +77,9 @@ class NavigationApp extends StatelessWidget {
 
       // Nasconde il banner di debug
       debugShowCheckedModeBanner: false,
+
+      // Chiave per accedere al Navigator/Overlay da fuori dell'albero dei widget
+      navigatorKey: navigatorKey,
 
       // Tema dell'applicazione
       theme: ThemeData(

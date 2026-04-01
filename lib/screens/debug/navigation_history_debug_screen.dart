@@ -6,7 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import '../../models/navigation_session.dart';
-import '../../services/navigation_history_service.dart';
+import '../../services/navigation_session_service.dart';
 
 class NavigationHistoryDebugScreen extends StatefulWidget {
   const NavigationHistoryDebugScreen({super.key});
@@ -28,8 +28,12 @@ class _NavigationHistoryDebugScreenState
   }
 
   Future<void> _loadHistory() async {
-    final service = NavigationHistoryService();
+    final service = NavigationSessionService();
     final sessions = await service.getHistory();
+    print('🔍 NavigationHistoryDebugScreen: Loaded ${sessions.length} sessions');
+    for (var s in sessions) {
+      print('   → ID: ${s.sessionId}, Overlay: ${s.overlays.length}, Ricalcoli: ${s.rerouteCount}');
+    }
     if (mounted) {
       setState(() {
         _sessions = sessions;

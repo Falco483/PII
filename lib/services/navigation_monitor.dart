@@ -37,6 +37,8 @@ import 'package:flutter/foundation.dart';
 import 'geo_utils.dart';
 import 'roads_service.dart';
 import 'directions_service.dart';
+import '../models/navigation_session.dart';
+import 'navigation_session_service.dart';
 
 // =============================================================================
 // MODELLO PER LO STATO DELL'OVERLAY
@@ -440,6 +442,12 @@ class NavigationMonitor {
   /// quando l'utente devia e nessun percorso alternativo è compatibile.
   final DirectionsService _directionsService;
 
+  /// Servizio per la persistenza delle sessioni di navigazione.
+  final NavigationSessionService _sessionService;
+
+  /// Sessione di navigazione in corso. Null se la navigazione non è attiva.
+  NavigationSession? _currentSession;
+
   /// Generatore di numeri casuali per variare i messaggi di incoraggiamento.
   /// Usare lo stesso Random per tutta la sessione garantisce una distribuzione
   /// uniforme dei messaggi (non ripete lo stesso 3 volte di fila).
@@ -456,11 +464,15 @@ class NavigationMonitor {
   ///   ne crea una nuova. Utile per il testing (si può iniettare un mock).
   /// - [directionsService]: (opzionale) istanza di DirectionsService. Se non
   ///   fornita, ne crea una nuova. Usata per il ricalcolo percorso (Task 2c).
+  /// - [sessionService]: (opzionale) istanza di NavigationSessionService. Se non
+  ///   fornita, ne crea una nuova. Usata per la persistenza delle sessioni.
   NavigationMonitor({
     RoadsService? roadsService,
     DirectionsService? directionsService,
+    NavigationSessionService? sessionService,
   }) : _roadsService = roadsService ?? RoadsService(),
-       _directionsService = directionsService ?? DirectionsService() {
+       _directionsService = directionsService ?? DirectionsService(),
+       _sessionService = sessionService ?? NavigationSessionService() {
     // Avvia subito il timer periodico per il campionamento del bearing
     _startBearingTimer();
   }
@@ -624,13 +636,16 @@ class NavigationMonitor {
             if (_consecutiveArrivalUpdates >= 3) {
               // ARRIVO CONFERMATO! L'utente è a destinazione.
               _hasArrived = true;
+              _currentSession?.destinationReached = true;
               final String arrivalMsg =
                   kArrivalMessages[_random.nextInt(kArrivalMessages.length)];
               print("🎉 Navigazione ultimata! Messaggio: $arrivalMsg");
-              overlayNotifier.value = NavigationOverlayState(
+              final arrivalOverlay = NavigationOverlayState(
                 type: OverlayType.arrivalCelebration,
                 message: arrivalMsg,
               );
+              overlayNotifier.value = arrivalOverlay;
+              _recordOverlayEvent(arrivalOverlay);
             }
           } else {
             // Troppo lontano dalla destinazione: resetta le conferme
@@ -710,6 +725,15 @@ class NavigationMonitor {
     // Imposta il flag di navigazione attiva
     _isNavigating = true;
 
+    // Crea una nuova sessione di tracciamento per questa navigazione.
+    // L'ID è costruito come timestamp epoch in ms per semplicità (non richiede
+    // dipendenze esterne come uuid) garantendo comunque unicità pratica.
+    _currentSession = NavigationSession(
+      sessionId: DateTime.now().millisecondsSinceEpoch.toString(),
+      destination: destinationCoords,
+      startTime: DateTime.now().toIso8601String(),
+    );
+
     // Resetta lo stato di arrivo per una nuova navigazione
     _hasArrived = false;
     _consecutiveArrivalUpdates = 0;
@@ -752,24 +776,38 @@ class NavigationMonitor {
   /// Prima, se il timer di 10s era partito prima del "Termina", continuava
   /// a girare e poteva emettere un overlay fantasma dopo lo stop.
   void stopNavigation() {
-    // Imposta il flag a false per fermare la logica di controllo
-    _isNavigating = false;
+    print('🛑 stopNavigation INIZIO: _currentSession è ${_currentSession == null ? 'NULL' : 'VALIDA'}');
 
-    // Cancella il timer di controllo percorso se attivo
+    // GUARD: se stopNavigation viene chiamato senza startNavigation,
+    // _currentSession è null e non facciamo nulla.
+    if (_currentSession == null) {
+      print('🛑 stopNavigation SKIP: nessuna sessione attiva');
+      return;
+    }
+
+    print('🛑 stopNavigation: Sessione ha ${_currentSession!.overlays.length} overlay e ${_currentSession!.rerouteCount} ricalcoli');
+
+    // Cancella PRIMA il timer e il countdown per garantire che nessun
+    // overlay venga registrato dopo il salvataggio della sessione.
+    // Se non lo facessimo, il timer potrebbe completare un ciclo e registrare
+    // un overlay DOPO che _currentSession diventa null (riga "nulling"),
+    // causando perdita di dati (gli overlay non verrebbero salvati).
+    _isNavigating = false;
     _routeCheckTimer?.cancel();
     _routeCheckTimer = null;
-
-    // FIX: Cancella il countdown velocità-zero se era in corso.
-    // Senza questo, il timer sopravvive allo stop e dopo 10 secondi
-    // lancia _executeAnalysis() anche se la navigazione è terminata,
-    // causando overlay fantasma sullo schermo di ricerca.
     _cancelZeroSpeedCountdown();
-
-    // FIX: Resetta il flag di analisi in corso.
-    // Se un'analisi era in esecuzione al momento dello stop (es. la
-    // Roads API stava rispondendo), senza questo reset il flag resterebbe
-    // true per sempre, bloccando tutte le analisi future.
     _isAnalysisRunning = false;
+
+    // Imposta l'ora di fine e salva la sessione con tutti gli overlay/ricalcoli
+    // registrati finora. A questo punto, nessun nuovo overlay può arrivare
+    // perché il timer è stato cancellato.
+    _currentSession!.endTime = DateTime.now().toIso8601String();
+    print('🛑 stopNavigation: Salvataggio sessione in corso...');
+    // Salvataggio asincrono: non blocchiamo il thread principale.
+    // unawaited è implicito — l'errore è già gestito dentro saveSession.
+    _sessionService.saveSession(_currentSession!);
+    _currentSession = null;
+    print('🛑 stopNavigation: Sessione azzerata');
 
     // Resetta lo stato dei percorsi
     _activeRoute = null;
@@ -1142,6 +1180,7 @@ class NavigationMonitor {
         );
         overlayNotifier.value = turnResult;
         print('🟢 Overlay impostato: turnInstruction');
+        _recordOverlayEvent(turnResult);
         return;
       }
 
@@ -1213,6 +1252,7 @@ class NavigationMonitor {
           message: msg,
         );
         print('🟠 OVERLAY DEBUG: Strada laterale rilevata. Messaggio: "$msg"');
+        _recordOverlayEvent(overlayNotifier.value!);
 
         // Salva la posizione per evitare di ripetere l'overlay SOLO se trovato in quest'area
         _lastAnalysisLat = snapshotLat;
@@ -1554,6 +1594,14 @@ class NavigationMonitor {
         // "Va tutto bene. Sembra che il percorso sia cambiato."
         reroutePhaseNotifier.value = ReroutePhase.routeChanged;
 
+        // Registra il ricalcolo nella sessione
+        if (_currentSession == null) {
+          print('⚠️ Ricalcolo: _currentSession è NULL! Ricalcolo perso');
+        } else {
+          _currentSession!.rerouteCount++;
+          print('🔄 Ricalcolo registrato! Totale ricalcoli: ${_currentSession!.rerouteCount}');
+        }
+
         // Usciamo dalla funzione: abbiamo trovato un percorso compatibile,
         // non serve controllare gli altri né fare chiamate API.
         return;
@@ -1694,6 +1742,14 @@ class NavigationMonitor {
         'Nuovi percorsi: ${_alternativeRoutes.length}. '
         'Percorso attivo: ${_activeRoute!.totalDuration}',
       );
+
+      // Registra il ricalcolo nella sessione
+      if (_currentSession == null) {
+        print('⚠️ Ricalcolo API: _currentSession è NULL! Ricalcolo perso');
+      } else {
+        _currentSession!.rerouteCount++;
+        print('🔄 Ricalcolo API registrato! Totale ricalcoli: ${_currentSession!.rerouteCount}');
+      }
     } catch (e) {
       // Gestisce eccezioni non previste (parsing, rete, ecc.)
       print('❌ Eccezione durante il ricalcolo: $e');
@@ -1705,5 +1761,23 @@ class NavigationMonitor {
       // (nessun nuovo ricalcolo verrebbe mai avviato).
       _isRerouting = false;
     }
+  }
+
+  /// Registra un overlay emesso nella sessione corrente.
+  ///
+  /// Viene chiamato ogni volta che il NavigationMonitor emette un overlay
+  /// (svolta, strada laterale, arrivo). La registrazione include il tipo,
+  /// il messaggio, e il timestamp.
+  void _recordOverlayEvent(NavigationOverlayState overlayState) {
+    if (_currentSession == null) {
+      print('⚠️ _recordOverlayEvent: _currentSession è NULL! Overlay perso: ${overlayState.type}');
+      return;
+    }
+    _currentSession!.overlays.add(OverlayRecord(
+      type: overlayState.type.name,
+      message: overlayState.message ?? '',
+      timestamp: DateTime.now().toIso8601String(),
+    ));
+    print('📋 _recordOverlayEvent: Overlay registrato! Totale: ${_currentSession!.overlays.length}');
   }
 }
