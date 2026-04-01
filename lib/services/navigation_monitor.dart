@@ -1003,8 +1003,10 @@ class NavigationMonitor {
         // Doppia verifica: controlliamo che la velocità istantanea sia ancora
         // bassa E che l'utente non si sia mosso di più di 4 metri.
         // 4 metri in 10 secondi = 0.4 m/s (1.4 km/h), palesemente in movimento.
-        if (_currentSpeed < kZeroSpeedThresholdKmH && distMoved <= 6.0) {
-          print(
+        //if (_currentSpeed < kZeroSpeedThresholdKmH && distMoved <= 6.0) {
+        if (_currentSpeed < kZeroSpeedThresholdKmH) {
+
+            print(
             '⏱️ OVERLAY DEBUG: Countdown ${kZeroSpeedDelayMs}ms SCADUTO — '
             'velocità: ${_currentSpeed.toStringAsFixed(1)} km/h, '
             'spostamento: ${distMoved.toStringAsFixed(1)}m. '
@@ -1175,12 +1177,20 @@ class NavigationMonitor {
         }
       }
 
+      // Fallback: se il bearing stabilizzato è null, usa quello raw del GPS
+      final double effectiveDirection = snapshotDirection ?? _rawBearing;
+
       if (snapshotDirection == null) {
-        print(
-          '❌ OVERLAY DEBUG: direction null — skip rilevamento strade laterali',
-        );
-        return;
+        print('⚠️ OVERLAY DEBUG: direction null — uso _rawBearing come fallback (${_rawBearing.toStringAsFixed(1)}°)');
       }
+
+      // questo sotto sostituito da quello sopra
+      // if (snapshotDirection == null) {
+       // print(
+         // '❌ OVERLAY DEBUG: direction null — skip rilevamento strade laterali',
+        //);
+        //return;
+      //}
 
       // =====================================================================
       // LIMITATORE CHIAMATE API (Anti-Spam se fermi dove non ci sono strade)
@@ -1198,8 +1208,10 @@ class NavigationMonitor {
       final lateralPoints = computeAllLateralPoints(
         snapshotLat,
         snapshotLng,
-        snapshotDirection,
+        effectiveDirection, // <-- Sostituito qui prima snapDirection
       );
+
+
 
       _lastApiCallTime = DateTime.now(); // Registra il momento della chiamata
       final snappedPoints = await _roadsService.findNearestRoads(lateralPoints);

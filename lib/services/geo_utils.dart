@@ -32,7 +32,7 @@ import 'dart:math';
 /// Valore consigliato: 3-5 km/h. Default: 4 km/h.
 /// - Sotto 3 km/h: troppi falsi negativi (si scarta bearing valido a passo d'uomo)
 /// - Sopra 5 km/h: troppi falsi positivi (si accetta bearing rumoroso)
-const double kSpeedThresholdKmH = 4.0;
+const double kSpeedThresholdKmH = 1.5; //prima era a 4
 
 /// Intervallo in secondi tra un campionamento e l'altro del bearing.
 ///
