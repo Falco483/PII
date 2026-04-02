@@ -13,29 +13,29 @@ La nostra applicazione è basata su Flutter. Il `NavigationScreen` funge da punt
 ```mermaid
 flowchart TD
     subgraph UI["User Interface (Widgets)"]
-        NS[NavigationScreen\nState Coordinator]
-        MW[MapWidget\nGoogle Maps UI]
-        SI[SearchInput\nGoogle Places Search]
-        DL[DirectionsList\nTurn-by-turn UI]
-        NO[NavigationOverlay\nAlerts & Status]
+        NS["NavigationScreen<br>State Coordinator"]
+        MW["MapWidget<br>Google Maps UI"]
+        SI["SearchInput<br>Google Places Search"]
+        DL["DirectionsList<br>Turn-by-turn UI"]
+        NO["NavigationOverlay<br>Alerts & Status"]
     end
 
     subgraph Logic["Business Logic (Services)"]
-        NM[NavigationMonitor\nGPS & Routing State]
-        NHS[NavigationHistoryService\nBack-Stack Manager]
-        SHS[SearchHistoryService\nRecent Searches]
-        GU[GeoUtils\nMath & Geometry]
+        NM["NavigationMonitor<br>GPS & Routing State"]
+        NHS["NavigationHistoryService<br>Back-Stack Manager"]
+        SHS["SearchHistoryService<br>Recent Searches"]
+        GU["GeoUtils<br>Math & Geometry"]
     end
 
     subgraph API["External Services APIs"]
-        DS[DirectionsService\nGoogle Routes API]
-        PS[PlacesService\nGoogle Places API]
-        RS[RoadsService\nGoogle Roads API]
+        DS["DirectionsService<br>Google Routes API"]
+        PS["PlacesService<br>Google Places API"]
+        RS["RoadsService<br>Google Roads API"]
     end
 
     subgraph Hardware["Device Sensors"]
-        GPS[GPS Stream\nGeolocator]
-        Compass[Magnetometer\nFlutterCompass]
+        GPS["GPS Stream<br>Geolocator"]
+        Compass["Magnetometer<br>FlutterCompass"]
     end
 
     %% Relazioni UI
@@ -58,7 +58,7 @@ flowchart TD
     NM -.->|Uses| GU
 
     %% Navigation Monitor notifica la UI
-    NM -.->|State Notifiers\nOverlay, Route, Step| NS
+    NM -.->|"State Notifiers<br>Overlay, Route, Step"| NS
 ```
 
 ---
@@ -76,40 +76,40 @@ flowchart TD
     classDef task fill:#dae8fc,stroke:#6c8ebf,stroke-width:1px
     classDef systemTask fill:#d5e8d4,stroke:#82b366,stroke-width:1px
 
-    Start(((Inizio\nAvvio App))) ::: startEvent
-    End(((Fine\nNavigazione))) ::: endEvent
+    Start(("Inizio<br>Avvio App")) ::: startEvent
+    End(("Fine<br>Navigazione")) ::: endEvent
 
     %% === Fase Preparazione ===
-    S_Search[L'utente inserisce una\ndestinazione nel SearchInput] ::: task
-    S_SelectPlace[L'utente seleziona un Luogo] ::: task
-    G_Directions{Visualizzazione\nPercorso?} ::: gateway
-    S_API_Routes[Directions API\nCalcola il percorso] ::: systemTask
-    S_RoutePreview[Mostra Anteprima Percorso\nsulla mappa] ::: task
+    S_Search["L'utente inserisce una<br>destinazione nel SearchInput"] ::: task
+    S_SelectPlace["L'utente seleziona un Luogo"] ::: task
+    G_Directions{"Visualizzazione<br>Percorso?"} ::: gateway
+    S_API_Routes["Directions API<br>Calcola il percorso"] ::: systemTask
+    S_RoutePreview["Mostra Anteprima Percorso<br>sulla mappa"] ::: task
 
     Start --> S_Search
     S_Search --> S_SelectPlace
     S_SelectPlace --> G_Directions
-    G_Directions -->|Utente fa tap su\n'Indicazioni'| S_API_Routes
+    G_Directions -->|"Utente fa tap su<br>'Indicazioni'"| S_API_Routes
     S_API_Routes --> S_RoutePreview
 
     %% === Fase Navigazione ===
-    G_StartNav{Utente preme\n'Avvia'?} ::: gateway
-    S_InitNav[Avvio Navigation Monitor\ne fix Camera GPS] ::: systemTask
+    G_StartNav{"Utente preme<br>'Avvia'?"} ::: gateway
+    S_InitNav["Avvio Navigation Monitor<br>e fix Camera GPS"] ::: systemTask
     
     S_RoutePreview --> G_StartNav
     G_StartNav -->|Sì| S_InitNav
 
     subgraph Navigation Loop [Ciclo di Aggiornamento GPS]
         direction TB
-        L_GPS[Ricezione Aggiornamento GPS\nPosizione, Velocità, Direzione] ::: systemTask
-        G_Arrival{Destinazione\nRaggiunta?} ::: gateway
-        S_Celebrate[Mostra Bottom Sheet di\nArrivo 'Sei Arrivato'] ::: task
+        L_GPS["Ricezione Aggiornamento GPS<br>Posizione, Velocità, Direzione"] ::: systemTask
+        G_Arrival{"Destinazione<br>Raggiunta?"} ::: gateway
+        S_Celebrate["Mostra Bottom Sheet di<br>Arrivo 'Sei Arrivato'"] ::: task
         
-        G_OffRoute{Sei Fuori\nPercorso?} ::: gateway
-        S_Reroute[Ricalcolo via Directions API] ::: systemTask
+        G_OffRoute{"Sei Fuori<br>Percorso?"} ::: gateway
+        S_Reroute["Ricalcolo via Directions API"] ::: systemTask
         
-        G_Speed{Velocità utente\nè Zero?} ::: gateway
-        S_LateralRoads[Analisi Strade Laterali\nvia Roads API] ::: systemTask
+        G_Speed{"Velocità utente<br>è Zero?"} ::: gateway
+        S_LateralRoads["Analisi Strade Laterali<br>via Roads API"] ::: systemTask
 
         L_GPS --> G_Arrival
         G_Arrival -->|No| G_OffRoute
@@ -119,9 +119,9 @@ flowchart TD
         S_Reroute --> G_Speed
         G_OffRoute -->|No| G_Speed
 
-        G_Speed -->|Sì + non in\nsvolta + timer timeout| S_LateralRoads
+        G_Speed -->|"Sì + non in<br>svolta + timer timeout"| S_LateralRoads
         S_LateralRoads --> WaitNextCycle
-        G_Speed -->|No/In Movimento| WaitNextCycle[Attesa prosimo Tick GPS] ::: systemTask
+        G_Speed -->|No/In Movimento| WaitNextCycle["Attesa prosimo Tick GPS"] ::: systemTask
         WaitNextCycle -.-> L_GPS
     end
 
