@@ -50,7 +50,7 @@ import 'directions_service.dart';
 ///   Mostra un messaggio di incoraggiamento ("Continua dritto, stai andando bene!").
 /// - [arrivalCelebration]: l'utente ha raggiunto la destinazione.
 ///   Mostra un messaggio di congratulazioni con festa.
-enum OverlayType { turnInstruction, lateralRoadDetected, arrivalCelebration }
+enum OverlayType { turnInstruction, lateralRoadDetected, arrivalCelebration, returnToRoute }
 
 /// Stato dell'overlay da mostrare sulla mappa.
 ///
@@ -276,6 +276,12 @@ class NavigationMonitor {
   /// Evita di lanciare ricalcoli concorrenti mentre il precedente è ancora
   /// in attesa di risposta dalla API.
   bool _isRerouting = false;
+
+  /// Timestamp fino al quale il controllo deviazione è bloccato.
+  /// Attivato quando l'utente sceglie "Torna al vecchio percorso":
+  /// per 15 secondi non si effettuano controlli off-route né chiamate API,
+  /// dando all'utente il tempo di manovrare per rientrare sul percorso.
+  DateTime? _returnToRouteLockUntil;
 
   /// Flag che indica se l'arrivo a destinazione è già stato emesso.
   ///
@@ -777,6 +783,7 @@ class NavigationMonitor {
     _originalDestination = null;
     _consecutiveOffRouteDetects = 0;
     _routeCheckTicks = 0;
+    _returnToRouteLockUntil = null;
 
     // Resetta lo stato di tracciamento degli Step
     _currentStepIndex = 0;
@@ -887,6 +894,16 @@ class NavigationMonitor {
 
     // Chiude il bottom sheet
     reroutePhaseNotifier.value = ReroutePhase.none;
+
+    // Attiva il lock di 15 secondi: blocca i controlli di deviazione
+    // e le chiamate API per dare all'utente tempo di tornare sul percorso.
+    _returnToRouteLockUntil = DateTime.now().add(const Duration(seconds: 15));
+
+    // Emette overlay arancione "Torna indietro"
+    overlayNotifier.value = NavigationOverlayState(
+      type: OverlayType.returnToRoute,
+      message: 'Torna indietro e riprendi il percorso!',
+    );
 
     print('✅ Percorso precedente ripristinato: ${_activeRoute!.totalDuration}');
   }
@@ -1445,6 +1462,16 @@ class NavigationMonitor {
     // secondo controllo. Il ricalcolo è asincrono e potrebbe richiedere
     // diversi secondi.
     if (_isRerouting) return;
+
+    // Se è attivo il lock "torna al percorso", saltiamo tutti i controlli.
+    // L'utente ha scelto di tornare al vecchio percorso e ha 15 secondi
+    // per manovrare senza che il sistema rilevi nuove deviazioni.
+    if (_returnToRouteLockUntil != null) {
+      if (DateTime.now().isBefore(_returnToRouteLockUntil!)) {
+        return;
+      }
+      _returnToRouteLockUntil = null; // Lock scaduto, pulizia
+    }
 
     // Cattura uno snapshot delle coordinate ATTUALI.
     // Questo è importante per coerenza: durante il controllo (che potrebbe

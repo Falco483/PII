@@ -143,7 +143,8 @@ class _NavigationOverlayState extends State<NavigationOverlay>
     // il percorso e merita di godersi il messaggio di congratulazioni.
     // Gli altri overlay usano il timer standard (8 secondi).
     final int dismissSeconds =
-        widget.state?.type == OverlayType.arrivalCelebration
+        (widget.state?.type == OverlayType.arrivalCelebration ||
+         widget.state?.type == OverlayType.returnToRoute)
             ? 15
             : kOverlayAutoDismissSeconds;
 
@@ -240,6 +241,10 @@ class _NavigationOverlayState extends State<NavigationOverlay>
       case OverlayType.arrivalCelebration:
         backgroundColor = Colors.orange.shade800;
         icon = Icons.emoji_events;
+        break;
+      case OverlayType.returnToRoute:
+        backgroundColor = Colors.orange.shade800;
+        icon = Icons.u_turn_left;
         break;
     }
 
