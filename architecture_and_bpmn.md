@@ -67,67 +67,79 @@ flowchart TD
 
 Il diagramma sottostante modella l'interazione utente e la logica interna del `NavigationMonitor` (il ciclo di navigazione) utilizzando le convenzioni visive del BPMN (Cerchi per Inizio/Fine, Rettangoli per Attività, Rombi per i Decision Gateways).
 
+
 ```mermaid
-flowchart TD
-    %% Styling per nodi BPMN simulati
-    classDef startEvent fill:#8f8,stroke:#333,stroke-width:2px,shape:circle
-    classDef endEvent fill:#f88,stroke:#333,stroke-width:4px,shape:circle
-    classDef gateway fill:#fd8,stroke:#333,stroke-width:2px,shape:diamond
-    classDef task fill:#dae8fc,stroke:#6c8ebf,stroke-width:1px
-    classDef systemTask fill:#d5e8d4,stroke:#82b366,stroke-width:1px
 
-    Start(("Inizio<br>Avvio App")) ::: startEvent
-    End(("Fine<br>Navigazione")) ::: endEvent
+flowchart LR
 
-    %% === Fase Preparazione ===
-    S_Search["L'utente inserisce una<br>destinazione nel SearchInput"] ::: task
-    S_SelectPlace["L'utente seleziona un Luogo"] ::: task
-    G_Directions{"Visualizzazione<br>Percorso?"} ::: gateway
-    S_API_Routes["Directions API<br>Calcola il percorso"] ::: systemTask
-    S_RoutePreview["Mostra Anteprima Percorso<br>sulla mappa"] ::: task
+%% ===== STILI =====
+classDef startEvent fill:#8f8,stroke:#333,stroke-width:2px
+classDef endEvent fill:#f88,stroke:#333,stroke-width:3px
+classDef userTask fill:#dae8fc,stroke:#6c8ebf
+classDef serviceTask fill:#d5e8d4,stroke:#82b366
+classDef gateway fill:#ffe599,stroke:#333,stroke-width:2px
 
-    Start --> S_Search
-    S_Search --> S_SelectPlace
-    S_SelectPlace --> G_Directions
-    G_Directions -->|"Utente fa tap su<br>'Indicazioni'"| S_API_Routes
-    S_API_Routes --> S_RoutePreview
-
-    %% === Fase Navigazione ===
-    G_StartNav{"Utente preme<br>'Avvia'?"} ::: gateway
-    S_InitNav["Avvio Navigation Monitor<br>e fix Camera GPS"] ::: systemTask
+%% ===== LANE UTENTE =====
+subgraph U [Utente]
+    Start(("Start")):::startEvent
     
-    S_RoutePreview --> G_StartNav
-    G_StartNav -->|Sì| S_InitNav
+    U_Search["Inserisce destinazione"]:::userTask
+    U_Select["Seleziona luogo"]:::userTask
+    U_RequestDir["Richiede indicazioni"]:::userTask
+    U_StartNav["Preme 'Avvia Navigazione'"]:::userTask
+    
+    U_Search --> U_Select --> U_RequestDir
+end
 
-    subgraph Navigation Loop [Ciclo di Aggiornamento GPS]
-        direction TB
-        L_GPS["Ricezione Aggiornamento GPS<br>Posizione, Velocità, Direzione"] ::: systemTask
-        G_Arrival{"Destinazione<br>Raggiunta?"} ::: gateway
-        S_Celebrate["Mostra Bottom Sheet di<br>Arrivo 'Sei Arrivato'"] ::: task
-        
-        G_OffRoute{"Sei Fuori<br>Percorso?"} ::: gateway
-        S_Reroute["Ricalcolo via Directions API"] ::: systemTask
-        
-        G_Speed{"Velocità utente<br>è Zero?"} ::: gateway
-        S_LateralRoads["Analisi Strade Laterali<br>via Roads API"] ::: systemTask
+%% ===== LANE SISTEMA =====
+subgraph S [Sistema]
+    S_CalcRoute["Calcolo percorso<br>(Directions API)"]:::serviceTask
+    S_ShowPreview["Mostra anteprima percorso"]:::serviceTask
+    
+    G_StartNav{"Avviare<br>navigazione?"}:::gateway
+    
+    S_InitNav["Inizializza monitor GPS<br>+ camera"]:::serviceTask
+    
+    %% LOOP NAVIGAZIONE
+    G_Arrival{"Arrivato?"}:::gateway
+    G_OffRoute{"Fuori percorso?"}:::gateway
+    G_Speed{"Velocità = 0?"}:::gateway
+    
+    S_Reroute["Ricalcolo percorso"]:::serviceTask
+    S_Lateral["Analisi strade laterali"]:::serviceTask
+    
+    S_Update["Aggiornamento GPS"]:::serviceTask
+    
+    S_Arrived["Mostra 'Sei arrivato'"]:::serviceTask
+    End(("End")):::endEvent
+end
 
-        L_GPS --> G_Arrival
-        G_Arrival -->|No| G_OffRoute
-        G_Arrival -->|Sì| S_Celebrate
+%% ===== FLOW CROSS-LANE =====
+U_RequestDir --> S_CalcRoute
+S_CalcRoute --> S_ShowPreview
 
-        G_OffRoute -->|Sì| S_Reroute
-        S_Reroute --> G_Speed
-        G_OffRoute -->|No| G_Speed
+S_ShowPreview --> G_StartNav
+U_StartNav --> G_StartNav
 
-        G_Speed -->|"Sì + non in<br>svolta + timer timeout"| S_LateralRoads
-        S_LateralRoads --> WaitNextCycle
-        G_Speed -->|No/In Movimento| WaitNextCycle["Attesa prosimo Tick GPS"] ::: systemTask
-        WaitNextCycle -.-> L_GPS
-    end
+G_StartNav -->|Sì| S_InitNav
 
-    S_InitNav --> L_GPS
-    S_Celebrate --> End
+%% ===== LOOP =====
+S_InitNav --> S_Update
+S_Update --> G_Arrival
+
+G_Arrival -->|Sì| S_Arrived
+S_Arrived --> End
+
+G_Arrival -->|No| G_OffRoute
+
+G_OffRoute -->|Sì| S_Reroute --> G_Speed
+G_OffRoute -->|No| G_Speed
+
+G_Speed -->|Sì| S_Lateral --> S_Update
+G_Speed -->|No| S_Update
+
 ```
+
 
 ### Spiegazione dei Flussi
 
