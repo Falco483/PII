@@ -1,0 +1,102 @@
+@startuml
+title Class Diagram - Navigation System
+
+package "UI Models & Components" {
+    enum NavigationAppState {
+        search
+        placeSelected
+        routePreview
+        navigating
+    }
+    
+    class NavigationScreen {
+        - _appState: NavigationAppState
+        - _isNavigating: bool
+        - _isArrived: bool
+        - _navigationMonitor: NavigationMonitor
+        - _directionsService: DirectionsService
+        - _placesService: PlacesService
+        - _searchHistoryService: SearchHistoryService
+        + initState()
+        + dispose()
+        - _initLocationMonitoring()
+        - _startRouteChangedAnimation()
+    }
+
+    class MapWidget {
+        - mapController: GoogleMapController
+        - markers: Set<Marker>
+        - polylines: Set<Polyline>
+        + followUser(lat, lng, bearing)
+        + fitAllPoints()
+    }
+    
+    class SearchInput {
+        + controller: TextEditingController
+        + onDrawRoute: Function
+        + onPlaceSelected: Function
+    }
+    
+    class NavigationOverlay {
+        + overlayState: NavigationOverlayState
+    }
+}
+
+package "Services (Business Logic)" {
+    class NavigationMonitor {
+        - _direction: double?
+        - _currentSpeed: double
+        - _activeRoute: RouteData?
+        - _isNavigating: bool
+        + overlayNotifier: ValueNotifier<NavigationOverlayState?>
+        + activeRouteNotifier: ValueNotifier<RouteData?>
+        + currentStepNotifier: ValueNotifier<int>
+        + reroutePhaseNotifier: ValueNotifier<ReroutePhase>
+        + updatePosition(lat, lng, speed, bearing, accuracy)
+        + startNavigation(routes, dest)
+        + stopNavigation()
+        - _executeAnalysis()
+        - _onRouteCheckTick()
+    }
+    
+    class DirectionsService {
+        + computeAllRoutes(origin, dest): Future<AllRoutesResult>
+    }
+    
+    class PlacesService {
+        + getAutocomplete(query): Future<List>
+        + getPlaceDetails(placeId): Future<PlaceDetails>
+        + reverseGeocode(lat, lng): Future<String>
+    }
+    
+    class RoadsService {
+        + findNearestRoads(points): Future<List>
+    }
+    
+    class NavigationHistoryService {
+        + pushState(state)
+        + popState()
+    }
+    
+    class GeoUtils {
+        <<static>>
+        + distanceBetween(lat1, lon1, lat2, lon2): double
+        + calculateBearing(lat1, lon1, lat2, lon2): double
+        + computeLateralPoints(...)
+    }
+}
+
+NavigationScreen *-- NavigationMonitor
+NavigationScreen *-- DirectionsService
+NavigationScreen *-- PlacesService
+NavigationScreen *-- SearchHistoryService
+
+NavigationMonitor --> RoadsService
+NavigationMonitor --> DirectionsService
+NavigationMonitor ..> GeoUtils
+
+NavigationScreen ..> MapWidget
+NavigationScreen ..> SearchInput
+NavigationScreen ..> NavigationOverlay
+
+@enduml

@@ -1,0 +1,43 @@
+@startuml
+title Architecture Block Diagram
+
+package "User Interface (UI)" {
+  [NavigationScreen]
+  [MapWidget]
+  [SearchInput]
+  [DirectionsList]
+  [NavigationOverlay]
+}
+
+package "Business Logic (Services)" {
+  [NavigationMonitor]
+  [NavigationHistoryService]
+  [GeoUtils]
+}
+
+package "External Services / APIs" {
+  [DirectionsService]
+  [PlacesService]
+  [RoadsService]
+}
+
+package "Sensors" {
+  [Geolocator Platform]
+  [Compass Platform]
+}
+
+[NavigationScreen] --> [MapWidget]
+[NavigationScreen] --> [SearchInput]
+[NavigationScreen] --> [DirectionsList]
+[NavigationScreen] --> [NavigationOverlay]
+
+[NavigationScreen] --> [NavigationMonitor] : "Listens & Updates"
+[NavigationScreen] --> [NavigationHistoryService] : "State Mgmt"
+
+[NavigationMonitor] --> [RoadsService] : "Analyze laterals"
+[NavigationMonitor] --> [DirectionsService] : "Off-route Check"
+[SearchInput] --> [PlacesService] : "Autocomplete & Geocode"
+
+[Geolocator Platform] --> [NavigationScreen] : "Stream"
+[Compass Platform] --> [NavigationScreen] : "Stream"
+@enduml

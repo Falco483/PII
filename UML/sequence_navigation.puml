@@ -1,0 +1,56 @@
+@startuml
+title Sequence Diagram - Navigation Flow
+
+actor User
+participant "GPS Sensor" as GPS
+
+box "UI"
+participant NavigationScreen
+end box
+
+box "Services"
+participant NavigationMonitor
+participant DirectionsService
+participant RoadsService
+end box
+
+User -> NavigationScreen: Selects Place & Taps "Directions"
+NavigationScreen -> DirectionsService: computeAllRoutes()
+DirectionsService --> NavigationScreen: return AllRoutesResult
+NavigationScreen -> NavigationScreen: Update State (RoutePreview)
+
+User -> NavigationScreen: Taps "Start"
+NavigationScreen -> NavigationMonitor: startNavigation(routes)
+NavigationMonitor -> NavigationMonitor: start _routeCheckTimer
+
+loop Every GPS Update
+    GPS -> NavigationScreen: Location (lat, lng, speed, accuracy)
+    NavigationScreen -> NavigationMonitor: updatePosition()
+    
+    alt If speed < 1 km/h for 10s
+        NavigationMonitor -> RoadsService: findNearestRoads(lateral points)
+        RoadsService --> NavigationMonitor: snaps
+        NavigationMonitor -> NavigationMonitor: overlayNotifier.value = LateralRoadDetected
+        NavigationMonitor --> NavigationScreen: Trigger UI Overlay
+    end
+end
+
+loop Every 2s (Route Check Timer)
+    NavigationMonitor -> NavigationMonitor: Check if off-route
+    alt If off-route > threshold
+        NavigationMonitor -> NavigationMonitor: reroutePhase = offRoute
+        NavigationMonitor -> DirectionsService: computeAllRoutes (Current to Dest)
+        DirectionsService --> NavigationMonitor: New Route
+        NavigationMonitor -> NavigationMonitor: activeRouteNotifier.value = New Route
+        NavigationMonitor --> NavigationScreen: Show Reroute UI
+    end
+    
+    alt If distanceToDest < 20m for 3 consecutive ticks
+        NavigationMonitor -> NavigationMonitor: overlayNotifier.value = ArrivalCelebration
+        NavigationMonitor --> NavigationScreen: Show Arrival BottomSheet
+    end
+end
+
+User -> NavigationScreen: Taps "End Navigation"
+NavigationScreen -> NavigationMonitor: stopNavigation()
+@enduml

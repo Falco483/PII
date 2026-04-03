@@ -1,0 +1,12 @@
+@startuml
+
+class NavigationMonitor
+class GPSService
+class DirectionsService
+class NavigationOverlay
+
+NavigationMonitor --> GPSService
+NavigationMonitor --> DirectionsService
+NavigationMonitor --> NavigationOverlay
+
+@enduml

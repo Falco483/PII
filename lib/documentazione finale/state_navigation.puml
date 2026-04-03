@@ -1,0 +1,30 @@
+@startuml
+title State Machine - Navigation App States
+hide empty description
+
+[*] --> Idle
+
+state Idle {
+  [*] --> Search
+  Search --> PlaceSelected : User taps result
+  PlaceSelected --> Search : Back/Cancel
+}
+
+state "Route Preview" as RoutePreview
+PlaceSelected --> RoutePreview : User requests directions
+
+state Navigating {
+  state "On Route" as OnRoute
+  state "Rerouting (API)" as Rerouting
+  
+  OnRoute --> Rerouting : Deviation detected > tolerances
+  Rerouting --> OnRoute : New route applied
+}
+
+RoutePreview --> Navigating : Start Navigation
+Navigating --> Idle : User stops
+
+state Arrived
+Navigating --> Arrived : Dest reached
+Arrived --> Idle : Dismiss 
+@enduml
