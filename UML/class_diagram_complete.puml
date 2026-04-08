@@ -1,0 +1,280 @@
+@startuml
+title Complete Class Diagram - Flutter Navigation App
+
+package "App Core" {
+    class NavigationApp {
+        + build(BuildContext context)
+    }
+}
+
+package "Models" {
+    class SearchHistoryItem {
+        + address: String
+        + lat: double
+        + lng: double
+        + timestamp: int
+        + toMap(): Map<String, dynamic>
+        + {static} fromMap(Map<String, dynamic>): SearchHistoryItem
+    }
+    
+    class PlacePrediction {
+        + placeId: String
+        + mainText: String
+        + secondaryText: String
+        + description: String
+    }
+    
+    class PlaceDetails {
+        + placeId: String
+        + name: String
+        + lat: double
+        + lng: double
+        + address: String
+    }
+    
+    class DirectionStep {
+        + startLat: double
+        + startLng: double
+        + endLat: double
+        + endLng: double
+        + distanceMetters: int
+        + durationSeconds: int
+        + maneuver: String
+        + polyline: String
+        + htmlInstructions: String
+        + instruction: String
+    }
+    
+    class Bounds {
+        + neLat: double
+        + neLng: double
+        + swLat: double
+        + swLng: double
+    }
+    
+    class RouteData {
+        + steps: List<DirectionStep>
+        + totalDistance: String
+        + totalDuration: String
+        + durationSeconds: int
+        + encodedPolyline: String
+        + bounds: Bounds
+    }
+    
+    class AllRoutesResult {
+        + originLat: double
+        + originLng: double
+        + destLat: double
+        + destLng: double
+        + bestRoute: RouteData
+        + allRoutes: List<RouteData>
+    }
+    
+    class DirectionsResult {
+        + steps: List<DirectionStep>
+        + totalDistance: String
+        + totalDuration: String
+        + encodedPolyline: String
+        + originLat: double
+        + originLng: double
+        + destLat: double
+        + destLng: double
+    }
+    
+    class SnapToRoadResult {
+        + originalLat: double
+        + originalLng: double
+        + snappedLat: double
+        + snappedLng: double
+        + placeId: String
+    }
+    
+    class NavigationHistoryItem<T> {
+        + state: T
+        + timestamp: DateTime
+    }
+}
+
+package "Services" {
+    class DirectionsService {
+        + {static} calculateInitialBoundingBox(...)
+        + computeAllRoutes(origin, destination, travelMode): Future<AllRoutesResult>
+    }
+    
+    class PlacesService {
+        + getAutocomplete(query): Future<List<PlacePrediction>>
+        + getPlaceDetails(placeId): Future<PlaceDetails>
+        + reverseGeocode(lat, lng): Future<String>
+    }
+    
+    class RoadsService {
+        + findNearestRoads(points): Future<List<SnapToRoadResult>>
+    }
+    
+    class SearchHistoryService {
+        + loadHistory(): Future<List<SearchHistoryItem>>
+        + saveSearch(address, lat, lng): Future<void>
+        + clearHistory(): Future<void>
+    }
+    
+    class NavigationHistoryService<T> {
+        - _history: List<NavigationHistoryItem<T>>
+        + get current: T?
+        + get canPop: bool
+        + pushState(state: T)
+        + popState(): T?
+        + clearToRoot(initialState: T)
+    }
+    
+    class GeoUtils {
+        + {static} distanceBetween(lat1, lon1, lat2, lon2): double
+        + {static} haversineDistance(...)
+        + {static} calculateBearing(...)
+        + {static} computeLateralPoints(...)
+        + {static} calculateCrossTrackDistance(...)
+        + {static} isPointOnSegment(...)
+        + {static} interpolatePoint(...)
+    }
+
+    enum OverlayType {
+        turnInstruction
+        lateralRoadDetected
+        arrivalCelebration
+        returnToRoute
+    }
+
+    enum ReroutePhase {
+        none
+        offRoute
+        rerouting
+        routeChanged
+    }
+
+    class NavigationOverlayState {
+        + type: OverlayType
+        + message: String
+        + maneuver: String?
+    }
+
+    class NavigationMonitor {
+        - _direction: double?
+        - _currentLat: double?
+        - _currentLng: double?
+        - _currentSpeed: double
+        - _rawBearing: double
+        - _activeRoute: RouteData?
+        - _alternativeRoutes: List<RouteData>
+        - _isNavigating: bool
+        - _zeroSpeedTimer: Timer?
+        - _routeCheckTimer: Timer?
+        + overlayNotifier: ValueNotifier<NavigationOverlayState?>
+        + activeRouteNotifier: ValueNotifier<RouteData?>
+        + currentStepNotifier: ValueNotifier<int>
+        + reroutePhaseNotifier: ValueNotifier<ReroutePhase>
+        + updatePosition(lat, lng, speed, rawBearing, accuracy)
+        + startNavigation(routesResult, destinationCoords)
+        + stopNavigation()
+        + confirmNewRoute()
+        + restorePreviousRoute()
+        - _executeAnalysis()
+        - _onRouteCheckTick()
+        - _checkAlternativeRoutes()
+        - _recalculateRouteAPI()
+    }
+}
+
+package "UI / Screens" {
+    enum NavigationAppState {
+        search
+        placeSelected
+        routePreview
+        navigating
+    }
+
+    class NavigationScreen {
+        - _appState: NavigationAppState
+        - _isFollowingUser: bool
+        - _isReviewingWalkedPath: bool
+        - _isArrived: bool
+        - _currentSpeed: double
+        - _compassHeading: double
+        + initState()
+        + dispose()
+        - _initLocationMonitoring()
+        - _initCompass()
+        - _startRouteChangedAnimation()
+        - _startArrivalAnimation()
+    }
+}
+
+package "UI / Widgets" {
+    class MapWidget {
+        + directionsResult: DirectionsResult?
+        + activeRoute: RouteData?
+        + userLat: double?
+        + userLng: double?
+        + userBearing: double?
+        + isFollowingUser: bool
+        + currentStepIndex: int
+        + walkedPath: List<LatLng>?
+        + followUser(lat, lng, bearing)
+        + fitAllPoints()
+    }
+    
+    class SearchInput {
+        + controller: TextEditingController
+        + focusNode: FocusNode
+        + recentSearches: List<SearchHistoryItem>
+        + onPlaceSelected(lat, lng, address)
+        + onDrawRoute()
+        + onCrossTap()
+    }
+    
+    class DirectionsList {
+        + directionsResult: DirectionsResult?
+        + activeRoute: RouteData?
+        + currentStepIndex: int
+        + onClose()
+    }
+    
+    class NavigationOverlay {
+        + overlayState: NavigationOverlayState?
+        + onClose()
+    }
+}
+
+NavigationScreen *-- NavigationMonitor
+NavigationScreen *-- DirectionsService
+NavigationScreen *-- PlacesService
+NavigationScreen *-- SearchHistoryService
+NavigationScreen *-- NavigationHistoryService
+NavigationScreen --> NavigationAppState
+
+NavigationMonitor --> RoadsService
+NavigationMonitor --> DirectionsService
+NavigationMonitor ..> GeoUtils
+NavigationMonitor --> RouteData
+NavigationMonitor --> DirectionStep
+NavigationMonitor --> NavigationOverlayState
+NavigationMonitor --> ReroutePhase
+
+DirectionsService ..> AllRoutesResult
+DirectionsService ..> DirectionsResult
+PlacesService ..> PlacePrediction
+PlacesService ..> PlaceDetails
+RoadsService ..> SnapToRoadResult
+SearchHistoryService ..> SearchHistoryItem
+NavigationHistoryService ..> NavigationHistoryItem
+
+AllRoutesResult *-- RouteData
+RouteData *-- DirectionStep
+RouteData *-- Bounds
+DirectionsResult *-- DirectionStep
+NavigationOverlayState --> OverlayType
+
+NavigationScreen ..> MapWidget : renders
+NavigationScreen ..> SearchInput : renders
+NavigationScreen ..> DirectionsList : renders
+NavigationScreen ..> NavigationOverlay : renders
+
+@enduml

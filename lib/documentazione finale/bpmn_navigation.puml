@@ -1,0 +1,46 @@
+@startuml
+title BPMN Navigation Process
+
+|Utente|
+start
+:Inserisce destinazione;
+:Seleziona luogo da dropdown;
+:Richiede percorso (Tap 'Indicazioni');
+
+|Sistema|
+:Chiama DirectionsService (API);
+:Elabora AllRoutesResult;
+:Mostra anteprima sulla mappa;
+
+|Utente|
+:Verifica percorso;
+:Preme 'Avvia Navigatione';
+
+|Sistema|
+:Inizializza NavigationMonitor;
+:Camera GPS in assetto;
+
+repeat :Ricezione Aggiornamento GPS;
+    |Sistema|
+    if (Distanza destinazione < 20m per 3 sec?) then (Sì)
+        :Mostra 'Sei arrivato!';
+        stop
+    else (No)
+        if (Utente fuori percorso?) then (Sì)
+            :Chiama DirectionsService (Ricalcolo API);
+            :Aggiorna activeRoute;
+            :Mostra banner UI Ricalcolo;
+        else (No)
+            if (Velocità < 1 km/h per 10s?) then (Sì)
+                :Chiama RoadsService;
+                :Aggiorna UI (LateralRoadDetected);
+            else (No)
+                :Continua monitoraggio;
+            endif
+        endif
+    endif
+
+repeat while (Navigazione Attiva?) is (Sì)
+
+stop
+@enduml

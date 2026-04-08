@@ -30,7 +30,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/search_history_item.dart';
 import '../services/places_service.dart';
-import '../services/search_history_service.dart';
 
 /// Widget per la ricerca della destinazione con autocomplete
 class SearchInput extends StatefulWidget {
@@ -48,12 +47,22 @@ class SearchInput extends StatefulWidget {
   /// Mentre il percorso è in fase di calcolo, il widget viene disabilitato.
   final bool isLoading;
 
-  /// Costruttore — tutti i parametri tranne isLoading sono obbligatori.
+  /// Nodo di focus per il campo di testo.
+  /// Gestito dal parent per sapere quando la barra di ricerca è attiva.
+  final FocusNode focusNode;
+
+  /// Ultime ricerche recenti (massimo 3) da mostrare quando il campo è vuoto.
+  /// Passate dalla NavigationScreen che le carica dal SearchHistoryService.
+  final List<SearchHistoryItem> recentSearches;
+
+  /// Costruttore — tutti i parametri tranne isLoading e recentSearches sono obbligatori.
   const SearchInput({
     super.key,
     required this.destinationController,
     required this.onDestinationSelected,
+    required this.focusNode,
     this.isLoading = false,
+    this.recentSearches = const [],
   });
 
   @override
@@ -93,12 +102,6 @@ class _SearchInputState extends State<SearchInput> {
   /// Istanza del servizio Places API per le chiamate autocomplete e details
   final PlacesService _placesService = PlacesService();
 
-  /// Servizio per il caricamento della cronologia locale.
-  final SearchHistoryService _searchHistoryService = SearchHistoryService();
-
-  /// Focus node per mostrare la cronologia appena il campo riceve focus.
-  final FocusNode _searchFocusNode = FocusNode();
-
   /// Session token corrente per raggruppare le chiamate API.
   ///
   /// Viene generato alla prima digitazione dell'utente e riutilizzato
@@ -124,17 +127,10 @@ class _SearchInputState extends State<SearchInput> {
   /// richieste per "D", "Du", "Duo".
   Timer? _debounceTimer;
 
-  /// Lista suggerimenti da API Places.
-  List<PlaceSuggestion> _apiSuggestions = [];
-
-  /// Lista cronologia completa caricata da storage.
-  List<SearchHistoryItem> _historySuggestions = [];
-
-  /// Lista cronologia filtrata sul testo corrente.
-  List<SearchHistoryItem> _filteredHistorySuggestions = [];
-
-  /// Sorgente attuale dei suggerimenti mostrati nella UI.
-  _SuggestionSource _visibleSource = _SuggestionSource.none;
+  /// Lista dei suggerimenti ricevuti dall'API Autocomplete.
+  /// Vuota = nessun suggerimento da mostrare.
+  /// Quando l'utente seleziona un suggerimento, la lista viene svuotata.
+  List<PlaceSuggestion> _suggestions = [];
 
   /// Flag di caricamento per l'autocomplete (diverso da widget.isLoading
   /// che è per il calcolo del percorso).
@@ -147,7 +143,16 @@ class _SearchInputState extends State<SearchInput> {
   @override
   void initState() {
     super.initState();
-    _searchFocusNode.addListener(_onFocusChanged);
+    // Ascolta i cambiamenti di focus per mostrare/nascondere la cronologia
+    widget.focusNode.addListener(() {
+      if (mounted) {
+        // Quando perde il focus chiudiamo anche eventuali suggerimenti rimasti aperti
+        if (!widget.focusNode.hasFocus) {
+          _suggestions = [];
+        }
+        setState(() {}); // Ricostruisce per aggiornare la visibilità della history
+      }
+    });
   }
 
   @override
@@ -157,24 +162,9 @@ class _SearchInputState extends State<SearchInput> {
     // il callback del timer tenterà di chiamare setState() su un widget
     // non più montato, causando un errore.
     _debounceTimer?.cancel();
-    _searchFocusNode.removeListener(_onFocusChanged);
-    _searchFocusNode.dispose();
 
     // Chiama il dispose del parent (StatefulWidget)
     super.dispose();
-  }
-
-  void _onFocusChanged() {
-    if (_searchFocusNode.hasFocus) {
-      _loadHistoryAndShow(widget.destinationController.text);
-    } else {
-      _debounceTimer?.cancel();
-      if (!mounted) return;
-      setState(() {
-        _visibleSource = _SuggestionSource.none;
-        _isLoadingSuggestions = false;
-      });
-    }
   }
 
   // ===========================================================================
@@ -193,15 +183,16 @@ class _SearchInputState extends State<SearchInput> {
     // lo cancelliamo per ricominciare il conteggio da zero.
     _debounceTimer?.cancel();
 
-    // Mostra cronologia quando l'input e' vuoto.
-    if (value.isEmpty) {
-      _loadHistoryAndShow(value);
-      return;
-    }
-
-    // Sotto soglia API: usa sempre suggerimenti da cronologia filtrata.
+    // --- STEP 2: Controlla il numero minimo di caratteri ---
+    // Se il testo è troppo corto, non inviamo nessuna richiesta.
+    // Svuotiamo anche la lista dei suggerimenti perché eventuali risultati
+    // precedenti non sono più pertinenti per un input così corto.
     if (value.length < _minInputLength) {
-      _showHistoryForInput(value);
+      // Svuota i suggerimenti se il testo è troppo corto
+      setState(() {
+        _suggestions = [];
+      });
+      // Non creiamo nessun timer: non c'è nulla da cercare
       return;
     }
 
@@ -259,76 +250,11 @@ class _SearchInputState extends State<SearchInput> {
     // Tra la chiamata API e la risposta, l'utente potrebbe aver navigato
     // via dalla schermata, e setState() su un widget non montato è un errore.
     if (mounted) {
-      if (widget.destinationController.text != input) {
-        // Risposta obsoleta: ignora per evitare overwrite della UI corrente.
-        setState(() {
-          _isLoadingSuggestions = false;
-        });
-        return;
-      }
-
       setState(() {
+        _suggestions = suggestions;
         _isLoadingSuggestions = false;
-        if (suggestions.isNotEmpty) {
-          _apiSuggestions = suggestions;
-          _visibleSource = _SuggestionSource.api;
-        } else {
-          _showHistoryForInput(input);
-        }
       });
     }
-  }
-
-  Future<void> _loadHistoryAndShow(String input) async {
-    final history = await _searchHistoryService.loadHistory();
-    if (!mounted) return;
-
-    final filtered = _filterHistory(history, input);
-    setState(() {
-      _historySuggestions = history;
-      _filteredHistorySuggestions = filtered;
-      _apiSuggestions = [];
-      _visibleSource = _searchFocusNode.hasFocus && filtered.isNotEmpty
-          ? _SuggestionSource.history
-          : _SuggestionSource.none;
-      _isLoadingSuggestions = false;
-    });
-  }
-
-  void _showHistoryForInput(String input) {
-    final filtered = _filterHistory(_historySuggestions, input);
-    setState(() {
-      _filteredHistorySuggestions = filtered;
-      _apiSuggestions = [];
-      _visibleSource = _searchFocusNode.hasFocus && filtered.isNotEmpty
-          ? _SuggestionSource.history
-          : _SuggestionSource.none;
-      _isLoadingSuggestions = false;
-    });
-  }
-
-  Future<void> _clearHistorySuggestions() async {
-    await _searchHistoryService.clearHistory();
-
-    if (!mounted) return;
-
-    // Dopo la pulizia ricarichiamo per sincronizzare lista e UI.
-    await _loadHistoryAndShow(widget.destinationController.text);
-  }
-
-  List<SearchHistoryItem> _filterHistory(
-    List<SearchHistoryItem> history,
-    String input,
-  ) {
-    final normalized = input.trim().toLowerCase();
-    final filtered = normalized.isEmpty
-        ? List<SearchHistoryItem>.from(history)
-        : history
-              .where((item) => item.address.toLowerCase().contains(normalized))
-              .toList();
-
-    filtered.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    return filtered;
   }
 
   /// Gestisce la selezione di un suggerimento dall'elenco.
@@ -349,8 +275,7 @@ class _SearchInputState extends State<SearchInput> {
     setState(() {
       _isLoadingSuggestions = true;
       // Chiude immediatamente la lista dei suggerimenti per feedback visivo
-      _apiSuggestions = [];
-      _visibleSource = _SuggestionSource.none;
+      _suggestions = [];
     });
 
     // Imposta il testo del campo con la descrizione del luogo selezionato.
@@ -396,33 +321,6 @@ class _SearchInputState extends State<SearchInput> {
     }
   }
 
-  void _onHistorySuggestionSelected(SearchHistoryItem historyItem) {
-    widget.destinationController.text = historyItem.address;
-
-    _hasActiveSession = false;
-    setState(() {
-      _visibleSource = _SuggestionSource.none;
-      _apiSuggestions = [];
-      _filteredHistorySuggestions = [];
-    });
-
-    widget.onDestinationSelected(
-      historyItem.lat,
-      historyItem.lng,
-      historyItem.address,
-    );
-  }
-
-  bool get _hasVisibleSuggestions {
-    if (_visibleSource == _SuggestionSource.api) {
-      return _apiSuggestions.isNotEmpty;
-    }
-    if (_visibleSource == _SuggestionSource.history) {
-      return _filteredHistorySuggestions.isNotEmpty;
-    }
-    return false;
-  }
-
   // ===========================================================================
   // BUILD UI
   // ===========================================================================
@@ -448,11 +346,11 @@ class _SearchInputState extends State<SearchInput> {
         // La colonna si adatta alla dimensione dei figli
         mainAxisSize: MainAxisSize.min,
         children: [
-          // --- TITOLO ---
+          // --- TITOLO --- Amichevole per ragazzi con disabilità cognitive
           Text(
-            'Cerca Destinazione',
+            'Dove vuoi andare?',
             style: TextStyle(
-              fontSize: 18,
+              fontSize: 20,
               fontWeight: FontWeight.bold,
               color: Colors.blue.shade800,
             ),
@@ -463,21 +361,23 @@ class _SearchInputState extends State<SearchInput> {
           // --- CAMPO DI TESTO DESTINAZIONE ---
           // Questo è il campo principale dove l'utente digita la destinazione.
           // Il callback onChanged attiva la logica di debounce + autocomplete.
-          TextField(
+          TextFormField(
             // Controller passato dal parent per leggere/scrivere il testo
             controller: widget.destinationController,
-            focusNode: _searchFocusNode,
-            // Tap fuori dalla barra: chiude tastiera e rimuove il cursore.
-            // I controlli avvolti in TextFieldTapRegion sono esclusi da questo evento.
-            onTapOutside: (_) => FocusScope.of(context).unfocus(),
+            focusNode: widget.focusNode,
+            enabled: !widget.isLoading, // Disabilita durante il calcolo
             // Callback chiamato ad ogni modifica del testo (ogni battitura)
             onChanged: _onTextChanged,
+            // Font grande per accessibilità
+            style: const TextStyle(fontSize: 18),
             // Decorazione del campo di testo
             decoration: InputDecoration(
               // Etichetta sopra il campo quando è attivo
               labelText: 'Destinazione',
+              labelStyle: const TextStyle(fontSize: 16),
               // Testo suggerimento quando il campo è vuoto
-              hintText: 'Cerca un indirizzo...',
+              hintText: 'Scrivi dove vuoi andare...',
+              hintStyle: TextStyle(fontSize: 16, color: Colors.grey.shade500),
               // Icona a sinistra del campo (pin rosso)
               prefixIcon: const Icon(Icons.place, color: Colors.red),
               // Icona a destra: mostra il caricamento se in corso,
@@ -500,8 +400,10 @@ class _SearchInputState extends State<SearchInput> {
                       onPressed: () {
                         // Svuota il campo di testo
                         widget.destinationController.clear();
-                        // Torna alla cronologia completa se il campo e' attivo.
-                        _loadHistoryAndShow('');
+                        // Svuota la lista dei suggerimenti
+                        setState(() {
+                          _suggestions = [];
+                        });
                       },
                     )
                   : null,
@@ -520,95 +422,91 @@ class _SearchInputState extends State<SearchInput> {
             ),
           ),
 
-          // Azione esplicita per svuotare la cronologia locale.
-          if (_historySuggestions.isNotEmpty && _hasVisibleSuggestions)
-            TextFieldTapRegion(
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: _clearHistorySuggestions,
-                  child: const Text('Cancella cronologia'),
-                ),
-              ),
-            ),
-
-          // --- LISTA SUGGERIMENTI ---
+          // --- LISTA SUGGERIMENTI AUTOCOMPLETE ---
           // Mostrata solo se ci sono suggerimenti disponibili.
           // La lista appare direttamente sotto il campo di testo.
-          if (_hasVisibleSuggestions)
-            TextFieldTapRegion(
-              child: Container(
-                // Margine sopra per separare dal campo di testo
-                margin: const EdgeInsets.only(top: 4),
-                // Decorazione della lista: bordo arrotondato con ombra
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.grey.shade300),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.1),
-                      blurRadius: 4,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                // Altezza massima della lista per evitare che occupi
-                // troppo spazio sullo schermo. Se ci sono più di ~4 risultati,
-                // l'utente può scrollare.
-                constraints: const BoxConstraints(maxHeight: 200),
-                // ClipRRect per applicare il borderRadius anche ai figli
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  // ListView.builder crea i widget solo quando sono visibili
-                  // (lazy loading). Anche se avessimo 100 suggerimenti,
-                  // renderebbe solo quelli visibili nello scrollview.
-                  child: ListView.builder(
-                    // Shrinkwrap: la lista si adatta alla dimensione dei figli
-                    // invece di occupare tutto lo spazio disponibile
-                    shrinkWrap: true,
-                    // Padding zero per allineare con il campo di testo
-                    padding: EdgeInsets.zero,
-                    // Numero di suggerimenti da visualizzare
-                    itemCount: _visibleSource == _SuggestionSource.api
-                        ? _apiSuggestions.length
-                        : _filteredHistorySuggestions.length,
-                    // Builder per ogni elemento della lista
-                    itemBuilder: (context, index) {
-                      final bool isApi =
-                          _visibleSource == _SuggestionSource.api;
-                      final String title = isApi
-                          ? _apiSuggestions[index].description
-                          : _filteredHistorySuggestions[index].address;
+          if (_suggestions.isNotEmpty)
+            _buildDropdown(
+              children: _suggestions.map((suggestion) {
+                return ListTile(
+                  leading: const Icon(
+                    Icons.location_on_outlined,
+                    color: Colors.blue,
+                    size: 28,
+                  ),
+                  title: Text(
+                    suggestion.description,
+                    style: const TextStyle(fontSize: 16),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  onTap: () => _onSuggestionSelected(suggestion),
+                );
+              }).toList(),
+            ),
 
-                      return ListTile(
-                        // Icona posizione a sinistra di ogni suggerimento
-                        leading: const Icon(
-                          Icons.location_on_outlined,
-                          color: Colors.grey,
-                        ),
-                        // Testo del suggerimento (descrizione del luogo)
-                        title: Text(
-                          title,
-                          style: const TextStyle(fontSize: 14),
-                          // Limita a 2 righe e tronca con "..." se troppo lungo
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        // Densità compatta per mostrare più suggerimenti
-                        dense: true,
-                        // Al tap, seleziona questo suggerimento
-                        onTap: isApi
-                            ? () =>
-                                  _onSuggestionSelected(_apiSuggestions[index])
-                            : () => _onHistorySuggestionSelected(
-                                _filteredHistorySuggestions[index],
-                              ),
-                      );
-                    },
+          // --- CRONOLOGIA RICERCHE RECENTI ---
+          // Visibile SOLO quando:
+          //  1. Il campo di testo è focalizzato (l'utente ha toccato la barra)
+          //  2. Il campo di testo è vuoto (l'utente non sta digitando)
+          //  3. Non ci sono suggerimenti API in corso
+          //  4. Ci sono ricerche recenti da mostrare
+          if (widget.focusNode.hasFocus &&
+              _suggestions.isEmpty &&
+              widget.destinationController.text.isEmpty &&
+              widget.recentSearches.isNotEmpty)
+            _buildDropdown(
+              header: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+                child: Text(
+                  'Ricerche recenti',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey.shade500,
+                    letterSpacing: 0.5,
                   ),
                 ),
               ),
+              children: widget.recentSearches.map((item) {
+                return ListTile(
+                  leading: const Icon(
+                    Icons.history,
+                    color: Colors.grey,
+                    size: 26,
+                  ),
+                  title: Text(
+                    item.address,
+                    style: const TextStyle(fontSize: 16),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 4,
+                  ),
+                  // Al tap, usa direttamente le coordinate salvate
+                  // senza chiamare nessuna API (è già tutto in memoria)
+                  onTap: () {
+                    // Toglie il focus per chiudere la tendina
+                    widget.focusNode.unfocus();
+                    
+                    widget.destinationController.text = item.address;
+                    setState(() {
+                      _suggestions = [];
+                    });
+                    widget.onDestinationSelected(
+                      item.lat,
+                      item.lng,
+                      item.address,
+                    );
+                  },
+                );
+              }).toList(),
             ),
 
           // --- INDICATORE "CARICAMENTO IN CORSO" ---
@@ -620,12 +518,15 @@ class _SearchInputState extends State<SearchInput> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 3),
                   ),
-                  SizedBox(width: 8),
-                  Text('Calcolo percorso in corso...'),
+                  SizedBox(width: 10),
+                  Text(
+                    'Sto preparando il percorso...',
+                    style: TextStyle(fontSize: 16),
+                  ),
                 ],
               ),
             ),
@@ -633,6 +534,42 @@ class _SearchInputState extends State<SearchInput> {
       ),
     );
   }
-}
 
-enum _SuggestionSource { none, history, api }
+  // ===========================================================================
+  // HELPER UI
+  // ===========================================================================
+
+  /// Contenitore a tendina condiviso da suggerimenti autocomplete e cronologia.
+  Widget _buildDropdown({
+    required List<Widget> children,
+    Widget? header,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(top: 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey.shade300),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.1),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      constraints: const BoxConstraints(maxHeight: 240),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: ListView(
+          shrinkWrap: true,
+          padding: EdgeInsets.zero,
+          children: [
+            ?header,
+            ...children,
+          ],
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,132 @@
+@startuml
+title Entity-Relationship Diagram
+
+entity "SearchHistoryItem" as SearchHistoryItem {
+  * address : string <<PK>>
+  --
+  * lat : double
+  * lng : double
+  * timestamp_ms : int
+}
+
+entity "PlaceSuggestion" as PlaceSuggestion {
+  * placeId : string <<PK>>
+  --
+  * description : string
+}
+
+entity "PlaceDetails" as PlaceDetails {
+  * lat : double
+  * lng : double
+  * name : string
+  * formattedAddress : string
+}
+
+entity "DirectionStep" as DirectionStep {
+  * index : int <<PK>>
+  --
+  * instruction : string
+  * distance : string
+  * duration : string
+  * startLat : double
+  * startLng : double
+  * endLat : double
+  * endLng : double
+  * maneuver : string
+  * encodedStepPolyline : string
+}
+
+entity "RouteData" as RouteData {
+  * encodedPolyline : string <<PK>>
+  --
+  * durationSeconds : int
+  * totalDuration : string
+  * totalDistance : string
+}
+
+entity "AllRoutesResult" as AllRoutesResult {
+  * originLat : double
+  * originLng : double
+  * destLat : double
+  * destLng : double
+}
+
+entity "NavigationSession" as NavigationSession {
+  * isNavigating : bool
+  * hasArrived : bool
+  * isRerouting : bool
+  * currentLat : double
+  * currentLng : double
+  * currentSpeed : double
+  * rawBearing : double
+  * compassHeading : double
+  * currentAccuracy : double
+  * currentStepIndex : int
+  * consecutiveArrivalUpdates : int
+  * consecutiveOffRouteDetects : int
+  * navigationStartTime : datetime
+}
+
+entity "NavigationOverlayState" as NavigationOverlayState {
+  * type : string
+  * message : string
+  * maneuver : string
+}
+
+entity "RerouteState" as RerouteState {
+  * phase : string
+  * animStep : int
+}
+
+entity "ArrivalState" as ArrivalState {
+  * isArrived : bool
+  * animStep : int
+  * isReviewingWalkedPath : bool
+}
+
+entity "WalkedPath" as WalkedPath {
+  * lat : double
+  * lng : double
+  * sequenceIndex : int
+}
+
+entity "UIState" as UIState {
+  * appState : string
+  * isFollowingUser : bool
+  * isLoading : bool
+  * errorMessage : string
+}
+
+entity "SnappedPoint" as SnappedPoint {
+  * placeId : string <<PK>>
+  --
+  * latitude : double
+  * longitude : double
+  * originalIndex : int
+}
+
+entity "NavigationHistoryEntry" as NavigationHistoryEntry {
+  * state : string <<PK>>
+  --
+  * address : string
+  * stackIndex : int
+}
+
+AllRoutesResult ||--|{ RouteData : "bestRoute + allRoutes"
+RouteData ||--|{ DirectionStep : "composed of"
+NavigationSession ||--|| RouteData : "activeRoute"
+NavigationSession ||--o| RouteData : "previousRoute"
+NavigationSession ||--o{ RouteData : "alternativeRoutes"
+NavigationSession ||--o{ DirectionStep : "routeSteps"
+NavigationSession ||--o{ WalkedPath : "tracks"
+NavigationSession ||--o| NavigationOverlayState : "emits"
+NavigationSession ||--|| RerouteState : "reroutePhase"
+NavigationSession ||--|| ArrivalState : "arrivalState"
+NavigationSession ||--|| UIState : "drives"
+UIState ||--o{ NavigationHistoryEntry : "backStack"
+PlaceSuggestion ||--|| PlaceDetails : "resolves to"
+PlaceDetails ||--o| AllRoutesResult : "destination for"
+SearchHistoryItem ||--o| AllRoutesResult : "quick-launch to"
+SnappedPoint }o--|| NavigationSession : "lateral road analysis"
+
+@enduml

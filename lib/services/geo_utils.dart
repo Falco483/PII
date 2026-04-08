@@ -32,7 +32,7 @@ import 'dart:math';
 /// Valore consigliato: 3-5 km/h. Default: 4 km/h.
 /// - Sotto 3 km/h: troppi falsi negativi (si scarta bearing valido a passo d'uomo)
 /// - Sopra 5 km/h: troppi falsi positivi (si accetta bearing rumoroso)
-const double kSpeedThresholdKmH = 4.0;
+const double kSpeedThresholdKmH = 1.5; //prima era a 4
 
 /// Intervallo in secondi tra un campionamento e l'altro del bearing.
 ///
@@ -52,10 +52,18 @@ const int kBearingUpdateIntervalSec = 5;
 /// Soglia di velocità (km/h) sotto la quale si considera l'utente "fermo".
 /// Usata per attivare il timer di 10 secondi (Step 2.1).
 ///
-/// Si usa 1 km/h invece di 0 esatto perché il GPS raramente restituisce
-/// velocità perfettamente zero anche quando il dispositivo è fermo —
-/// c'è sempre un po' di rumore/drift nel segnale.
-const double kZeroSpeedThresholdKmH = 1.0;
+/// PERCHÉ 2.5 km/h E NON 1.0:
+/// Il GPS ha un drift intrinseco: anche da completamente fermi, il chip
+/// calcola micro-spostamenti fantasma (multipath, rumore termico) che
+/// producono velocità raw di 0.5-3 km/h. Con la soglia a 1.0, il drift
+/// superava la soglia troppo spesso e il timer non partiva mai.
+///
+/// 2.5 km/h è un buon compromesso:
+/// - È sopra il range tipico di drift da fermo (0.5-2 km/h dopo EMA)
+/// - È sotto la velocità minima di camminata umana (~3.5-4 km/h)
+/// - Con il filtro EMA applicato a monte, la velocità filtrata da fermo
+///   converge verso 0.3-0.8 km/h, ben sotto questa soglia
+const double kZeroSpeedThresholdKmH = 2.5;
 
 /// Durata del countdown (millisecondi) quando la velocità scende a zero.
 ///
@@ -70,13 +78,18 @@ const int kZeroSpeedDelayMs = 10000;
 /// Raggio in metri entro il quale la posizione dell'utente viene considerata
 /// "coincidente" con un waypoint di svolta del percorso (Step 2.3).
 ///
-/// PERCHÉ 5 METRI:
-/// - La precisione tipica del GPS su smartphone è 3-10 m in condizioni normali
-/// - 5 m è abbastanza ampio da catturare l'utente che è "sull'incrocio"
-///   ma abbastanza stretto da non confondere due incroci vicini
-/// - Questo valore può essere aumentato (es. 10 m) se si opera in zone
-///   con GPS degradato (es. canyon urbani, gallerie)
-const double kTurnWaypointRadiusMeters = 5.0;
+/// PERCHÉ 25 METRI:
+/// - La precisione tipica del GPS su smartphone è 3-10 m in condizioni normali,
+///   ma in ambienti urbani (canyon urbani, riflessi su palazzi) può degradare
+///   fino a 15-20 m.
+/// - Con 5 m l'overlay di svolta non appariva quasi mai perché l'errore GPS
+///   posizionava l'utente fuori dal raggio troppo stretto.
+/// - 25 m garantisce che l'overlay appaia in anticipo (~5-6 secondi prima
+///   dell'incrocio a passo normale di 4-5 km/h), dando ai ragazzi con
+///   disabilità cognitive tempo sufficiente per leggere e prepararsi.
+/// - Il rischio di confondere due incroci vicini è basso: nelle aree urbane
+///   gli incroci distano tipicamente 50-100+ m l'uno dall'altro.
+const double kTurnWaypointRadiusMeters = 25.0;
 
 /// Distanza in metri dal punto corrente per calcolare i punti laterali
 /// principali (dx e sx) — Step 2.4.
@@ -109,16 +122,16 @@ const double kEarthRadiusMeters = 6371000.0;
 /// percorso attivo è MAGGIORE di questa soglia, l'utente è considerato
 /// "fuori percorso" (ha deviato).
 ///
-/// PERCHÉ 40 METRI:
+/// PERCHÉ 30 METRI:
 /// - La precisione tipica del GPS su smartphone è 3-10 m in condizioni normali
-/// - In ambienti urbani (edifici alti, gallerie) può peggiorare a 15-30 m
-/// - Una corsia autostradale è larga ~3.5 m, una strada urbana ~6-7 m
-/// - 40 m è abbastanza ampio da coprire l'imprecisione GPS + la larghezza
+/// - In ambienti urbani (edifici alti, gallerie) può peggiorare a 15-20 m
+/// - 30 m è abbastanza ampio da coprire l'imprecisione GPS + la larghezza
 ///   della strada, evitando falsi ricalcoli quando l'utente è sul percorso
-///   ma il GPS è leggermente impreciso
-/// - Allo stesso tempo, 40 m è abbastanza stretto da rilevare una vera
-///   deviazione (es. svolta su una strada laterale)
-const double kRouteDeviationThresholdMeters = 40.0;
+/// - Più reattivo dei precedenti 40 m: rileva la deviazione ~10 m prima,
+///   cruciale per navigazione pedonale dove ogni metro conta
+/// - Con il sistema a 2 strike (conferma su 2 tick consecutivi), i falsi
+///   positivi da jitter GPS sono comunque filtrati
+const double kRouteDeviationThresholdMeters = 30.0;
 
 /// Intervallo in secondi tra un controllo e l'altro della posizione
 /// rispetto al percorso attivo (TASK 2).

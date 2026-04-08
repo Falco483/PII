@@ -2,7 +2,7 @@
 ///
 /// Questo widget mostra un banner animato sulla mappa con due tipi di messaggio:
 /// 1. Istruzione di svolta (quando l'utente è fermo su un waypoint del percorso)
-/// 2. "vai diritto stronzo" (quando vengono rilevate strade laterali)
+/// 2. Messaggio "vai dritto" incoraggiante (quando vengono rilevate strade laterali)
 ///
 /// DESIGN PER ACCESSIBILITÀ:
 /// L'app è destinata a persone con disabilità cognitive, quindi l'overlay:
@@ -17,6 +17,7 @@
 /// che decide QUANDO e COSA mostrare è in navigation_monitor.dart.
 library;
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/navigation_monitor.dart';
 import '../services/geo_utils.dart';
@@ -67,9 +68,21 @@ class _NavigationOverlayState extends State<NavigationOverlay>
   late AnimationController _animController;
   late Animation<double> _fadeAnimation;
 
-  /// Timer per l'auto-dismiss.
+  /// Timer CANCELLABILE per l'auto-dismiss.
   /// Dopo [kOverlayAutoDismissSeconds] secondi, l'overlay si chiude da solo.
-  /// Il timer viene cancellato se l'utente tocca l'overlay prima dello scadere.
+  ///
+  /// PERCHÉ Timer E NON Future.delayed:
+  /// Future.delayed non è cancellabile. Se il monitor emette un nuovo overlay
+  /// mentre il vecchio Future.delayed è ancora in coda, il vecchio callback
+  /// scatta comunque e chiude prematuramente il nuovo overlay.
+  /// Con Timer possiamo cancellare il countdown precedente ogni volta che
+  /// arriva un nuovo overlay, resettando il conteggio da zero.
+  Timer? _autoDismissTimer;
+
+  /// Flag per prevenire chiamate multiple a reverse() o forward() durante
+  /// la chiusura dell'overlay causata dall'utente (X) o dal timer.
+  bool _isDismissing = false;
+
   @override
   void initState() {
     super.initState();
@@ -92,38 +105,80 @@ class _NavigationOverlayState extends State<NavigationOverlay>
       _animController.forward();
       _startAutoDismissTimer();
     }
+    // FIX: Quando lo stato passa da non-null a un ALTRO non-null
+    // (il monitor ha emesso un nuovo overlay mentre il precedente era ancora
+    // visibile), resettiamo il timer di auto-dismiss e assicuriamoci che
+    // l'animazione sia in forward. 
+    // AGGIUNTA: Verifichiamo che widget.state != oldWidget.state per non
+    // bloccare un fade-out in corso se il parent fa rebuild con lo stesso state.
+    else if (widget.state != null && oldWidget.state != null && widget.state != oldWidget.state) {
+      _isDismissing = false;
+      _animController.forward();
+      _startAutoDismissTimer();
+    }
     // Quando lo stato passa da non-null a null, avvia il fade-out
     else if (widget.state == null && oldWidget.state != null) {
       _animController.reverse();
     }
   }
 
-  /// Avvia il timer di auto-dismiss.
+  /// Avvia il timer di auto-dismiss (CANCELLABILE).
   ///
   /// L'overlay si chiude automaticamente dopo kOverlayAutoDismissSeconds
   /// secondi. Questo è importante per:
   /// - Non richiedere un'azione esplicita all'utente
   /// - Evitare che l'overlay copra la mappa indefinitamente
   /// - Gestire il caso in cui l'utente non tocchi lo schermo
+  ///
+  /// Se un timer precedente è ancora attivo (es. il monitor ha emesso un
+  /// nuovo overlay prima che il vecchio scadesse), viene cancellato e
+  /// ricreato con il countdown pieno. Così il nuovo overlay ha sempre
+  /// i suoi N secondi completi di visibilità.
   void _startAutoDismissTimer() {
-    Future.delayed(Duration(seconds: kOverlayAutoDismissSeconds), () {
-      // Verifica che il widget sia ancora montato (l'utente potrebbe
-      // aver cambiato schermata durante il countdown)
-      if (mounted && widget.state != null) {
-        _dismiss();
-      }
-    });
+    // Cancella un eventuale timer precedente ancora in corso
+    _autoDismissTimer?.cancel();
+
+    // L'overlay di arrivo resta visibile più a lungo (15 secondi)
+    // perché è il momento di celebrazione: il ragazzo ha completato
+    // il percorso e merita di godersi il messaggio di congratulazioni.
+    // Gli altri overlay usano il timer standard (8 secondi).
+    final int dismissSeconds =
+        (widget.state?.type == OverlayType.arrivalCelebration ||
+         widget.state?.type == OverlayType.returnToRoute)
+            ? 15
+            : kOverlayAutoDismissSeconds;
+
+    _autoDismissTimer = Timer(
+      Duration(seconds: dismissSeconds),
+      () {
+        // Verifica che il widget sia ancora montato (l'utente potrebbe
+        // aver cambiato schermata durante il countdown)
+        if (mounted && widget.state != null) {
+          _dismiss();
+        }
+      },
+    );
   }
 
   /// Chiude l'overlay con animazione fade-out e notifica il chiamante.
   ///
   /// Chiamato sia dal tap dell'utente che dal timer di auto-dismiss.
   void _dismiss() {
+    if (_isDismissing) return;
+    _isDismissing = true;
+
+    // Cancella il timer di auto-dismiss per evitare un secondo _dismiss()
+    // se l'utente chiude manualmente l'overlay prima dello scadere.
+    _autoDismissTimer?.cancel();
+    _autoDismissTimer = null;
+
     _animController.reverse().then((_) {
       // Notifica il chiamante SOLO dopo che il fade-out è completato.
       // Se chiamassimo onDismiss subito, lo stato verrebbe resettato
       // e l'overlay sparirebbe bruscamente senza animazione.
       if (mounted) {
+        // Resetta il flag in caso di futuri overlay
+        _isDismissing = false;
         widget.onDismiss();
       }
     });
@@ -131,6 +186,7 @@ class _NavigationOverlayState extends State<NavigationOverlay>
 
   @override
   void dispose() {
+    _autoDismissTimer?.cancel();
     _animController.dispose();
     super.dispose();
   }
@@ -164,26 +220,41 @@ class _NavigationOverlayState extends State<NavigationOverlay>
 
   /// Costruisce il widget card dell'overlay.
   ///
-  /// Lo stile varia in base al tipo di overlay:
-  /// - Istruzione di svolta: sfondo blu, icona della manovra
-  /// - Strada laterale: sfondo arancione/rosso, icona freccia dritta
+  /// DESIGN SEMPLIFICATO: tutti gli overlay usano sfondo ARANCIONE.
+  /// Un solo colore per tutti gli overlay = l'utente associa subito
+  /// "arancione = messaggio importante dalla mappa". Le indicazioni
+  /// di percorso (banner verde) restano visivamente separate.
   Widget _buildOverlayCard(NavigationOverlayState overlayState) {
     // Determina colori e icona in base al tipo di overlay
-    final bool isTurn = overlayState.type == OverlayType.turnInstruction;
+    final Color backgroundColor;
+    final IconData icon;
 
-    final Color backgroundColor = isTurn
-        ? Colors.blue.shade700
-        : Colors.orange.shade800;
-
-    final IconData icon = isTurn
-        ? _getManeuverIcon(overlayState.maneuver)
-        : Icons.arrow_upward;
+    switch (overlayState.type) {
+      case OverlayType.turnInstruction:
+        backgroundColor = Colors.orange.shade800;
+        icon = _getManeuverIcon(overlayState.maneuver);
+        break;
+      case OverlayType.lateralRoadDetected:
+        backgroundColor = Colors.orange.shade800;
+        icon = Icons.arrow_upward;
+        break;
+      case OverlayType.arrivalCelebration:
+        backgroundColor = Colors.orange.shade800;
+        icon = Icons.emoji_events;
+        break;
+      case OverlayType.returnToRoute:
+        backgroundColor = Colors.orange.shade800;
+        icon = Icons.u_turn_left;
+        break;
+    }
 
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.all(
+        overlayState.type == OverlayType.arrivalCelebration ? 24 : 20,
+      ),
       decoration: BoxDecoration(
         color: backgroundColor,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withOpacity(0.3),
@@ -194,16 +265,22 @@ class _NavigationOverlayState extends State<NavigationOverlay>
       ),
       child: Row(
         children: [
-          // Icona
-          Icon(icon, color: Colors.white, size: 40),
+          // Icona — più grande per l'arrivo
+          Icon(
+            icon,
+            color: Colors.white,
+            size: overlayState.type == OverlayType.arrivalCelebration ? 56 : 40,
+          ),
           const SizedBox(width: 16),
-          // Testo del messaggio
+          // Testo del messaggio — più grande per l'arrivo
           Expanded(
             child: Text(
               overlayState.message,
-              style: const TextStyle(
+              style: TextStyle(
                 color: Colors.white,
-                fontSize: 22,
+                fontSize: overlayState.type == OverlayType.arrivalCelebration
+                    ? 26
+                    : 22,
                 fontWeight: FontWeight.bold,
                 height: 1.3,
               ),

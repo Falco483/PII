@@ -41,7 +41,7 @@ class DirectionsList extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
+            color: Colors.black.withValues(alpha: 0.1),
             blurRadius: 8,
             offset: const Offset(0, 2),
           ),
@@ -84,10 +84,10 @@ class DirectionsList extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Icona pedone
-          const Icon(Icons.directions_walk, color: Colors.blue, size: 36),
+          // Icona pedone — grande e colorata
+          const Icon(Icons.directions_walk, color: Colors.blue, size: 40),
           const SizedBox(width: 12),
-          // Informazioni percorso
+          // Informazioni percorso — font grandi per accessibilità
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -95,27 +95,31 @@ class DirectionsList extends StatelessWidget {
                 Text(
                   totalDuration,
                   style: TextStyle(
-                    fontSize: 20,
+                    fontSize: 22,
                     fontWeight: FontWeight.bold,
                     color: Colors.blue.shade900,
                   ),
                 ),
                 Text(
                   totalDistance,
-                  style: TextStyle(fontSize: 14, color: Colors.blue.shade700),
+                  style: TextStyle(fontSize: 16, color: Colors.blue.shade700),
                 ),
               ],
             ),
           ),
-          // Pulsante Avvia
+          // Pulsante Avvia — grande e chiaro
           if (onStartPressed != null)
             ElevatedButton.icon(
               onPressed: onStartPressed,
-              icon: const Icon(Icons.navigation),
-              label: const Text('Avvia'),
+              icon: const Icon(Icons.navigation, size: 24),
+              label: const Text(
+                'Avvia',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.blue.shade600,
                 foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(20),
                 ),
@@ -135,13 +139,13 @@ class DirectionsList extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Numero dello step
+          // Numero dello step — più grande per accessibilità
           Container(
-            width: 28,
-            height: 28,
+            width: 36,
+            height: 36,
             decoration: BoxDecoration(
               color: Colors.blue,
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(18),
             ),
             child: Center(
               child: Text(
@@ -149,7 +153,7 @@ class DirectionsList extends StatelessWidget {
                 style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.bold,
-                  fontSize: 12,
+                  fontSize: 16,
                 ),
               ),
             ),
@@ -160,13 +164,13 @@ class DirectionsList extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Istruzione testuale
+                // Istruzione testuale — GRANDE per accessibilità cognitiva
                 Text(
                   step.instruction,
-                  style: const TextStyle(fontSize: 14, height: 1.4),
+                  style: const TextStyle(fontSize: 18, height: 1.4),
                 ),
-                const SizedBox(height: 4),
-                // Distanza e durata
+                const SizedBox(height: 6),
+                // Distanza e durata — dimensioni leggibili
                 Row(
                   children: [
                     _buildInfoChip(Icons.straighten, step.distance),
@@ -185,7 +189,7 @@ class DirectionsList extends StatelessWidget {
   /// Costruisce un chip informativo con icona e testo
   Widget _buildInfoChip(IconData icon, String text) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
         color: Colors.grey.shade100,
         borderRadius: BorderRadius.circular(12),
@@ -193,11 +197,11 @@ class DirectionsList extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 14, color: Colors.grey.shade600),
+          Icon(icon, size: 16, color: Colors.grey.shade600),
           const SizedBox(width: 4),
           Text(
             text,
-            style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+            style: TextStyle(fontSize: 14, color: Colors.grey.shade700),
           ),
         ],
       ),

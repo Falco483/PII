@@ -32,6 +32,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'geo_utils.dart';
 import 'roads_service.dart';
@@ -46,8 +47,10 @@ import 'directions_service.dart';
 /// - [turnInstruction]: l'utente è fermo su un waypoint di svolta.
 ///   Mostra l'istruzione di navigazione (testo da html_instructions).
 /// - [lateralRoadDetected]: la Roads API ha trovato strade laterali.
-///   Mostra "vai diritto stronzo".
-enum OverlayType { turnInstruction, lateralRoadDetected }
+///   Mostra un messaggio di incoraggiamento ("Continua dritto, stai andando bene!").
+/// - [arrivalCelebration]: l'utente ha raggiunto la destinazione.
+///   Mostra un messaggio di congratulazioni con festa.
+enum OverlayType { turnInstruction, lateralRoadDetected, arrivalCelebration, returnToRoute }
 
 /// Stato dell'overlay da mostrare sulla mappa.
 ///
@@ -68,6 +71,78 @@ class NavigationOverlayState {
     this.maneuver,
   });
 }
+
+// =============================================================================
+// MESSAGGI DI SUPPORTO PER RAGAZZI CON DISABILITÀ COGNITIVE
+// =============================================================================
+//
+// PRINCIPI DI DESIGN:
+// 1. Frasi CORTE e SEMPLICI → massimo 5-6 parole
+// 2. Tono POSITIVO e RASSICURANTE → mai rimproveri, mai imperativi aggressivi
+// 3. Nessuna parola ambigua → "dritto" è chiaro, "prosegui" può confondere
+// 4. Ripetizione del concetto chiave → "dritto" compare in tutte le frasi
+//    laterali perché è l'unica informazione che conta in quel momento
+// 5. Emoji come supporto visivo → il cervello processa le emoji più
+//    velocemente del testo, utile per comunicazione immediata
+
+/// Messaggi mostrati quando vengono rilevate strade laterali.
+/// L'utente NON deve svoltare, deve continuare dritto.
+/// Ogni messaggio rassicura che la strada è giusta.
+const List<String> kLateralRoadMessages = [
+  '👉 Continua dritto, stai andando bene!',
+  '⬆️ Vai dritto, sei sulla strada giusta!',
+  '✅ Bravo, continua così! Vai dritto!',
+  '⬆️ Non svoltare, vai sempre dritto!',
+  '👍 Perfetto! Continua dritto!',
+  '⬆️ Stai andando benissimo, dritto!',
+];
+
+/// Messaggi mostrati quando l'utente è vicino a un waypoint di svolta.
+/// Il testo dell'istruzione di svolta viene AGGIUNTO dopo il prefisso
+/// di incoraggiamento, così il ragazzo legge prima il rinforzo positivo
+/// e poi l'istruzione specifica.
+///
+/// ESEMPIO COMPLETO:
+/// "Ci siamo quasi! Svolta a destra in Via Roma"
+const List<String> kTurnEncouragementPrefixes = [
+  'Ci siamo quasi! ',
+  'Bravissimo! Ora: ',
+  'Perfetto! Adesso: ',
+  'Stai andando forte! ',
+  'Ottimo lavoro! Ora: ',
+  'Ce la fai! ',
+];
+
+/// Messaggi di celebrazione mostrati quando l'utente raggiunge la destinazione.
+/// Questi sono i messaggi più importanti dell'intera app: il ragazzo ha completato
+/// il percorso da solo. Devono trasmettere orgoglio e soddisfazione.
+const List<String> kArrivalMessages = [
+  '🎉 Sei arrivato! Bravissimo!',
+  '🏆 Ce l\'hai fatta! Sei un campione!',
+  '⭐ Sei arrivato a destinazione! Grande!',
+  '🎊 Complimenti, sei arrivato!',
+  '👏 Perfetto! Sei arrivato, bravo!',
+  '🌟 Destinazione raggiunta! Che bravo!',
+];
+
+// =============================================================================
+// MODELLO PER LO STATO DI RICALCOLO PERCORSO
+// =============================================================================
+
+/// Fasi del processo di ricalcolo percorso.
+///
+/// Queste fasi guidano la UI per mostrare il bottom sheet appropriato:
+/// - [none]: nessun ricalcolo in corso, UI normale
+/// - [offRoute]: deviazione confermata, ricerca percorso alternativo in corso
+/// - [rerouting]: nessun alternativo trovato, chiamata API in corso
+/// - [routeChanged]: nuovo percorso trovato e applicato, mostra conferma
+///
+/// FLUSSO TIPICO:
+/// none → offRoute → rerouting → routeChanged → none
+///
+/// FLUSSO RAPIDO (alternativo trovato in memoria):
+/// none → offRoute → routeChanged → none
+enum ReroutePhase { none, offRoute, rerouting, routeChanged }
 
 // =============================================================================
 // CLASSE PRINCIPALE — NAVIGATION MONITOR
@@ -116,11 +191,17 @@ class NavigationMonitor {
   /// Posizione corrente dell'utente (longitudine).
   double? _currentLng;
 
+  /// Posizione (latitudine) dell'ultima analisi per l'overlay (cooldown spaziale).
+  double? _lastAnalysisLat;
+
+  /// Posizione (longitudine) dell'ultima analisi per l'overlay (cooldown spaziale).
+  double? _lastAnalysisLng;
+
+  /// Timestamp dell'ultima chiamata alla Roads API (cooldown temporale).
+  DateTime? _lastApiCallTime;
+
   /// Velocità corrente dell'utente in km/h.
   double _currentSpeed = 0.0;
-
-  /// Accuratezza GPS in metri (Confidence level).
-  double _currentAccuracy = 0.0;
 
   /// Counter dei tick per il polling dinamico (Adaptive Polling).
   int _routeCheckTicks = 0;
@@ -130,6 +211,11 @@ class NavigationMonitor {
 
   /// Bearing raw corrente dal GPS (può essere inaffidabile a basse velocità).
   double _rawBearing = 0.0;
+
+  /// Accuratezza GPS corrente in metri (0.0 = sconosciuta).
+  /// Aggiornata ad ogni chiamata updatePosition() e usata in _onRouteCheckTick()
+  /// per saltare i tick quando il segnale è troppo debole (> 30m).
+  double _currentAccuracy = 0.0;
 
   /// Lista degli step del percorso calcolato dalla Directions API.
   /// Viene aggiornata ogni volta che l'utente calcola un nuovo percorso.
@@ -149,11 +235,11 @@ class NavigationMonitor {
 
   /// Contatore degli aggiornamenti GPS consecutivi in cui l'utente risulta
   /// vicino (< 15 metri) all'incrocio di destinazione dello step corrente.
-  /// 
+  ///
   /// PERCHÉ SERVE QUESTO CONTATORE:
-  /// Il GPS non è perfetto. Un singolo sbalzo temporaneo del segnale (es. 
-  /// riflesso su un palazzo) potrebbe porre falsamente l'utente a 5m 
-  /// dall'incrocio per un solo istante. Per evitare che l'interfaccia 
+  /// Il GPS non è perfetto. Un singolo sbalzo temporaneo del segnale (es.
+  /// riflesso su un palazzo) potrebbe porre falsamente l'utente a 5m
+  /// dall'incrocio per un solo istante. Per evitare che l'interfaccia
   /// avanzi prematuramente d'istruzione, richiediamo che la vicinanza sia
   /// "confermata" per almeno N aggiornamenti GPS consecutivi (noi usiamo 2).
   int _consecutiveCloseUpdates = 0;
@@ -174,7 +260,7 @@ class NavigationMonitor {
   /// prima di fare una nuova chiamata API.
   List<RouteData> _alternativeRoutes = [];
 
-  /// Destinazione originale dell'utente (testo dell'indirizzo o coordinate).
+  /// Destinazione originale come COORDINATE (formato "lat,lng").
   /// Salvata al momento del calcolo iniziale del percorso e usata per il
   /// ricalcolo API nel Task 2c: la destinazione non cambia mai, solo la
   /// posizione di partenza (che diventa la posizione GPS corrente).
@@ -190,6 +276,62 @@ class NavigationMonitor {
   /// Evita di lanciare ricalcoli concorrenti mentre il precedente è ancora
   /// in attesa di risposta dalla API.
   bool _isRerouting = false;
+
+  /// Timestamp fino al quale il controllo deviazione è bloccato.
+  /// Attivato quando l'utente sceglie "Torna al vecchio percorso":
+  /// per 15 secondi non si effettuano controlli off-route né chiamate API,
+  /// dando all'utente il tempo di manovrare per rientrare sul percorso.
+  DateTime? _returnToRouteLockUntil;
+
+  /// Flag che indica se l'arrivo a destinazione è già stato emesso.
+  ///
+  /// FIX BUG ANIMAZIONE ARRIVO:
+  /// Senza questo flag, il monitor emetteva arrivalCelebration ad OGNI
+  /// aggiornamento GPS in cui l'utente era entro la soglia dall'ultimo
+  /// step. Ogni emissione riavviava l'animazione progressiva nel bottom
+  /// sheet di arrivo, impedendo a step 2 ("Vuoi rivedere il percorso?")
+  /// di apparire. Con il flag, emettiamo UNA SOLA VOLTA.
+  bool _hasArrived = false;
+
+  /// Contatore degli aggiornamenti GPS consecutivi in cui l'utente è
+  /// entro la soglia di arrivo dall'ultimo step.
+  ///
+  /// L'arrivo viene confermato solo dopo kArrivalConfirmations letture
+  /// consecutive (3 = circa 3 secondi). Questo evita falsi arrivi
+  /// causati da salti GPS momentanei.
+  int _consecutiveArrivalUpdates = 0;
+
+  // ===========================================================================
+  // STATO "SCELTA PERCORSO" — Percorso precedente salvato
+  // ===========================================================================
+  //
+  // Quando il monitor trova un nuovo percorso (Task 2b alternativo o Task 2c
+  // ricalcolo API), NON lo impone silenziosamente. Salva il vecchio percorso
+  // in queste variabili, applica il nuovo sulla mappa, e la UI mostra un
+  // bottom sheet che chiede all'utente: "Vuoi continuare col nuovo percorso
+  // o tornare al vecchio?".
+  //
+  // Se l'utente conferma → _previousRoute viene azzerato.
+  // Se l'utente rifiuta → _previousRoute viene ripristinato come attivo.
+
+  /// Percorso precedente (prima del ricalcolo). Null se non c'è stata
+  /// nessuna deviazione o l'utente ha già confermato/rifiutato.
+  RouteData? _previousRoute;
+
+  /// Step del percorso precedente (per ripristino completo).
+  List<DirectionStep> _previousRouteSteps = [];
+
+  /// Indice dello step in cui l'utente si trovava prima del ricalcolo.
+  int _previousStepIndex = 0;
+
+  /// Lista di percorsi alternativi del percorso precedente (per ripristino).
+  List<RouteData> _previousAlternativeRoutes = [];
+
+  /// Timestamp di quando la navigazione è stata avviata.
+  /// Usato per il grace period: nei primi 15 secondi dopo l'avvio,
+  /// il controllo di deviazione viene ignorato per dare all'utente
+  /// il tempo di mettersi in cammino e allinearsi con la polyline.
+  DateTime? _navigationStartTime;
 
   // ===========================================================================
   // TIMER
@@ -269,15 +411,29 @@ class NavigationMonitor {
 
   /// Notifier che comunica in tempo reale alla UI l'indice dello step corrente.
   ///
-  /// Questo notifier emette solo un numero intero (`int`), che rappresenta 
+  /// Questo notifier emette solo un numero intero (`int`), che rappresenta
   /// quale passo (step) l'utente sta percorrendo. Viene usato dal NavigationScreen
-  /// per cambiare l'istruzione in alto (es. "Svolta a destra tra 50m") 
+  /// per cambiare l'istruzione in alto (es. "Svolta a destra tra 50m")
   /// man mano che l'utente si sposta fisicamente.
   ///
-  /// Usiamo un notifier separato (anziché forzare un setState enorme di tutto 
-  /// lo schermo) per migliorare le performance. Solo il banner in alto 
+  /// Usiamo un notifier separato (anziché forzare un setState enorme di tutto
+  /// lo schermo) per migliorare le performance. Solo il banner in alto
   /// ascolterà questo valore per aggiornarsi fluidamente.
   final ValueNotifier<int> currentStepNotifier = ValueNotifier<int>(0);
+
+  /// Notifier che comunica alla UI la fase corrente del processo di ricalcolo.
+  ///
+  /// La NavigationScreen ascolta questo notifier per mostrare:
+  /// - [offRoute]: bottom sheet "Ricalcolo in corso..." con spinner
+  /// - [rerouting]: stessa UI (la chiamata API è in corso)
+  /// - [routeChanged]: animazione "Va tutto bene" con conferma
+  /// - [none]: nessun bottom sheet (navigazione normale)
+  ///
+  /// FLUSSO TIPICO:
+  /// L'utente devia → offRoute → (cerca alternativo) → rerouting → (API) → routeChanged
+  /// L'utente tocca "Mostra il nuovo percorso" → none
+  final ValueNotifier<ReroutePhase> reroutePhaseNotifier =
+      ValueNotifier<ReroutePhase>(ReroutePhase.none);
 
   // ===========================================================================
   // SERVIZI
@@ -289,6 +445,11 @@ class NavigationMonitor {
   /// Client per la Directions API. Usato nel Task 2c per ricalcolare il percorso
   /// quando l'utente devia e nessun percorso alternativo è compatibile.
   final DirectionsService _directionsService;
+
+  /// Generatore di numeri casuali per variare i messaggi di incoraggiamento.
+  /// Usare lo stesso Random per tutta la sessione garantisce una distribuzione
+  /// uniforme dei messaggi (non ripete lo stesso 3 volte di fila).
+  final Random _random = Random();
 
   // ===========================================================================
   // COSTRUTTORE
@@ -337,6 +498,15 @@ class NavigationMonitor {
     double rawBearing, [
     double accuracy = 0.0,
   ]) {
+    // TASK 5 - Filtro Globale Accuratezza GPS
+    // Se il segnale GPS è troppo debole (accuracy > 30m), ignoriamo
+    // completamente l'aggiornamento per evitare "salti" fittizi che
+    // innescherebbero falsi calcoli (strade laterali, avanzamento step).
+    if (accuracy > 30.0) {
+      print('⚠️ GPS precisione insufficiente (${accuracy}m). Update ignorato.');
+      return;
+    }
+
     // Salva i valori correnti. Queste variabili sono usate dal timer del
     // bearing (ogni 5s) e dallo snapshot (quando il timer 10s scade).
     _currentLat = lat;
@@ -364,6 +534,10 @@ class NavigationMonitor {
       // Controllare _zeroSpeedTimer != null evita di creare timer multipli
       // che causerebbero analisi duplicate.
       if (_zeroSpeedTimer == null && !_isAnalysisRunning) {
+        print(
+          '⏱️ OVERLAY DEBUG: Velocità ${speedKmH.toStringAsFixed(1)} km/h < soglia. '
+          'Avvio countdown ${kZeroSpeedDelayMs}ms...',
+        );
         _startZeroSpeedCountdown();
       }
     } else {
@@ -372,70 +546,115 @@ class NavigationMonitor {
       // il semaforo diventa verde dopo 5 secondi, l'utente riparte.
       // Senza questa cancellazione, il timer continuerebbe a contare e
       // l'analisi partirebbe anche se l'utente è in movimento.
+      if (_zeroSpeedTimer != null) {
+        print(
+          '🏃 OVERLAY DEBUG: Velocità ${speedKmH.toStringAsFixed(1)} km/h — '
+          'utente in moto, ANNULLO countdown.',
+        );
+      }
       _cancelZeroSpeedCountdown();
     }
 
     // --- LOGICA AVANZAMENTO STEP DINAMICO ---
     //
-    // Questa procedura controlla se l'utente sta raggiungendo la fine 
+    // Questa procedura controlla se l'utente sta raggiungendo la fine
     // della via in cui si trova, per dirgli di compiere la svolta successiva.
     // Viene eseguita ad ogni singolo aggiornamento GPS, fintanto che
     // ci sono step validi ed è attiva una rotta.
+    //
+    // MIGLIORAMENTI RISPETTO ALLA VERSIONE PRECEDENTE:
+    // 1. Soglia aumentata da 25m a 40m → l'istruzione successiva appare
+    //    PRIMA che l'utente arrivi all'incrocio (più tempo per leggere/reagire).
+    //    Cruciale per utenti con disabilità cognitive.
+    // 2. While loop anziché if singolo → se l'utente ha superato più step
+    //    corti in un singolo ciclo GPS (es. due traverse da 15m), il banner
+    //    salta direttamente allo step corretto invece di restare indietro.
     if (_activeRoute != null && _routeSteps.isNotEmpty) {
-      // 1. Prendi lo step attuale
-      // Leggiamo fisicamente dalla lista lo step in base all'indice.
-      // Se _currentStepIndex è 0, stiamo guardando la primissima mossa.
-      final currentStep = _routeSteps[_currentStepIndex];
+      // Flag per sapere se abbiamo avanzato almeno uno step in questo ciclo
+      bool didAdvance = false;
 
-      // 2. Calcola la distanza
-      // Usiamo la funzione geodetica (che legge la forma del pianeta curvo)
-      // per capire quanti metri passano tra la macchina (lat, lng)
-      // e le coordinate di fine via (endLat e endLng di currentStep).
-      final double distanceToIntersection = distanceBetween(
-        lat,
-        lng,
-        currentStep.endLat,
-        currentStep.endLng,
-      );
+      // While loop: continua ad avanzare finché lo step corrente risulta
+      // "superato" (utente entro 40m dall'endpoint) E c'è un prossimo step.
+      while (_currentStepIndex < _routeSteps.length) {
+        final currentStep = _routeSteps[_currentStepIndex];
 
-      // 3. Controllo Prossimità (15 metri)
-      // Perché 15 metri? Perché non vogliamo aspettare che tocchi 0m
-      // perfetto centrale dell'incrocio, ma vogliamo che ci ronzii
-      // sufficientemente vicino.
-      if (distanceToIntersection < 25.0) {
-        // L'utente è nei 25 metri. Incrementiamo gli "Strikes" (conferme)
-        _consecutiveCloseUpdates++;
+        // Distanza geodetica tra la posizione GPS e la fine dello step corrente
+        final double distanceToEnd = distanceBetween(
+          lat,
+          lng,
+          currentStep.endLat,
+          currentStep.endLng,
+        );
 
-        // Richiediamo che l'utente venga letto DENTRO questo raggio
-        // per almeno 1 frame GPS (era 2, ma a velocità alte si rischia di "saltarlo").
-        if (_consecutiveCloseUpdates >= 1) {
-          // CONFERMATO: L'utente sta svoltando all'incrocio.
-          // Azzeriamo le conferme per prepararci al prossimo incrocio.
-          _consecutiveCloseUpdates = 0;
-
-          // Assicuriamoci di non sfondare il limite massimo degli array
-          // (per evitare crash "Index out of range"). Se l'indice + 1 è
-          // minore del totoale... 
-          if (_currentStepIndex + 1 < _routeSteps.length) {
-            // Avanziamo l'indice logico di uno
+        // --- CASO A: step intermedi (non l'ultimo) ---
+        // Soglia 40m: dà ~8-10 secondi di preavviso a passo normale (5 km/h)
+        if (_currentStepIndex + 1 < _routeSteps.length) {
+          if (distanceToEnd < 40.0) {
             _currentStepIndex++;
-
-            // E lanciamo un segnale (Notify) ai Widget ascoltatori (il Top Banner)
-            // dicendogli: "Ehi UI, il nuovo numero step è questo, disegnati con la nuova istruzione!"
-            currentStepNotifier.value = _currentStepIndex;
+            didAdvance = true;
+            // Continua il loop: verifica se anche il prossimo step
+            // è già stato superato (step corti in sequenza)
           } else {
-            // Se sono entrato qui, non ho più step successivi. 
-            // Significa che questo era esplicitamente l'ultimo incrocio 
-            // prima dell'arrivo a destinazione finale!
-            print("🎉 Navigazione ultimata, l'utente è arrivato!");
-            // Volendo qui potremmo fare trigger per mostrare "Arrivati" sull'UI.
+            break; // Ancora lontano → fermati
           }
         }
-      } else {
-        // L'utente è a >15m di distanza. 
-        // Lontano per natura, o allontanato/spostato irregolarmente.
-        // Resettiamo sempre a zero le false percezioni consecutive.
+        // --- CASO B: ULTIMO step → rilevamento ARRIVO ---
+        //
+        // SOGLIA PIÙ STRETTA (20m invece di 40m):
+        // L'arrivo è un evento irreversibile e importante. A 40m il ragazzo
+        // può essere ancora in mezzo a una strada, non davanti alla destinazione.
+        // 20m con GPS accuracy tipica (5-15m) è un buon compromesso.
+        //
+        // CONFERMA MULTIPLA (3 letture consecutive):
+        // Evitiamo falsi arrivi da salti GPS. 3 letture a ~1 GPS/sec =
+        // circa 3 secondi di permanenza entro la soglia.
+        //
+        // FLAG _hasArrived:
+        // L'arrivo viene emesso UNA SOLA VOLTA. Senza questo flag,
+        // ogni aggiornamento GPS successivo riemetteva arrivalCelebration,
+        // resettando l'animazione del bottom sheet e impedendo a
+        // "Vuoi rivedere il percorso?" di apparire (step 2 mai raggiunto).
+        else {
+          if (_hasArrived) {
+            break; // Già emesso, non ripetere
+          }
+
+          if (distanceToEnd < 20.0) {
+            _consecutiveArrivalUpdates++;
+            print(
+              '📍 ARRIVO DEBUG: entro 20m dalla destinazione '
+              '(${distanceToEnd.toStringAsFixed(1)}m, '
+              'conferma $_consecutiveArrivalUpdates/3)',
+            );
+
+            if (_consecutiveArrivalUpdates >= 3) {
+              // ARRIVO CONFERMATO! L'utente è a destinazione.
+              _hasArrived = true;
+              final String arrivalMsg =
+                  kArrivalMessages[_random.nextInt(kArrivalMessages.length)];
+              print("🎉 Navigazione ultimata! Messaggio: $arrivalMsg");
+              overlayNotifier.value = NavigationOverlayState(
+                type: OverlayType.arrivalCelebration,
+                message: arrivalMsg,
+              );
+            }
+          } else {
+            // Troppo lontano dalla destinazione: resetta le conferme
+            _consecutiveArrivalUpdates = 0;
+          }
+          break;
+        }
+      }
+
+      // Se abbiamo avanzato, notifica la UI una sola volta con l'indice finale.
+      // Questo è più efficiente che notificare ad ogni singolo skip.
+      if (didAdvance) {
         _consecutiveCloseUpdates = 0;
+        currentStepNotifier.value = _currentStepIndex;
+        print(
+          '📍 Step avanzato → $_currentStepIndex '
+          '(${_routeSteps[_currentStepIndex].instruction})',
+        );
       }
     }
   }
@@ -461,19 +680,22 @@ class NavigationMonitor {
   /// Questo metodo inizializza tutto il sistema di monitoraggio del percorso:
   /// 1. Salva il percorso migliore come "attivo" (quello visualizzato sulla mappa)
   /// 2. Salva tutti i percorsi alternativi per il confronto rapido (Task 2b)
-  /// 3. Salva la destinazione originale per i ricalcoli futuri (Task 2c)
+  /// 3. Salva la destinazione originale come COORDINATE per i ricalcoli futuri
   /// 4. Aggiorna gli step del percorso per il check dei waypoint di svolta
   /// 5. Avvia il timer periodico a 2 secondi per il monitoraggio
+  /// 6. Registra il timestamp di avvio per il grace period (15s)
   ///
   /// PARAMETRI:
   /// - [routesResult]: risultato dalla API con tutti i percorsi
-  /// - [destination]: testo della destinazione (indirizzo o coordinate)
+  /// - [destinationCoords]: coordinate della destinazione nel formato
+  ///   "lat,lng" (es. "45.478,9.234"). DEVE essere in formato coordinate,
+  ///   NON un indirizzo testuale, per evitare ri-geocodifiche nei ricalcoli.
   ///
   /// SIDE EFFECTS:
   /// - Setta _isNavigating = true
   /// - Avvia il timer _routeCheckTimer
   /// - Notifica la UI tramite activeRouteNotifier
-  void startNavigation(AllRoutesResult routesResult, String destination) {
+  void startNavigation(AllRoutesResult routesResult, String destinationCoords) {
     // Salva il percorso migliore (quello con durata minore) come attivo
     _activeRoute = routesResult.bestRoute;
 
@@ -482,16 +704,34 @@ class NavigationMonitor {
     // percorso alternativo a cui "agganciare" la posizione dell'utente.
     _alternativeRoutes = List<RouteData>.from(routesResult.allRoutes);
 
-    // Salva la destinazione originale per il ricalcolo API (Task 2c).
-    // La destinazione non cambia MAI durante la navigazione: se l'utente
-    // devia, ricalcoliamo da "posizione attuale" a "stessa destinazione".
-    _originalDestination = destination;
+    // FIX 1: Salva la destinazione come COORDINATE (es. "45.478,9.234").
+    // Prima salvava il testo dell'indirizzo (es. "Via Roma, Milano"),
+    // e ogni ricalcolo doveva ri-geocodare il testo, ottenendo punti
+    // leggermente diversi → polyline diversa → falsi ricalcoli a catena.
+    _originalDestination = destinationCoords;
 
     // Aggiorna gli step per la logica di check waypoint di svolta (Step 2.3)
     _routeSteps = routesResult.bestRoute.steps;
 
     // Imposta il flag di navigazione attiva
     _isNavigating = true;
+
+    // Resetta lo stato di arrivo per una nuova navigazione
+    _hasArrived = false;
+    _consecutiveArrivalUpdates = 0;
+
+    // Resetta la progressione step
+    _currentStepIndex = 0;
+    _consecutiveCloseUpdates = 0;
+    currentStepNotifier.value = 0;
+    _consecutiveOffRouteDetects = 0;
+    _routeCheckTicks = 0;
+
+    // FIX 3: Registra il momento di avvio della navigazione.
+    // I primi 15 secondi sono un "grace period" in cui il controllo
+    // di deviazione viene saltato, per dare all'utente il tempo di
+    // mettersi in cammino e allinearsi con la polyline.
+    _navigationStartTime = DateTime.now();
 
     // Notifica la UI che il percorso attivo è stato impostato.
     // La UI aggiornerà la polyline sulla mappa e le indicazioni.
@@ -513,6 +753,10 @@ class NavigationMonitor {
   ///
   /// Chiamato quando l'utente vuole interrompere la navigazione
   /// o quando la navigazione raggiunge la destinazione.
+  ///
+  /// FIX: Ora cancella anche il _zeroSpeedTimer e resetta _isAnalysisRunning.
+  /// Prima, se il timer di 10s era partito prima del "Termina", continuava
+  /// a girare e poteva emettere un overlay fantasma dopo lo stop.
   void stopNavigation() {
     // Imposta il flag a false per fermare la logica di controllo
     _isNavigating = false;
@@ -521,23 +765,147 @@ class NavigationMonitor {
     _routeCheckTimer?.cancel();
     _routeCheckTimer = null;
 
+    // FIX: Cancella il countdown velocità-zero se era in corso.
+    // Senza questo, il timer sopravvive allo stop e dopo 10 secondi
+    // lancia _executeAnalysis() anche se la navigazione è terminata,
+    // causando overlay fantasma sullo schermo di ricerca.
+    _cancelZeroSpeedCountdown();
+
+    // FIX: Resetta il flag di analisi in corso.
+    // Se un'analisi era in esecuzione al momento dello stop (es. la
+    // Roads API stava rispondendo), senza questo reset il flag resterebbe
+    // true per sempre, bloccando tutte le analisi future.
+    _isAnalysisRunning = false;
+
     // Resetta lo stato dei percorsi
     _activeRoute = null;
     _alternativeRoutes = [];
     _originalDestination = null;
     _consecutiveOffRouteDetects = 0;
     _routeCheckTicks = 0;
-    
+    _returnToRouteLockUntil = null;
+
     // Resetta lo stato di tracciamento degli Step
     _currentStepIndex = 0;
     _consecutiveCloseUpdates = 0;
     currentStepNotifier.value = 0;
 
+    // Resetta lo stato di arrivo
+    _hasArrived = false;
+    _consecutiveArrivalUpdates = 0;
+
+    // Resetta l'overlay: se un overlay era visibile, lo rimuoviamo
+    // per evitare che resti appeso dopo lo stop.
+    overlayNotifier.value = null;
+
+    // Resetta le variabili di cooldown spaziale dell'analisi
+    _lastAnalysisLat = null;
+    _lastAnalysisLng = null;
+    _lastApiCallTime = null;
+
+    // Resetta la fase di ricalcolo (chiude eventuali bottom sheet aperti)
+    reroutePhaseNotifier.value = ReroutePhase.none;
+
+    // Resetta il percorso precedente salvato (scelta utente non più necessaria)
+    _previousRoute = null;
+    _previousRouteSteps = [];
+    _previousStepIndex = 0;
+    _previousAlternativeRoutes = [];
+
     // Notifica la UI che non c'è più un percorso attivo
     activeRouteNotifier.value = null;
 
     // Log per debugging
-    print('Navigazione fermata.');
+    print('Navigazione fermata. Timer e overlay azzerati.');
+  }
+
+  // ===========================================================================
+  // SCELTA PERCORSO — CONFERMA O RIPRISTINO
+  // ===========================================================================
+
+  /// L'utente ha scelto di CONTINUARE con il nuovo percorso.
+  ///
+  /// Il nuovo percorso è GIÀ attivo (applicato al momento del ricalcolo),
+  /// quindi qui ci limitiamo a:
+  /// 1. Cancellare il backup del vecchio percorso (non serve più)
+  /// 2. Chiudere il bottom sheet di scelta
+  /// 3. Resettare i contatori di deviazione per il nuovo percorso
+  void confirmNewRoute() {
+    print('✅ Utente ha confermato il nuovo percorso.');
+
+    // Il vecchio percorso non serve più
+    _previousRoute = null;
+    _previousRouteSteps = [];
+    _previousStepIndex = 0;
+    _previousAlternativeRoutes = [];
+
+    // Resetta i contatori di deviazione per ricominciare da zero
+    // col nuovo percorso (altrimenti il primo tick potrebbe scattare
+    // come "off route" dal vecchio conteggio).
+    _consecutiveOffRouteDetects = 0;
+    _routeCheckTicks = 0;
+
+    // Chiude il bottom sheet
+    reroutePhaseNotifier.value = ReroutePhase.none;
+  }
+
+  /// L'utente ha scelto di TORNARE al vecchio percorso.
+  ///
+  /// Ripristina il percorso che era attivo prima del ricalcolo:
+  /// 1. Rimette _activeRoute al percorso precedente
+  /// 2. Ripristina steps, step index, e alternative
+  /// 3. Notifica la UI per aggiornare mappa e indicazioni
+  /// 4. Chiude il bottom sheet
+  ///
+  /// NOTA: l'utente potrebbe NON essere fisicamente sul vecchio percorso.
+  /// Il sistema di monitoraggio continuerà a controllare la posizione
+  /// e se necessario scatterà un nuovo ricalcolo.
+  void restorePreviousRoute() {
+    if (_previousRoute == null) {
+      print('⚠️ Nessun percorso precedente da ripristinare.');
+      reroutePhaseNotifier.value = ReroutePhase.none;
+      return;
+    }
+
+    print('↩️ Utente ha scelto di tornare al vecchio percorso.');
+
+    // Ripristina il percorso precedente come attivo
+    _activeRoute = _previousRoute;
+    _routeSteps = List<DirectionStep>.from(_previousRouteSteps);
+    _alternativeRoutes = List<RouteData>.from(_previousAlternativeRoutes);
+
+    // Ripristina l'indice dello step (dove era arrivato l'utente)
+    _currentStepIndex = _previousStepIndex;
+    _consecutiveCloseUpdates = 0;
+    currentStepNotifier.value = _previousStepIndex;
+
+    // Cancella il backup (ripristino completato)
+    _previousRoute = null;
+    _previousRouteSteps = [];
+    _previousStepIndex = 0;
+    _previousAlternativeRoutes = [];
+
+    // Resetta i contatori di deviazione
+    _consecutiveOffRouteDetects = 0;
+    _routeCheckTicks = 0;
+
+    // Notifica la UI: la mappa deve mostrare di nuovo il vecchio percorso
+    activeRouteNotifier.value = _activeRoute;
+
+    // Chiude il bottom sheet
+    reroutePhaseNotifier.value = ReroutePhase.none;
+
+    // Attiva il lock di 15 secondi: blocca i controlli di deviazione
+    // e le chiamate API per dare all'utente tempo di tornare sul percorso.
+    _returnToRouteLockUntil = DateTime.now().add(const Duration(seconds: 15));
+
+    // Emette overlay arancione "Torna indietro"
+    overlayNotifier.value = NavigationOverlayState(
+      type: OverlayType.returnToRoute,
+      message: 'Torna indietro e riprendi il percorso!',
+    );
+
+    print('✅ Percorso precedente ripristinato: ${_activeRoute!.totalDuration}');
   }
 
   /// Rilascia tutte le risorse (timer, listener).
@@ -560,6 +928,7 @@ class NavigationMonitor {
     // Distrugge i notifier per evitare memory leak
     overlayNotifier.dispose();
     activeRouteNotifier.dispose();
+    reroutePhaseNotifier.dispose();
   }
 
   // ===========================================================================
@@ -595,7 +964,15 @@ class NavigationMonitor {
         // è considerato affidabile. Sotto soglia, direction mantiene
         // il suo ultimo valore valido (o resta null se mai impostato).
         if (_currentSpeed >= kSpeedThresholdKmH) {
+          final bool wasNull = _direction == null;
           _direction = _rawBearing;
+          if (wasNull) {
+            print(
+              '🧭 OVERLAY DEBUG: PRIMO bearing acquisito! '
+              'direction=$_direction° (speed=$_currentSpeed km/h). '
+              'L\'analisi overlay è ora ABILITATA.',
+            );
+          }
         }
         // Se la velocità è sotto soglia, NON aggiorniamo _direction.
         // Questo è intenzionale: preferiamo un bearing "vecchio ma buono"
@@ -619,6 +996,10 @@ class NavigationMonitor {
   /// 3. Si controlla che _isAnalysisRunning sia false
   /// Solo se tutte le condizioni sono soddisfatte si procede con l'analisi.
   void _startZeroSpeedCountdown() {
+    // Salviamo la posizione in cui l'utente si è fermato
+    final double startLat = _currentLat ?? 0.0;
+    final double startLng = _currentLng ?? 0.0;
+
     _zeroSpeedTimer = Timer(
       const Duration(milliseconds: kZeroSpeedDelayMs),
       () {
@@ -626,12 +1007,35 @@ class NavigationMonitor {
         // non è più cancellabile (è già scaduto).
         _zeroSpeedTimer = null;
 
-        // Doppia verifica: anche se abbiamo avviato il timer quando la
-        // velocità era sotto soglia, controlliamo di nuovo. Potrebbe essere
-        // cambiata nel frattempo a causa di un aggiornamento GPS arrivato
-        // tra l'ultimo check e lo scadere del timer.
+        // Calcoliamo la distanza percorsa nei 10 secondi per capire se
+        // l'utente è davvero fermo o sta solo scendendo sotto i 2.5 km/h
+        // (es. camminando molto lentamente o con segnale GPS disturbato).
+        final double distMoved = haversineDistance(
+          startLat,
+          startLng,
+          _currentLat ?? 0.0,
+          _currentLng ?? 0.0,
+        );
+
+        // Doppia verifica: controlliamo che la velocità istantanea sia ancora
+        // bassa E che l'utente non si sia mosso di più di 4 metri.
+        // 4 metri in 10 secondi = 0.4 m/s (1.4 km/h), palesemente in movimento.
+        //if (_currentSpeed < kZeroSpeedThresholdKmH && distMoved <= 6.0) {
         if (_currentSpeed < kZeroSpeedThresholdKmH) {
+
+            print(
+            '⏱️ OVERLAY DEBUG: Countdown ${kZeroSpeedDelayMs}ms SCADUTO — '
+            'velocità: ${_currentSpeed.toStringAsFixed(1)} km/h, '
+            'spostamento: ${distMoved.toStringAsFixed(1)}m. '
+            'Lancio _executeAnalysis()...',
+          );
           _executeAnalysis();
+        } else {
+          print(
+            '⏱️ OVERLAY DEBUG: Countdown scaduto MA utente in movimento '
+            '(speed: ${_currentSpeed.toStringAsFixed(1)} km/h, '
+            'spostamento: ${distMoved.toStringAsFixed(1)}m) — analisi SALTATA.',
+          );
         }
       },
     );
@@ -671,8 +1075,26 @@ class NavigationMonitor {
   Future<void> _executeAnalysis() async {
     // Evita analisi concorrenti. Se un'analisi è già in corso (es. la
     // chiamata Roads API è lenta), non ne lanciamo una seconda.
-    if (_isAnalysisRunning) return;
+    if (_isAnalysisRunning) {
+      print(
+        '🔒 OVERLAY DEBUG: _executeAnalysis bloccata — analisi già in corso',
+      );
+      return;
+    }
+
+    // FIX: Se la navigazione è stata fermata nel frattempo (l'utente ha
+    // premuto "Termina" mentre il timer di 10s era in corso), non lanciamo
+    // l'analisi. Senza questo check, il timer scadeva e l'overlay appariva
+    // anche dopo lo stop della navigazione.
+    if (!_isNavigating) {
+      print(
+        '🔒 OVERLAY DEBUG: _executeAnalysis bloccata — navigazione non attiva',
+      );
+      return;
+    }
+
     _isAnalysisRunning = true;
+    print('🟢 OVERLAY DEBUG: _executeAnalysis AVVIATA');
 
     try {
       // =====================================================================
@@ -693,15 +1115,9 @@ class NavigationMonitor {
 
       // Se la posizione non è disponibile, non possiamo fare nulla.
       if (snapshotLat == null || snapshotLng == null) {
-        return;
-      }
-
-      // Se direction è null, nessun bearing affidabile è stato ancora acquisito.
-      // Non possiamo calcolare i punti laterali (non sappiamo dove è "destra"
-      // e dove è "sinistra"). Interrompiamo l'elaborazione.
-      // Le funzionalità che dipendono da direction restano in standby
-      // fino a quando l'utente non si muove a velocità sufficiente.
-      if (snapshotDirection == null) {
+        print(
+          '❌ OVERLAY DEBUG: ABORT — posizione GPS non disponibile (lat=$snapshotLat, lng=$snapshotLng)',
+        );
         return;
       }
 
@@ -709,8 +1125,13 @@ class NavigationMonitor {
       // STEP 2.3 — VERIFICA VICINANZA A WAYPOINT DI SVOLTA
       // =====================================================================
       //
-      // Controlliamo se l'utente è fermo ESATTAMENTE su un punto di svolta
-      // del percorso calcolato. Se sì, l'overlay mostra l'istruzione di
+      // PRIMA del check bearing! Questo step ha bisogno SOLO di lat/lng,
+      // non della direzione. Così l'overlay di svolta funziona anche
+      // quando l'utente è fermo alla partenza e non ha mai camminato
+      // (bearing ancora null).
+      //
+      // Controlliamo se l'utente è fermo su un punto di svolta del
+      // percorso calcolato. Se sì, l'overlay mostra l'istruzione di
       // navigazione (dal campo html_instructions dello step) e usciamo.
       //
       // COME SI NAVIGANO GLI STEP DEL JSON DELLA DIRECTIONS API:
@@ -730,77 +1151,104 @@ class NavigationMonitor {
       if (turnResult != null) {
         // L'utente è vicino a un waypoint di svolta!
         // Mostra l'istruzione di navigazione e interrompi.
+        // FORCE REFRESH: resettiamo a null prima di settare il nuovo valore.
+        // Questo garantisce che NavigationOverlay.didUpdateWidget() veda
+        // sempre la transizione null → non-null e riavvii animazione + timer.
+        overlayNotifier.value = null;
+        print(
+          '🔵 OVERLAY DEBUG: WAYPOINT DI SVOLTA RILEVATO! '
+          'Messaggio: "${turnResult.message}", maneuver: ${turnResult.maneuver}',
+        );
         overlayNotifier.value = turnResult;
+        print('🟢 Overlay impostato: turnInstruction');
         return;
       }
 
-      // L'utente NON è su un incrocio di svolta del percorso.
-      // Procediamo con il rilevamento delle strade laterali.
+      print(
+        '⬜ OVERLAY DEBUG: Nessun waypoint di svolta vicino '
+        '(${_routeSteps.length} step controllati, raggio=${kTurnWaypointRadiusMeters}m). '
+        'Nessun overlay emesso.',
+      );
 
       // =====================================================================
-      // STEP 2.4 — CALCOLO DEI PUNTI LATERALI
+      // STEP 2.4 — CONTROLLO COOLDOWN SPAZIALE (ANTI-SPAM)
       // =====================================================================
       //
-      // Calcoliamo 10 punti attorno alla posizione dell'utente usando
-      // la direction come riferimento. Vedi computeAllLateralPoints()
-      // in geo_utils.dart per i dettagli sulla disposizione dei punti.
+      // Evitiamo di spammare l'utente con continui overlay se rimane fermo
+      // nella stessa area (es. seduto su una panchina) per molti minuti.
+      if (_lastAnalysisLat != null && _lastAnalysisLng != null) {
+        final double distFromLastAnalysis = haversineDistance(
+          snapshotLat,
+          snapshotLng,
+          _lastAnalysisLat!,
+          _lastAnalysisLng!,
+        );
+
+        if (distFromLastAnalysis < 20.0) {
+          print(
+            '⏸️ OVERLAY DEBUG: Utente fermo nello stesso posto '
+            '(distanza ${distFromLastAnalysis.toStringAsFixed(1)}m < 20m). '
+            'Skip analisi per non spammare la UI e la API.',
+          );
+          return;
+        }
+      }
+
+      // Fallback: se il bearing stabilizzato è null, usa quello raw del GPS
+      final double effectiveDirection = snapshotDirection ?? _rawBearing;
+
+      if (snapshotDirection == null) {
+        print('⚠️ OVERLAY DEBUG: direction null — uso _rawBearing come fallback (${_rawBearing.toStringAsFixed(1)}°)');
+      }
+
+      // questo sotto sostituito da quello sopra
+      // if (snapshotDirection == null) {
+       // print(
+         // '❌ OVERLAY DEBUG: direction null — skip rilevamento strade laterali',
+        //);
+        //return;
+      //}
+
+      // =====================================================================
+      // LIMITATORE CHIAMATE API (Anti-Spam se fermi dove non ci sono strade)
+      // =====================================================================
+      if (_lastApiCallTime != null) {
+        final int elapsedSeconds = DateTime.now().difference(_lastApiCallTime!).inSeconds;
+        if (elapsedSeconds < 30) {
+          print(
+            '⏸️ OVERLAY DEBUG: Rate limit Google API ($elapsedSeconds s < 30s). Skip analisi.',
+          );
+          return;
+        }
+      }
 
       final lateralPoints = computeAllLateralPoints(
         snapshotLat,
         snapshotLng,
-        snapshotDirection,
+        effectiveDirection, // <-- Sostituito qui prima snapDirection
       );
 
-      // =====================================================================
-      // STEP 2.5 — CHIAMATA ROADS API
-      // =====================================================================
-      //
-      // Inviamo tutti i 10 punti in una SINGOLA chiamata alla Roads API.
-      // Questo è ottimale perché:
-      // 1. Riduce la latenza (una chiamata invece di 10)
-      // 2. Riduce il consumo di quota API
-      // 3. La Roads API supporta fino a 100 punti per chiamata
 
+
+      _lastApiCallTime = DateTime.now(); // Registra il momento della chiamata
       final snappedPoints = await _roadsService.findNearestRoads(lateralPoints);
 
-      // =====================================================================
-      // STEP 2.6 — ANALISI DELLA RISPOSTA E OUTPUT VISIVO
-      // =====================================================================
-      //
-      // INTERPRETAZIONE DELLA RISPOSTA:
-      // La Roads API restituisce `snappedPoints`: un array dei punti per cui
-      // ha trovato una strada nelle vicinanze.
-      //
-      // - Se snappedPoints è null → la chiamata è fallita (errore di rete/API).
-      //   Non facciamo nulla per non disturbare l'utente con errori.
-      //
-      // - Se snappedPoints è vuoto → nessuna strada laterale trovata.
-      //   Questo è un CASO LEGITTIMO, non un errore. Significa che l'utente
-      //   è fermo in una zona senza strade laterali (es. autostrada,
-      //   campagna, zona pedonale). Non mostriamo nulla.
-      //
-      // - Se snappedPoints contiene almeno un elemento → c'è una strada
-      //   laterale! Mostriamo l'overlay "vai diritto stronzo".
-      //
-      // NOTA: controlliamo la PRESENZA di elementi (isNotEmpty), non il NUMERO.
-      // Anche un singolo punto snappato è sufficiente per concludere che
-      // c'è una strada laterale nelle vicinanze.
-
-      if (snappedPoints == null) {
-        // Chiamata fallita — fallback silenzioso.
-        // L'utente non viene disturbato. Meglio non mostrare nulla
-        // che mostrare un'informazione potenzialmente sbagliata.
-        return;
-      }
-
-      if (snappedPoints.isNotEmpty) {
-        // Strada laterale rilevata! Mostra l'overlay.
+      if (snappedPoints != null && snappedPoints.isNotEmpty) {
+        final msg =
+            kLateralRoadMessages[_random.nextInt(kLateralRoadMessages.length)];
+        overlayNotifier.value = null; // force refresh
         overlayNotifier.value = NavigationOverlayState(
           type: OverlayType.lateralRoadDetected,
-          message: 'vai diritto stronzo',
+          message: msg,
         );
+        print('🟠 OVERLAY DEBUG: Strada laterale rilevata. Messaggio: "$msg"');
+
+        // Salva la posizione per evitare di ripetere l'overlay SOLO se trovato in quest'area
+        _lastAnalysisLat = snapshotLat;
+        _lastAnalysisLng = snapshotLng;
+      } else {
+        print('⬜ OVERLAY DEBUG: Nessuna strada laterale rilevata in questo punto.');
       }
-      // Se snappedPoints è vuoto, non facciamo nulla. Nessun overlay.
     } finally {
       // Assicuriamoci di resettare il flag anche in caso di eccezioni
       // non gestite. Il blocco finally viene eseguito SEMPRE, sia che
@@ -824,10 +1272,83 @@ class NavigationMonitor {
   /// - NavigationOverlayState con l'istruzione, se l'utente è vicino a un waypoint
   /// - null se l'utente non è vicino a nessun waypoint
   NavigationOverlayState? _checkNearTurnWaypoint(double lat, double lng) {
-    // Se non c'è un percorso calcolato, non possiamo controllare nulla
-    if (_routeSteps.isEmpty) return null;
+    if (_routeSteps.isEmpty) {
+      print(
+        '🔍 OVERLAY DEBUG: _checkNearTurnWaypoint — 0 step nel percorso, skip.',
+      );
+      return null;
+    }
 
-    for (final step in _routeSteps) {
+    double closestDistance = double.infinity;
+    String closestInstruction = '';
+
+    // =====================================================================
+    // FIX BUG "VAI DRITTO": Check sulla startLocation dello step corrente
+    // =====================================================================
+    //
+    // PROBLEMA ORIGINALE:
+    // La logica di avanzamento step in updatePosition() incrementa
+    // _currentStepIndex quando l'utente è a < 40m dall'endLocation.
+    // Siccome 40m > kTurnWaypointRadiusMeters (25m), lo step viene
+    // "consumato" PRIMA che il check di prossimità lo rilevi.
+    // L'utente si trova quindi alla startLocation dello step corrente
+    // (= endLocation dello step precedente = l'incrocio), ma il ciclo
+    // sottostante controlla solo le endLocation → nessun match.
+    //
+    // FIX:
+    // Controlliamo ANCHE la startLocation dello step corrente.
+    // Se l'utente è entro kTurnWaypointRadiusMeters dalla start del
+    // suo step attuale, mostriamo l'istruzione di QUESTO step
+    // (che è esattamente ciò che l'utente deve fare ORA).
+    //
+    // ESEMPIO:
+    // Step i:   A → B  ("Vai verso nord")
+    // Step i+1: B → C  ("Continua dritto" / "Svolta a destra")
+    // L'utente è a B, _currentStepIndex = i+1.
+    // → Controlliamo distanza(utente, B) = distanza(utente, step[i+1].start)
+    // → Match! Mostriamo l'istruzione dello step i+1
+    if (_currentStepIndex < _routeSteps.length) {
+      final currentStep = _routeSteps[_currentStepIndex];
+      final double distToStart = haversineDistance(
+        lat,
+        lng,
+        currentStep.startLat,
+        currentStep.startLng,
+      );
+
+      if (distToStart <= kTurnWaypointRadiusMeters) {
+        final String prefix =
+            kTurnEncouragementPrefixes[_random.nextInt(
+              kTurnEncouragementPrefixes.length,
+            )];
+        print(
+          '🔵 OVERLAY DEBUG: Utente vicino alla START dello step corrente '
+          '(${distToStart.toStringAsFixed(1)}m ≤ ${kTurnWaypointRadiusMeters}m). '
+          'Istruzione: "${currentStep.instruction}"',
+        );
+        return NavigationOverlayState(
+          type: OverlayType.turnInstruction,
+          message: '$prefix${currentStep.instruction}',
+          maneuver: currentStep.maneuver,
+        );
+      }
+
+      // Traccia per debug anche se non ha matchato
+      if (distToStart < closestDistance) {
+        closestDistance = distToStart;
+        closestInstruction = '(start) ${currentStep.instruction}';
+      }
+    }
+
+    // FIX precedente: Iteriamo SOLO sugli step da _currentStepIndex in poi.
+    // Prima iteravamo su TUTTI gli step, compresi quelli già completati
+    // (dietro l'utente). Se l'utente passava vicino alla endLocation di
+    // uno step passato (es. "Vai a destra" di 50m fa), l'overlay si
+    // riattivava con l'istruzione sbagliata. Ora controlliamo solo
+    // gli step futuri: quelli che l'utente deve ancora percorrere.
+    for (int i = _currentStepIndex; i < _routeSteps.length; i++) {
+      final step = _routeSteps[i];
+
       // Calcola la distanza tra la posizione dell'utente e la end_location
       // dello step. La end_location è il punto dove termina il segmento
       // corrente e inizia il segmento successivo — ovvero il punto dove
@@ -839,23 +1360,33 @@ class NavigationMonitor {
         step.endLng,
       );
 
-      // Se la distanza è inferiore al raggio configurabile (default 5m),
-      // l'utente è considerato "sul" waypoint di svolta.
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestInstruction = step.instruction;
+      }
+
       if (distance <= kTurnWaypointRadiusMeters) {
         // L'utente è fermo esattamente su un punto di svolta del percorso!
-        // Mostra l'istruzione di navigazione testuale presa da html_instructions.
+        // Mostra l'istruzione di navigazione con un prefisso di incoraggiamento
+        // randomizzato per rendere l'esperienza più positiva e rassicurante.
         //
-        // Usiamo step.instruction (che è il campo html_instructions ripulito
-        // dai tag HTML) come testo dell'overlay, così l'utente legge
-        // esattamente l'istruzione che la Directions API ha fornito per
-        // questo specifico punto del percorso.
+        // ESEMPIO: "Ci siamo quasi! Svolta a destra in Via Roma"
+        final String prefix =
+            kTurnEncouragementPrefixes[_random.nextInt(
+              kTurnEncouragementPrefixes.length,
+            )];
         return NavigationOverlayState(
           type: OverlayType.turnInstruction,
-          message: step.instruction,
+          message: '$prefix${step.instruction}',
           maneuver: step.maneuver,
         );
       }
     }
+
+    print(
+      '🔍 OVERLAY DEBUG: Waypoint più vicino a ${closestDistance.toStringAsFixed(1)}m '
+      '(soglia=${kTurnWaypointRadiusMeters}m) — "$closestInstruction"',
+    );
 
     // Nessun waypoint di svolta è abbastanza vicino
     return null;
@@ -932,6 +1463,16 @@ class NavigationMonitor {
     // diversi secondi.
     if (_isRerouting) return;
 
+    // Se è attivo il lock "torna al percorso", saltiamo tutti i controlli.
+    // L'utente ha scelto di tornare al vecchio percorso e ha 15 secondi
+    // per manovrare senza che il sistema rilevi nuove deviazioni.
+    if (_returnToRouteLockUntil != null) {
+      if (DateTime.now().isBefore(_returnToRouteLockUntil!)) {
+        return;
+      }
+      _returnToRouteLockUntil = null; // Lock scaduto, pulizia
+    }
+
     // Cattura uno snapshot delle coordinate ATTUALI.
     // Questo è importante per coerenza: durante il controllo (che potrebbe
     // essere asincrono se si arriva al Task 2c), la posizione GPS continua
@@ -939,9 +1480,23 @@ class NavigationMonitor {
     final double lat = _currentLat!;
     final double lng = _currentLng!;
 
+    // FIX 3: Grace period dei primi 15 secondi dopo l'avvio della navigazione.
+    // Nei primi 15 secondi saltiamo il controllo di deviazione per dare
+    // all'utente il tempo di mettersi in cammino e allinearsi alla polyline.
+    if (_navigationStartTime != null) {
+      final elapsed = DateTime.now()
+          .difference(_navigationStartTime!)
+          .inSeconds;
+      if (elapsed < 15) {
+        return;
+      }
+    }
+
     // TASK 5 - Filtro Signal Drift basato sull'accuratezza GPS
     if (_currentAccuracy > 30.0) {
-      print('⚠️ Segnale GPS debole (accuracy: ${_currentAccuracy}m). Ignoro controllo percorso.');
+      print(
+        '⚠️ Segnale GPS debole (accuracy: ${_currentAccuracy}m). Ignoro controllo percorso.',
+      );
       return;
     }
 
@@ -949,7 +1504,10 @@ class NavigationMonitor {
     _routeCheckTicks++;
     int requiredTicks = 1; // >60km/h: ogni 2 secondi (1 tick)
     if (_currentSpeed <= 15.0) {
-      requiredTicks = 3; // <=15km/h o fermo: ogni 6 secondi (3 tick)
+      requiredTicks = 1; // <=15km/h (pedonale): ogni 2 secondi (1 tick)
+      // FIX: era 3 (6 secondi). Troppo lento per navigazione pedonale.
+      // A piedi servono risposte rapide, l'utente potrebbe aver già
+      // imboccato una strada sbagliata dopo 6 secondi.
     } else if (_currentSpeed <= 60.0) {
       requiredTicks = 2; // 15-60km/h: ogni 4 secondi (2 tick)
     }
@@ -978,6 +1536,14 @@ class NavigationMonitor {
     // Se l'utente è sul percorso, tutto OK. Nessuna azione necessaria.
     if (onActiveRoute) {
       _consecutiveOffRouteDetects = 0; // Azzera strike di deviazione
+      // Se era in fase di ricalcolo (offRoute o rerouting), resetta
+      // perché l'utente è tornato da solo. MA se siamo in routeChanged,
+      // NON resettiamo: il bottom sheet di scelta deve restare visibile
+      // finché l'utente non decide (conferma nuovo o torna al vecchio).
+      if (reroutePhaseNotifier.value == ReroutePhase.offRoute ||
+          reroutePhaseNotifier.value == ReroutePhase.rerouting) {
+        reroutePhaseNotifier.value = ReroutePhase.none;
+      }
       return; // ← L'utente segue il percorso, aspettiamo il prossimo tick
     }
 
@@ -986,11 +1552,20 @@ class NavigationMonitor {
     // =========================================================================
     //
     // La distanza minima dalla polyline attiva è > 40 metri.
-    
+
+    // Se il bottom sheet "routeChanged" è ancora aperto (l'utente non ha
+    // ancora scelto), NON lanciamo un altro ricalcolo. Aspettiamo che
+    // l'utente faccia la sua scelta prima di fare qualsiasi altra cosa.
+    if (reroutePhaseNotifier.value == ReroutePhase.routeChanged) {
+      return;
+    }
+
     // TASK 5 - Strikes System (Verifica su più letture)
     _consecutiveOffRouteDetects++;
     if (_consecutiveOffRouteDetects < 2) {
-      print('⚠️ Deviazione rilevata (Strike $_consecutiveOffRouteDetects). Attendo conferma...');
+      print(
+        '⚠️ Deviazione rilevata (Strike $_consecutiveOffRouteDetects). Attendo conferma...',
+      );
       return;
     }
     _consecutiveOffRouteDetects = 0; // Azzera prima del varo ricalcolo
@@ -999,6 +1574,10 @@ class NavigationMonitor {
 
     // Log per debugging: segnala la deviazione confermata
     print('⚠️ Deviazione confermata! L\'utente è fuori dal percorso attivo.');
+
+    // Notifica la UI che l'utente ha deviato → mostra bottom sheet
+    // "Ricalcolo in corso..." con spinner e messaggio rassicurante.
+    reroutePhaseNotifier.value = ReroutePhase.offRoute;
 
     // =========================================================================
     // TASK 2b — CONTROLLO PERCORSI ALTERNATIVI
@@ -1041,13 +1620,21 @@ class NavigationMonitor {
           'Cambio percorso attivo.',
         );
 
+        // SALVA IL PERCORSO PRECEDENTE per dare all'utente la scelta
+        // di tornare indietro. Viene cancellato quando l'utente conferma
+        // (confirmNewRoute) o ripristinato (restorePreviousRoute).
+        _previousRoute = _activeRoute;
+        _previousRouteSteps = List<DirectionStep>.from(_routeSteps);
+        _previousStepIndex = _currentStepIndex;
+        _previousAlternativeRoutes = List<RouteData>.from(_alternativeRoutes);
+
         // Sostituisce il percorso attivo con l'alternativo
         _activeRoute = alternativeRoute;
 
         // Aggiorna gli step del percorso per il check dei waypoint di svolta
         _routeSteps = alternativeRoute.steps;
 
-        // Siccome ci siamo agganciati magicamente al percorso di scorta, 
+        // Siccome ci siamo agganciati magicamente al percorso di scorta,
         // azzeriamo tutti i conteggi per fargli ricalcolare dal rigo 0 le sue istruzioni
         _currentStepIndex = 0;
         _consecutiveCloseUpdates = 0;
@@ -1059,6 +1646,10 @@ class NavigationMonitor {
         // - Le indicazioni passo-passo
         // - Distanza e durata totale nell'header
         activeRouteNotifier.value = _activeRoute;
+
+        // Notifica la UI che il percorso è cambiato → mostra animazione
+        // "Va tutto bene. Sembra che il percorso sia cambiato."
+        reroutePhaseNotifier.value = ReroutePhase.routeChanged;
 
         // Usciamo dalla funzione: abbiamo trovato un percorso compatibile,
         // non serve controllare gli altri né fare chiamate API.
@@ -1084,6 +1675,10 @@ class NavigationMonitor {
       '❌ Nessun percorso alternativo compatibile. '
       'Ricalcolo via API Google...',
     );
+
+    // Notifica la UI che il ricalcolo API è in corso.
+    // Il bottom sheet aggiorna il messaggio per rassicurare l'utente.
+    reroutePhaseNotifier.value = ReroutePhase.rerouting;
 
     // Lancia il ricalcolo asincrono. Non usiamo await perché siamo in un
     // callback del timer (non è async). _executeReroute() gestisce
@@ -1153,10 +1748,20 @@ class NavigationMonitor {
       // il sistema riproverà.
       if (newResult == null) {
         print('⚠️ Ricalcolo fallito. Riproverò al prossimo ciclo.');
+        // Reset della fase: il prossimo tick riproverà
+        reroutePhaseNotifier.value = ReroutePhase.none;
         return;
       }
 
       // --- AGGIORNAMENTO PERCORSI (stessa logica del TASK 1) ---
+
+      // SALVA IL PERCORSO PRECEDENTE per dare all'utente la scelta
+      // di tornare indietro. Viene cancellato quando l'utente conferma
+      // (confirmNewRoute) o ripristinato (restorePreviousRoute).
+      _previousRoute = _activeRoute;
+      _previousRouteSteps = List<DirectionStep>.from(_routeSteps);
+      _previousStepIndex = _currentStepIndex;
+      _previousAlternativeRoutes = List<RouteData>.from(_alternativeRoutes);
 
       // Il percorso migliore (durata minore) diventa il nuovo attivo
       _activeRoute = newResult.bestRoute;
@@ -1167,9 +1772,18 @@ class NavigationMonitor {
       // Aggiorna gli step per il check dei waypoint di svolta
       _routeSteps = newResult.bestRoute.steps;
 
+      // Resetta la progressione step per il nuovo percorso
+      _currentStepIndex = 0;
+      _consecutiveCloseUpdates = 0;
+      currentStepNotifier.value = 0;
+
       // Notifica la UI che il percorso è cambiato.
       // La NavigationScreen aggiornerà mappa, indicazioni, ecc.
       activeRouteNotifier.value = _activeRoute;
+
+      // Notifica la UI che il ricalcolo è completato → mostra animazione
+      // "Va tutto bene. Sembra che il percorso sia cambiato."
+      reroutePhaseNotifier.value = ReroutePhase.routeChanged;
 
       // Log per debugging
       print(
@@ -1180,6 +1794,8 @@ class NavigationMonitor {
     } catch (e) {
       // Gestisce eccezioni non previste (parsing, rete, ecc.)
       print('❌ Eccezione durante il ricalcolo: $e');
+      // Reset della fase in caso di errore
+      reroutePhaseNotifier.value = ReroutePhase.none;
     } finally {
       // Resetta SEMPRE il flag, anche in caso di errore.
       // Senza questo reset, il sistema resterebbe bloccato per sempre

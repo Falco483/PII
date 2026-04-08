@@ -6,7 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter_android/google_maps_flutter_android.dart';
 import 'package:google_maps_flutter_platform_interface/google_maps_flutter_platform_interface.dart';
-import 'screens/navigation_screen.dart';
+import 'package:pii/screens/navigation_screen.dart';
 
 /// Entry point dell'applicazione
 void main() async {
@@ -40,7 +40,7 @@ class NavigationApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       // Titolo dell'app (visibile nella tab del browser)
-      title: 'Navigation App',
+      title: 'La mia mappa',
 
       // Nasconde il banner di debug
       debugShowCheckedModeBanner: false,

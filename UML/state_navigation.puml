@@ -1,0 +1,51 @@
+@startuml
+title State Machine - Navigation App States
+hide empty description
+
+[*] --> Search : App Launched
+
+state Search {
+    Search : User enters destination
+}
+
+state PlaceSelected {
+    PlaceSelected : Show Place Details BottomSheet
+}
+
+state RoutePreview {
+    RoutePreview : Load & show Best Route
+}
+
+state Navigating {
+    Navigating : Active GPS Tracking
+    Navigating : Dynamic UI active
+}
+
+state Arrived {
+    Arrived : Arrival Celebration Animation
+}
+
+Search --> PlaceSelected : User taps autocomplete result
+PlaceSelected --> RoutePreview : User taps "Directions"
+RoutePreview --> Navigating : User taps "Start Navigation"
+Navigating --> Search : User taps "Stop"
+Navigating --> Arrived : Distance to dest < 20m (consistently)
+Arrived --> Search : User dismisses overlay
+
+state Navigating {
+    state "Idle (On Route)" as NavIdle
+    state "Rerouting/Off-Route" as Rerouting {
+        state "OffRoute" as PhaseOffRoute
+        state "Calling API" as PhaseAPI
+        state "Route Changed" as PhaseChanged
+        
+        PhaseOffRoute --> PhaseAPI : API Call initiated
+        PhaseAPI --> PhaseChanged : Route computed
+        PhaseChanged --> PhaseOffRoute : User refuses new route
+    }
+    
+    NavIdle --> Rerouting : GPS deviation > tolerance threshold
+    Rerouting --> NavIdle : New route accepted
+}
+
+@enduml
