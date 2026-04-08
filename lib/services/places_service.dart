@@ -36,6 +36,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:http/http.dart' as http;
 
@@ -272,10 +273,12 @@ class PlacesService {
       return predictions
           .map((prediction) => PlaceSuggestion.fromJson(prediction))
           .toList();
+    } on SocketException {
+      // Nessuna rete o DNS non risolto: fallback alla cronologia nel widget.
+      return [];
     } catch (e) {
       // Gestisce qualsiasi eccezione non prevista (parsing, rete, ecc.)
-      print('Eccezione in getAutocompleteSuggestions: $e');
-      // Restituisce lista vuota come fallback silenzioso
+      print('Errore autocomplete non gestito: $e');
       return [];
     }
   }
@@ -374,9 +377,12 @@ class PlacesService {
         // Indirizzo formattato (può essere assente)
         formattedAddress: result['formatted_address'] ?? '',
       );
+    } on SocketException {
+      // Nessuna rete o DNS non risolto.
+      return null;
     } catch (e) {
       // Gestisce qualsiasi eccezione non prevista
-      print('Eccezione in getPlaceDetails: $e');
+      print('Errore details non gestito: $e');
       return null;
     }
   }
