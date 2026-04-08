@@ -37,6 +37,8 @@ dependencies:
   
   # Google Maps per Flutter (Android/iOS/Web)
   google_maps_flutter: ^2.5.0
+  google_maps_flutter_android: ^2.18.12
+  google_maps_flutter_platform_interface: ^2.14.1
   
   # HTTP client per chiamate API
   http: ^1.1.0

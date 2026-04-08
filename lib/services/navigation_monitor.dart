@@ -52,7 +52,12 @@ import 'navigation_session_service.dart';
 ///   Mostra un messaggio di incoraggiamento ("Continua dritto, stai andando bene!").
 /// - [arrivalCelebration]: l'utente ha raggiunto la destinazione.
 ///   Mostra un messaggio di congratulazioni con festa.
-enum OverlayType { turnInstruction, lateralRoadDetected, arrivalCelebration, returnToRoute }
+enum OverlayType {
+  turnInstruction,
+  lateralRoadDetected,
+  arrivalCelebration,
+  returnToRoute,
+}
 
 /// Stato dell'overlay da mostrare sulla mappa.
 ///
@@ -782,7 +787,9 @@ class NavigationMonitor {
   /// Prima, se il timer di 10s era partito prima del "Termina", continuava
   /// a girare e poteva emettere un overlay fantasma dopo lo stop.
   void stopNavigation() {
-    print('🛑 stopNavigation INIZIO: _currentSession è ${_currentSession == null ? 'NULL' : 'VALIDA'}');
+    print(
+      '🛑 stopNavigation INIZIO: _currentSession è ${_currentSession == null ? 'NULL' : 'VALIDA'}',
+    );
 
     // GUARD: se stopNavigation viene chiamato senza startNavigation,
     // _currentSession è null e non facciamo nulla.
@@ -791,7 +798,9 @@ class NavigationMonitor {
       return;
     }
 
-    print('🛑 stopNavigation: Sessione ha ${_currentSession!.overlays.length} overlay e ${_currentSession!.rerouteCount} ricalcoli');
+    print(
+      '🛑 stopNavigation: Sessione ha ${_currentSession!.overlays.length} overlay e ${_currentSession!.rerouteCount} ricalcoli',
+    );
 
     // Cancella PRIMA il timer e il countdown per garantire che nessun
     // overlay venga registrato dopo il salvataggio della sessione.
@@ -1060,8 +1069,7 @@ class NavigationMonitor {
         // 4 metri in 10 secondi = 0.4 m/s (1.4 km/h), palesemente in movimento.
         //if (_currentSpeed < kZeroSpeedThresholdKmH && distMoved <= 6.0) {
         if (_currentSpeed < kZeroSpeedThresholdKmH) {
-
-            print(
+          print(
             '⏱️ OVERLAY DEBUG: Countdown ${kZeroSpeedDelayMs}ms SCADUTO — '
             'velocità: ${_currentSpeed.toStringAsFixed(1)} km/h, '
             'spostamento: ${distMoved.toStringAsFixed(1)}m. '
@@ -1237,22 +1245,26 @@ class NavigationMonitor {
       final double effectiveDirection = snapshotDirection ?? _rawBearing;
 
       if (snapshotDirection == null) {
-        print('⚠️ OVERLAY DEBUG: direction null — uso _rawBearing come fallback (${_rawBearing.toStringAsFixed(1)}°)');
+        print(
+          '⚠️ OVERLAY DEBUG: direction null — uso _rawBearing come fallback (${_rawBearing.toStringAsFixed(1)}°)',
+        );
       }
 
       // questo sotto sostituito da quello sopra
       // if (snapshotDirection == null) {
-       // print(
-         // '❌ OVERLAY DEBUG: direction null — skip rilevamento strade laterali',
-        //);
-        //return;
+      // print(
+      // '❌ OVERLAY DEBUG: direction null — skip rilevamento strade laterali',
+      //);
+      //return;
       //}
 
       // =====================================================================
       // LIMITATORE CHIAMATE API (Anti-Spam se fermi dove non ci sono strade)
       // =====================================================================
       if (_lastApiCallTime != null) {
-        final int elapsedSeconds = DateTime.now().difference(_lastApiCallTime!).inSeconds;
+        final int elapsedSeconds = DateTime.now()
+            .difference(_lastApiCallTime!)
+            .inSeconds;
         if (elapsedSeconds < 30) {
           print(
             '⏸️ OVERLAY DEBUG: Rate limit Google API ($elapsedSeconds s < 30s). Skip analisi.',
@@ -1266,8 +1278,6 @@ class NavigationMonitor {
         snapshotLng,
         effectiveDirection, // <-- Sostituito qui prima snapDirection
       );
-
-
 
       _lastApiCallTime = DateTime.now(); // Registra il momento della chiamata
       final snappedPoints = await _roadsService.findNearestRoads(lateralPoints);
@@ -1287,7 +1297,9 @@ class NavigationMonitor {
         _lastAnalysisLat = snapshotLat;
         _lastAnalysisLng = snapshotLng;
       } else {
-        print('⬜ OVERLAY DEBUG: Nessuna strada laterale rilevata in questo punto.');
+        print(
+          '⬜ OVERLAY DEBUG: Nessuna strada laterale rilevata in questo punto.',
+        );
       }
     } finally {
       // Assicuriamoci di resettare il flag anche in caso di eccezioni
@@ -1696,7 +1708,9 @@ class NavigationMonitor {
           print('⚠️ Ricalcolo: _currentSession è NULL! Ricalcolo perso');
         } else {
           _currentSession!.rerouteCount++;
-          print('🔄 Ricalcolo registrato! Totale ricalcoli: ${_currentSession!.rerouteCount}');
+          print(
+            '🔄 Ricalcolo registrato! Totale ricalcoli: ${_currentSession!.rerouteCount}',
+          );
         }
 
         // Usciamo dalla funzione: abbiamo trovato un percorso compatibile,
@@ -1845,7 +1859,9 @@ class NavigationMonitor {
         print('⚠️ Ricalcolo API: _currentSession è NULL! Ricalcolo perso');
       } else {
         _currentSession!.rerouteCount++;
-        print('🔄 Ricalcolo API registrato! Totale ricalcoli: ${_currentSession!.rerouteCount}');
+        print(
+          '🔄 Ricalcolo API registrato! Totale ricalcoli: ${_currentSession!.rerouteCount}',
+        );
       }
     } catch (e) {
       // Gestisce eccezioni non previste (parsing, rete, ecc.)
@@ -1867,14 +1883,20 @@ class NavigationMonitor {
   /// il messaggio, e il timestamp.
   void _recordOverlayEvent(NavigationOverlayState overlayState) {
     if (_currentSession == null) {
-      print('⚠️ _recordOverlayEvent: _currentSession è NULL! Overlay perso: ${overlayState.type}');
+      print(
+        '⚠️ _recordOverlayEvent: _currentSession è NULL! Overlay perso: ${overlayState.type}',
+      );
       return;
     }
-    _currentSession!.overlays.add(OverlayRecord(
-      type: overlayState.type.name,
-      message: overlayState.message ?? '',
-      timestamp: DateTime.now().toIso8601String(),
-    ));
-    print('📋 _recordOverlayEvent: Overlay registrato! Totale: ${_currentSession!.overlays.length}');
+    _currentSession!.overlays.add(
+      OverlayRecord(
+        type: overlayState.type.name,
+        message: overlayState.message ?? '',
+        timestamp: DateTime.now().toIso8601String(),
+      ),
+    );
+    print(
+      '📋 _recordOverlayEvent: Overlay registrato! Totale: ${_currentSession!.overlays.length}',
+    );
   }
 }

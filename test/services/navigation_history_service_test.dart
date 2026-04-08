@@ -1,17 +1,17 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:pii2/models/navigation_session.dart';
-import 'package:pii2/services/navigation_history_service.dart';
+import 'package:pii/models/navigation_session.dart';
+import 'package:pii/services/navigation_session_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  late NavigationHistoryService service;
+  late NavigationSessionService service;
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
-    service = NavigationHistoryService();
+    service = NavigationSessionService();
   });
 
   // Helper per creare sessioni di test
@@ -95,8 +95,9 @@ void main() {
   });
 
   test('rispetto del limite maxStoredSessions: le sessioni più vecchie vengono scartate', () async {
-    // Salva maxStoredSessions + 5 sessioni
-    for (int i = 0; i < NavigationHistoryService.maxStoredSessions + 5; i++) {
+    // Il limite massimo di sessioni salvate è 50 (NavigationSessionService._maxSessions).
+    const int maxSessions = 50;
+    for (int i = 0; i < maxSessions + 5; i++) {
       await service.saveSession(makeSession(
         id: 'sess-$i',
         // startTime crescente: le ultime sono le più recenti
@@ -105,11 +106,11 @@ void main() {
     }
 
     final history = await service.getHistory();
-    expect(history.length, NavigationHistoryService.maxStoredSessions);
+    expect(history.length, maxSessions);
     // La più recente deve essere il top della lista
     expect(
       history.first.sessionId,
-      'sess-${NavigationHistoryService.maxStoredSessions + 4}',
+      'sess-${maxSessions + 4}',
     );
   });
 
@@ -138,9 +139,9 @@ void main() {
 
   test('getHistory con JSON corrotto in storage restituisce lista vuota (no crash)', () async {
     SharedPreferences.setMockInitialValues({
-      'navigation_history_v1': 'JSON_CORROTTO_{{{',
+      'navigation_sessions': 'JSON_CORROTTO_{{{',
     });
-    final service2 = NavigationHistoryService();
+    final service2 = NavigationSessionService();
     final history = await service2.getHistory();
     expect(history, isEmpty);
   });

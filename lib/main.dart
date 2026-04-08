@@ -23,7 +23,7 @@ void main() async {
   try {
     await dotenv.load(fileName: '.env');
   } catch (e) {
-    print('⚠️ Errore caricamento .env: $e. Continuando con valori di default...');
+    debugPrint('⚠️ Errore caricamento .env: $e. Continuando con valori di default...');
   }
 
   // Inizializza il renderer Google Maps su Android.
@@ -39,7 +39,7 @@ void main() async {
     final AndroidMapRenderer renderer = await platform.initializeWithRenderer(
       AndroidMapRenderer.latest,
     );
-    print('=== Google Maps renderer inizializzato: $renderer ===');
+    debugPrint('=== Google Maps renderer inizializzato: $renderer ===');
   }
 
   runApp(NavigationApp(navigatorKey: navigatorKey));
