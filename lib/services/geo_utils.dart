@@ -213,26 +213,150 @@ double distanceBetween(double lat1, double lon1, double lat2, double lon2) {
   return haversineDistance(lat1, lon1, lat2, lon2);
 }
 
+/// _distanceToSegment — Calcola la distanza minima tra un punto P e un
+/// segmento rettilineo AB sulla superficie terrestre.
+///
+/// PERCHÉ SERVE QUESTA FUNZIONE (FIX BUG FALSI RICALCOLI):
+/// La overview_polyline di Google è compressa con l'algoritmo Douglas-Peucker:
+/// i tratti rettilinei vengono drasticamente semplificati. Un viale di 500m
+/// può essere rappresentato da soli 2 punti (inizio e fine). Se calcolassimo
+/// la distanza solo dai vertici, un utente a metà del viale risulterebbe a
+/// 250m dal punto più vicino → falso "fuori percorso" → ricalcolo inutile.
+///
+/// COME FUNZIONA:
+/// 1. Converte le coordinate GPS in un sistema metrico 2D locale (piano
+///    euclideo approssimato). Questa approssimazione è valida per distanze
+///    < 1 km — ampiamente nel nostro range operativo.
+/// 2. Calcola il parametro 't' di proiezione ortogonale tramite dot product:
+///    t = dot(AP, AB) / dot(AB, AB)
+///    dove t rappresenta "quanto avanti lungo il segmento" cade la proiezione.
+/// 3. Clampa t nell'intervallo [0, 1] per non proiettare fuori dal segmento:
+///    - t = 0 → la proiezione cade sul punto A (utente "prima" del segmento)
+///    - t = 1 → la proiezione cade sul punto B (utente "dopo" il segmento)
+///    - 0 < t < 1 → la proiezione cade all'interno del segmento
+/// 4. Riconverte il punto proiettato in coordinate GPS (interpolazione lineare)
+/// 5. Usa distanceBetween() (Haversine) per la distanza finale in metri,
+///    così il risultato è geodeticamente preciso.
+///
+/// EDGE CASES:
+/// - A == B (segmento di lunghezza 0): fallback a distanceBetween(P, A)
+/// - Utente perpendicolare al segmento: proiezione ortogonale esatta
+/// - Utente oltre gli estremi: clamp garantisce distanza dal vertice più vicino
+///
+/// PARAMETRI:
+/// - [pLat], [pLng]: posizione GPS dell'utente (punto P)
+/// - [aLat], [aLng]: primo estremo del segmento (punto A)
+/// - [bLat], [bLng]: secondo estremo del segmento (punto B)
+///
+/// RETURN: distanza in metri (double, sempre >= 0)
+double _distanceToSegment(
+  double pLat,
+  double pLng,
+  double aLat,
+  double aLng,
+  double bLat,
+  double bLng,
+) {
+  // --- STEP 1: Conversione a coordinate metriche locali ---
+  //
+  // Un grado di latitudine vale SEMPRE ~111320 m a qualsiasi posizione.
+  // Un grado di longitudine vale ~111320 m × cos(latitudine): si restringe
+  // man mano che ci si avvicina ai poli (a 45° vale ~78710 m, a 0° vale 111320 m).
+  //
+  // Usiamo la latitudine dell'utente come riferimento per il fattore di
+  // compensazione (cosLat). L'errore introdotto è trascurabile perché
+  // i tre punti P, A, B distano al massimo poche centinaia di metri.
+  final double cosLat = cos(pLat * pi / 180.0);
+
+  final double pX = pLng * 111320.0 * cosLat;
+  final double pY = pLat * 111320.0;
+
+  final double aX = aLng * 111320.0 * cosLat;
+  final double aY = aLat * 111320.0;
+
+  final double bX = bLng * 111320.0 * cosLat;
+  final double bY = bLat * 111320.0;
+
+  // --- STEP 2: Vettori geometrici ---
+  // AB = vettore dal punto A al punto B (il segmento stradale)
+  // AP = vettore dal punto A alla posizione dell'utente P
+  final double abX = bX - aX;
+  final double abY = bY - aY;
+
+  final double apX = pX - aX;
+  final double apY = pY - aY;
+
+  // --- STEP 3: Lunghezza al quadrato del segmento ---
+  // Se è 0, i punti A e B coincidono (segmento degenere).
+  // In quel caso non possiamo calcolare una proiezione: fallback a punto-punto.
+  final double abSquared = abX * abX + abY * abY;
+  if (abSquared == 0.0) {
+    return distanceBetween(pLat, pLng, aLat, aLng);
+  }
+
+  // --- STEP 4: Parametro di proiezione 't' ---
+  //
+  // t = dot(AP, AB) / |AB|²
+  //
+  // Geometricamente:
+  // - t < 0 → l'ombra dell'utente "cade prima" del punto A
+  // - t = 0 → l'ombra cade esattamente su A
+  // - 0 < t < 1 → l'ombra cade all'interno del segmento
+  // - t = 1 → l'ombra cade esattamente su B
+  // - t > 1 → l'ombra cade "dopo" il punto B
+  //
+  // Il clamp [0, 1] limita la proiezione ai confini del segmento:
+  // se l'utente è "oltre" un estremo, misuriamo la distanza dall'estremo
+  // più vicino (che è il comportamento corretto — non vogliamo proiettare
+  // su un prolungamento immaginario della strada).
+  double t = (apX * abX + apY * abY) / abSquared;
+  t = t.clamp(0.0, 1.0);
+
+  // --- STEP 5: Coordinate GPS del punto proiettato ---
+  //
+  // Interpolazione lineare tra A e B usando il parametro t.
+  // projLat = aLat + t × (bLat - aLat)
+  // Se t = 0 → proj = A; se t = 1 → proj = B; se t = 0.5 → proj = punto medio.
+  final double projLat = aLat + t * (bLat - aLat);
+  final double projLng = aLng + t * (bLng - aLng);
+
+  // --- STEP 6: Distanza finale con Haversine ---
+  //
+  // La proiezione planare ci ha dato il PUNTO più vicino sul segmento.
+  // Ora usiamo la formula geodetica (Haversine) per calcolare la distanza
+  // reale in metri tra l'utente e quel punto. Questo garantisce precisione
+  // anche se l'approssimazione planare ha un piccolo errore.
+  return distanceBetween(pLat, pLng, projLat, projLng);
+}
+
 /// minDistanceToPolyline — Calcola la distanza MINIMA tra un punto GPS e
 /// una polyline (lista di coordinate) di un percorso (TASK 2).
 ///
 /// COME FUNZIONA:
-/// 1. Itera su OGNI punto della polyline decodificata
-/// 2. Per ciascun punto, calcola la distanza dal punto GPS dell'utente
+/// 1. Itera su ogni SEGMENTO della polyline (coppia di punti consecutivi)
+/// 2. Per ciascun segmento, calcola la distanza punto-segmento con proiezione
+///    ortogonale (_distanceToSegment)
 /// 3. Tiene traccia della distanza minima trovata
 /// 4. Restituisce la distanza minima alla fine dell'iterazione
 ///
-/// PERCHÉ CONFRONTARE CON OGNI PUNTO DELLA POLYLINE:
-/// La polyline è una serie di segmenti retti che approssimano il percorso
-/// stradale. Per sapere se l'utente è "sul percorso", dobbiamo trovare
-/// il punto della polyline più vicino alla sua posizione GPS. Se quel
-/// punto è entro la soglia (40 m), l'utente è considerato sul percorso.
+/// PERCHÉ CONFRONTARE CON I SEGMENTI E NON CON I SINGOLI PUNTI:
+/// La overview_polyline di Google è compressa: i tratti rettilinei vengono
+/// semplificati in pochi punti. Confrontare solo con i vertici causerebbe
+/// falsi "fuori percorso" quando l'utente è a metà di un tratto lungo.
+/// Confrontando con i segmenti, la distanza è sempre corretta: un utente
+/// che cammina esattamente sulla linea tra A e B risulta a ~0m dal percorso,
+/// indipendentemente da quanto siano distanti A e B tra loro.
+///
+/// PROPRIETÀ MATEMATICA IMPORTANTE:
+/// La distanza punto-segmento è SEMPRE ≤ alla distanza dal vertice più
+/// vicino. Questo significa che la nuova logica non può MAI classificare
+/// come "fuori percorso" un utente che prima era "sul percorso".
+/// Può solo migliorare (ridurre falsi positivi), mai peggiorare.
 ///
 /// NOTA SULLE PERFORMANCE:
-/// Una polyline tipica ha 100-500 punti. Iterare su tutti ha costo O(n),
-/// che per 500 punti richiede microsecondi — trascurabile. Non serve
-/// ottimizzare con strutture dati spaziali (quadtree, R-tree) per
-/// questo numero di punti.
+/// Una polyline tipica ha 100-500 punti → 99-499 segmenti. Per ogni
+/// segmento il calcolo è O(1) (poche operazioni aritmetiche + un Haversine).
+/// Il costo totale è O(n), identico alla versione precedente punto-punto.
 ///
 /// PARAMETRI:
 /// - [lat], [lng]: posizione GPS corrente dell'utente
@@ -249,15 +373,30 @@ double minDistanceToPolyline(
   // Restituiamo infinito per indicare che la distanza è "indefinita".
   if (polyline.isEmpty) return double.infinity;
 
+  // Se la polyline ha un solo punto, non esistono segmenti.
+  // Fallback alla distanza punto-punto classica.
+  if (polyline.length == 1) {
+    return distanceBetween(lat, lng, polyline[0][0], polyline[0][1]);
+  }
+
   // Inizializziamo la distanza minima al valore più grande possibile.
   // Qualsiasi distanza reale sarà minore di infinity.
   double minDist = double.infinity;
 
-  // Iteriamo su ogni punto della polyline
-  for (final point in polyline) {
+  // Iteriamo su ogni SEGMENTO della polyline.
+  // Un segmento è definito da due punti consecutivi: polyline[i] → polyline[i+1].
+  // Con N punti abbiamo N-1 segmenti.
+  for (int i = 0; i < polyline.length - 1; i++) {
+    final List<double> pointA = polyline[i];
+    final List<double> pointB = polyline[i + 1];
+
     // Calcola la distanza tra la posizione dell'utente e questo
-    // punto della polyline usando la funzione distanceBetween
-    final double dist = distanceBetween(lat, lng, point[0], point[1]);
+    // segmento della polyline usando la proiezione ortogonale
+    final double dist = _distanceToSegment(
+      lat, lng,
+      pointA[0], pointA[1],
+      pointB[0], pointB[1],
+    );
 
     // Se questa distanza è minore della minima trovata finora,
     // aggiorna il valore minimo
@@ -266,7 +405,7 @@ double minDistanceToPolyline(
     }
   }
 
-  // Restituisce la distanza minima trovata tra tutti i punti
+  // Restituisce la distanza minima trovata tra tutti i segmenti
   return minDist;
 }
 
