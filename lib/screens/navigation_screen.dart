@@ -350,12 +350,21 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Viene chiamato in initState() e dopo ogni selezione destinazione,
   /// così la lista è sempre aggiornata.
   Future<void> _loadRecentSearches() async {
-    final history = await _searchHistoryService.loadHistory();
-    if (!mounted) return;
-    setState(() {
-      // Prendiamo solo le prime 3 (loadHistory già ordina per timestamp desc)
-      _recentSearches = history.take(3).toList();
-    });
+    try {
+      final history = await _searchHistoryService.loadHistory();
+      if (!mounted) return;
+      setState(() {
+        // Prendiamo solo le prime 3 (loadHistory già ordina per timestamp desc)
+        _recentSearches = history.take(3).toList();
+      });
+    } catch (e) {
+      print('⚠️ Errore caricamento ricerche recenti: $e');
+      if (mounted) {
+        setState(() {
+          _recentSearches = [];
+        });
+      }
+    }
   }
 
   // ===========================================================================
@@ -1671,10 +1680,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Determina se siamo su un dispositivo mobile (schermo stretto)
-    final isMobile = MediaQuery.of(context).size.width < 800;
+    try {
+      // Determina se siamo su un dispositivo mobile (schermo stretto)
+      final isMobile = MediaQuery.of(context).size.width < 800;
 
-    return PopScope(
+      return PopScope(
       canPop: false,
       onPopInvoked: (didPop) async {
         if (didPop) return;
@@ -1713,6 +1723,31 @@ class _NavigationScreenState extends State<NavigationScreen> {
             : _buildDesktopLayout(), // Layout orizzontale per desktop
       ),
     );
+    } catch (e, stackTrace) {
+      print('❌ ERRORE NEL BUILD DI NAVIGATIONSCREEN:');
+      print('$e');
+      print('Stack trace: $stackTrace');
+      return Scaffold(
+        appBar: AppBar(title: const Text('Errore')),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, size: 48, color: Colors.red),
+              const SizedBox(height: 16),
+              const Text('Errore nel caricamento dell\'app'),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text('$e',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
   }
 
   /// Layout per dispositivi mobili (stack verticale)

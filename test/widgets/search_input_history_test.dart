@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:pii2/widgets/search_input.dart';
+import 'package:pii/widgets/search_input.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -33,13 +33,15 @@ void main() {
     tester,
   ) async {
     final controller = TextEditingController();
+    final focusNode = FocusNode();
 
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: SearchInput(
             destinationController: controller,
-            onDestinationSelected: (_, __, ___) {},
+            onDestinationSelected: (_, _, _) {},
+            focusNode: focusNode,
           ),
         ),
       ),
@@ -60,13 +62,15 @@ void main() {
     'input con meno di 3 caratteri filtra la cronologia per contenuto',
     (tester) async {
       final controller = TextEditingController();
+      final focusNode = FocusNode();
 
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
             body: SearchInput(
               destinationController: controller,
-              onDestinationSelected: (_, __, ___) {},
+              onDestinationSelected: (_, _, _) {},
+              focusNode: focusNode,
             ),
           ),
         ),
@@ -88,6 +92,7 @@ void main() {
     tester,
   ) async {
     final controller = TextEditingController();
+    final focusNode = FocusNode();
     double? selectedLat;
     double? selectedLng;
     String? selectedAddress;
@@ -102,6 +107,7 @@ void main() {
               selectedLng = lng;
               selectedAddress = address;
             },
+            focusNode: focusNode,
           ),
         ),
       ),
@@ -123,13 +129,15 @@ void main() {
     tester,
   ) async {
     final controller = TextEditingController();
+    final focusNode = FocusNode();
 
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: SearchInput(
             destinationController: controller,
-            onDestinationSelected: (_, __, ___) {},
+            onDestinationSelected: (_, _, _) {},
+            focusNode: focusNode,
           ),
         ),
       ),

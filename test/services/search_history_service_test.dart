@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:pii2/models/search_history_item.dart';
-import 'package:pii2/services/search_history_service.dart';
+import 'package:pii/models/search_history_item.dart';
+import 'package:pii/services/search_history_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
