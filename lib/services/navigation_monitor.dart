@@ -96,12 +96,12 @@ class NavigationOverlayState {
 /// L'utente NON deve svoltare, deve continuare dritto.
 /// Ogni messaggio rassicura che la strada è giusta.
 const List<String> kLateralRoadMessages = [
-  '👉 Continua dritto, stai andando bene!',
-  '⬆️ Vai dritto, sei sulla strada giusta!',
-  '✅ Bravo, continua così! Vai dritto!',
-  '⬆️ Non svoltare, vai sempre dritto!',
-  '👍 Perfetto! Continua dritto!',
-  '⬆️ Stai andando benissimo, dritto!',
+  ' Continua dritto, stai andando bene!',
+  ' Vai dritto, sei sulla strada giusta!',
+  ' Bravo, continua così! Vai dritto!',
+  ' Non svoltare, vai sempre dritto!',
+  ' Perfetto! Continua dritto!',
+  ' Stai andando benissimo, dritto!',
 ];
 
 /// Messaggi mostrati quando l'utente è vicino a un waypoint di svolta.
@@ -124,12 +124,12 @@ const List<String> kTurnEncouragementPrefixes = [
 /// Questi sono i messaggi più importanti dell'intera app: il ragazzo ha completato
 /// il percorso da solo. Devono trasmettere orgoglio e soddisfazione.
 const List<String> kArrivalMessages = [
-  '🎉 Sei arrivato! Bravissimo!',
-  '🏆 Ce l\'hai fatta! Sei un campione!',
-  '⭐ Sei arrivato a destinazione! Grande!',
-  '🎊 Complimenti, sei arrivato!',
-  '👏 Perfetto! Sei arrivato, bravo!',
-  '🌟 Destinazione raggiunta! Che bravo!',
+  ' Sei arrivato! Bravissimo!',
+  ' Ce l\'hai fatta! Sei un campione!',
+  ' Sei arrivato a destinazione! Grande!',
+  ' Complimenti, sei arrivato!',
+  ' Perfetto! Sei arrivato, bravo!',
+  ' Destinazione raggiunta! Che bravo!',
 ];
 
 // =============================================================================

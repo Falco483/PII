@@ -157,9 +157,15 @@ class MapWidgetState extends State<MapWidget> {
   /// sulla linea blu del percorso (come in Google Maps navigation).
   BitmapDescriptor? _directionChevronBitmap;
 
+  /// Bitmap per le frecce GRANDI lungo la polyline.
+  BitmapDescriptor? _bigArrowBitmap;
+
   /// Set di marker per le frecce direzionali lungo la polyline.
   /// Vengono rigenerati ogni volta che cambia lo step corrente.
   Set<Marker> _chevronMarkers = {};
+
+  /// Set di marker per le frecce grandi lungo la polyline.
+  Set<Marker> _bigArrowMarkers = {};
 
   @override
   void initState() {
@@ -167,6 +173,7 @@ class MapWidgetState extends State<MapWidget> {
     // Crea la freccia utente e i chevron direzionali in background.
     _createArrowBitmap();
     _createChevronBitmap();
+    _createBigArrowBitmap();
   }
 
   /// Crea il bitmap della freccia direzionale usando Canvas.
@@ -267,9 +274,9 @@ class MapWidgetState extends State<MapWidget> {
   /// Replica le frecce bianche grandi che Google Maps mostra dentro la
   /// linea blu del percorso. Sono frecce PIENE (non solo contorno),
   /// grandi e ben visibili — identiche a quelle nello screenshot.
-  /// Dimensione: 80x80 pixel → 32dp su schermo.
+  /// Dimensione: 100x100 pixel → 40dp su schermo.
   Future<void> _createChevronBitmap() async {
-    const double size = 80;
+    const double size = 100;
 
     final ui.PictureRecorder recorder = ui.PictureRecorder();
     final Canvas canvas = Canvas(
@@ -281,19 +288,37 @@ class MapWidgetState extends State<MapWidget> {
 
     // Freccia bianca PIENA (triangolo/chevron come Google Maps nav)
     // Punta verso l'alto — la rotazione è gestita dal Marker.
+    // Forma più larga e audace per imitare lo stile Google Maps.
     final Path chevronPath = Path()
-      ..moveTo(center, 16)               // Punta superiore
-      ..lineTo(center + 20, 52)          // Angolo basso-destro
-      ..lineTo(center + 4, 40)           // Rientranza destra
-      ..lineTo(center, 46)               // Centro basso
-      ..lineTo(center - 4, 40)           // Rientranza sinistra
-      ..lineTo(center - 20, 52)          // Angolo basso-sinistro
+      ..moveTo(center, 12)               // Punta superiore
+      ..lineTo(center + 26, 58)          // Angolo basso-destro
+      ..lineTo(center + 6, 44)           // Rientranza destra
+      ..lineTo(center, 52)               // Centro basso
+      ..lineTo(center - 6, 44)           // Rientranza sinistra
+      ..lineTo(center - 26, 58)          // Angolo basso-sinistro
       ..close();
+
+    // Ombra leggera sotto la freccia per darle profondità
+    final Path shadowPath = Path()
+      ..moveTo(center, 14)
+      ..lineTo(center + 26, 60)
+      ..lineTo(center + 6, 46)
+      ..lineTo(center, 54)
+      ..lineTo(center - 6, 46)
+      ..lineTo(center - 26, 60)
+      ..close();
+
+    canvas.drawPath(
+      shadowPath,
+      Paint()
+        ..color = const Color(0x30000000) // Ombra nera al 19%
+        ..style = PaintingStyle.fill,
+    );
 
     canvas.drawPath(
       chevronPath,
       Paint()
-        ..color = const Color(0xCCFFFFFF) // Bianco semi-trasparente (80%)
+        ..color = const Color(0xFFFFFFFF) // Bianco 100% opaco
         ..style = PaintingStyle.fill,
     );
 
@@ -304,28 +329,83 @@ class MapWidgetState extends State<MapWidget> {
     if (byteData != null && mounted) {
       _directionChevronBitmap = BitmapDescriptor.bytes(
         byteData.buffer.asUint8List(),
-        width: 32, // Grande come in Google Maps
-        height: 32,
+        width: 40, // Grande come in Google Maps
+        height: 40,
       );
     }
   }
 
-  /// Posiziona i chevron direzionali lungo i punti della polyline.
-  ///
-  /// I chevron vengono piazzati ogni ~30 metri lungo il segmento corrente.
-  /// Ogni chevron è ruotato per puntare nella direzione del segmento
-  /// su cui si trova (dal punto N al punto N+1).
-  ///
-  /// COME GOOGLE MAPS: le piccole frecce bianche ">" sulla linea blu
-  /// indicano "stai andando in questa direzione". Aiutano l'utente
-  /// a capire il verso di marcia, soprattutto nelle curve.
-  Set<Marker> _buildChevronMarkers(List<LatLng> points) {
-    if (_directionChevronBitmap == null || points.length < 2) return {};
+  Future<void> _createBigArrowBitmap() async {
+    const double size = 160;
 
-    final Set<Marker> chevrons = {};
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(
+      recorder,
+      const Rect.fromLTWH(0, 0, size, size),
+    );
+
+    final double center = size / 2;
+
+    // Freccia grande bianca con bordo blu spesso.
+    final Path arrowPath = Path()
+      ..moveTo(center, 10)               // Punta superiore
+      ..lineTo(center + 50, 120)         // Angolo basso-destro
+      ..lineTo(center, 90)               // Centro basso
+      ..lineTo(center - 50, 120)         // Angolo basso-sinistro
+      ..close();
+
+    // Ombra
+    canvas.drawPath(
+      arrowPath.shift(const Offset(0, 4)),
+      Paint()
+        ..color = const Color(0x40000000)
+        ..style = PaintingStyle.fill,
+    );
+
+    // Disegna bordo blu
+    canvas.drawPath(
+      arrowPath,
+      Paint()
+        ..color = const Color(0xFF1A56C4) // Blu scuro, stesso del bordo della polyline
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 16
+        ..strokeJoin = StrokeJoin.round,
+    );
+
+    // Disegna riempimento bianco
+    canvas.drawPath(
+      arrowPath,
+      Paint()
+        ..color = const Color(0xFFFFFFFF)
+        ..style = PaintingStyle.fill,
+    );
+
+    final ui.Picture picture = recorder.endRecording();
+    final ui.Image image = await picture.toImage(size.toInt(), size.toInt());
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+
+    if (byteData != null && mounted) {
+      _bigArrowBitmap = BitmapDescriptor.bytes(
+        byteData.buffer.asUint8List(),
+        width: 60, // Dimensione maggiore del chevron (40)
+        height: 60,
+      );
+    }
+  }
+
+  /// Posiziona indicatori direzionali lungo i punti della polyline.
+  Set<Marker> _buildDirectionalMarkers(
+    List<LatLng> points, {
+    required BitmapDescriptor? bitmap,
+    required String prefix,
+    double intervalMeters = 30,
+    int zIndex = 3,
+  }) {
+    if (bitmap == null || points.length < 2) return {};
+
+    final Set<Marker> markers = {};
     double accumulatedDistance = 0;
-    const double chevronInterval = 40; // Un chevron ogni ~40 metri (come Google Maps)
-    int chevronId = 0;
+    int markerId = 0;
 
     for (int i = 0; i < points.length - 1; i++) {
       final LatLng p1 = points[i];
@@ -340,25 +420,36 @@ class MapWidgetState extends State<MapWidget> {
       // Bearing del segmento (gradi, 0=nord)
       final double bearing = math.atan2(dLng, dLat) * 180 / math.pi;
 
-      accumulatedDistance += segmentDist;
+      // Interpola i marker lungo il segmento per distribuzione uniforme
+      double startOffset = intervalMeters - accumulatedDistance;
 
-      // Piazza un chevron ogni chevronInterval metri
-      if (accumulatedDistance >= chevronInterval) {
-        accumulatedDistance = 0;
-        chevrons.add(Marker(
-          markerId: MarkerId('chevron_$chevronId'),
-          position: p2,
-          icon: _directionChevronBitmap!,
+      if (startOffset <= 0) startOffset = intervalMeters;
+
+      double offset = startOffset;
+      while (offset <= segmentDist && segmentDist > 0) {
+        // Calcola la posizione interpolata
+        final double fraction = offset / segmentDist;
+        final double interpLat = p1.latitude + (p2.latitude - p1.latitude) * fraction;
+        final double interpLng = p1.longitude + (p2.longitude - p1.longitude) * fraction;
+
+        markers.add(Marker(
+          markerId: MarkerId('${prefix}_$markerId'),
+          position: LatLng(interpLat, interpLng),
+          icon: bitmap,
           rotation: bearing,
           flat: true,
           anchor: const Offset(0.5, 0.5),
-          zIndex: 3,
+          zIndexInt: zIndex,
         ));
-        chevronId++;
+        markerId++;
+        offset += intervalMeters;
       }
+
+      // Aggiorna la distanza accumulata per il prossimo segmento
+      accumulatedDistance = (accumulatedDistance + segmentDist) % intervalMeters;
     }
 
-    return chevrons;
+    return markers;
   }
 
   @override
@@ -412,11 +503,7 @@ class MapWidgetState extends State<MapWidget> {
   /// Callback quando la mappa è creata
   void _onMapCreated(GoogleMapController controller) {
     _mapController = controller;
-    print('=== GOOGLE MAP CREATED SUCCESSFULLY ===');
-
-    // Applica lo stile mappa: bianco classico con POI visibili.
-    // Solo le icone stradali (scudi autostrada) vengono nascoste.
-    _mapController!.setMapStyle(_accessibleMapStyle);
+    debugPrint('=== GOOGLE MAP CREATED SUCCESSFULLY ===');
 
     // Se sono disponibili le coordinate GPS iniziali, centra la camera lì.
     if (widget.initialLat != null && widget.initialLng != null) {
@@ -502,6 +589,8 @@ class MapWidgetState extends State<MapWidget> {
     // dei renderer sul layer nativo di Google Maps prima di ricalcolare.
     _routeMarkers.clear();
     _polylines.clear();
+    _chevronMarkers.clear(); // Pulizia frecce direzionali a fine navigazione
+    _bigArrowMarkers.clear(); // Pulizia frecce grandi
 
     if (widget.originLat == null ||
         widget.originLng == null ||
@@ -669,7 +758,7 @@ class MapWidgetState extends State<MapWidget> {
         // --- PRIORITÀ Z ---
         // Il marker utente deve stare SOPRA tutto: sopra i marker di
         // percorso, sopra le polyline. Non deve mai essere coperto.
-        zIndex: 10,
+        zIndexInt: 10,
       );
     });
   }
@@ -734,7 +823,24 @@ class MapWidgetState extends State<MapWidget> {
       ));
 
       // Chevron direzionali bianchi lungo il segmento corrente
-      _chevronMarkers = _buildChevronMarkers(currentPoints);
+      // Spaziatura ravvicinata (30m) per il segmento attivo
+      _chevronMarkers = _buildDirectionalMarkers(
+        currentPoints,
+        bitmap: _directionChevronBitmap,
+        prefix: 'chev_curr',
+        intervalMeters: 30,
+        zIndex: 3,
+      );
+
+      // Frecce grandi per evidenziare ulteriormente la direzione
+      // Spaziatura maggiore (150m) per evitare sovrapposizioni (5X rispetto ai chevron)
+      _bigArrowMarkers = _buildDirectionalMarkers(
+        currentPoints,
+        bitmap: _bigArrowBitmap,
+        prefix: 'bigarr_curr',
+        intervalMeters: 150,
+        zIndex: 4,
+      );
     }
 
     // --- 2. SEGMENTO SUCCESSIVO (grigio, anteprima) ---
@@ -774,6 +880,24 @@ class MapWidgetState extends State<MapWidget> {
           startCap: Cap.roundCap,
           endCap: Cap.roundCap,
           zIndex: 0,
+        ));
+
+        // Chevron anche sul percorso rimanente (più distanziati)
+        _chevronMarkers.addAll(_buildDirectionalMarkers(
+          allPoints,
+          bitmap: _directionChevronBitmap,
+          prefix: 'chev_rem',
+          intervalMeters: 60,
+          zIndex: 1,
+        ));
+
+        // Frecce grandi per il percorso rimanente
+        _bigArrowMarkers.addAll(_buildDirectionalMarkers(
+          allPoints,
+          bitmap: _bigArrowBitmap,
+          prefix: 'bigarr_rem',
+          intervalMeters: 300, // 5X rispetto ai chevron (60 * 5)
+          zIndex: 2,
         ));
       }
     }
@@ -889,21 +1013,19 @@ class MapWidgetState extends State<MapWidget> {
 
   @override
   Widget build(BuildContext context) {
-    // Unisce i marker del percorso, il marker freccia utente e i chevron.
-    // In navigazione: routeMarkers + userArrowMarker + chevronMarkers
+    // Unisce i marker del percorso, il marker freccia utente, chevron e frecce grandi.
+    // In navigazione: routeMarkers + userArrowMarker + chevronMarkers + bigArrowMarkers
     // Fuori navigazione: routeMarkers + pallino blu di Google (myLocationEnabled)
     final Set<Marker> allMarkers = {
       ..._routeMarkers,
       ..._chevronMarkers,
+      ..._bigArrowMarkers,
       if (_userArrowMarker != null) _userArrowMarker!,
     };
 
     return GoogleMap(
-      // NOTA: cloudMapId rimosso. Lo stile è ora gestito da setMapStyle()
-      // in _onMapCreated con il JSON accessibile (_accessibleMapStyle).
-      // Per tornare allo stile Cloud: riaggiungere qui cloudMapId e
-      // rimuovere setMapStyle() da _onMapCreated.
-
+      // Stile mappa bianco classico con POI visibili (stile accessibile).
+      style: _accessibleMapStyle,
       // Callback quando la mappa è pronta
       onMapCreated: _onMapCreated,
       // Posizione iniziale della camera
@@ -914,7 +1036,7 @@ class MapWidgetState extends State<MapWidget> {
       // Marker sulla mappa (percorso + freccia utente)
       markers: allMarkers,
       // Polyline sulla mappa
-      polylines: _polylines,
+      polylines: Set<Polyline>.of(_polylines),
       // Abilita zoom e rotazione
       zoomControlsEnabled: false,
 

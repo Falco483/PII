@@ -18,6 +18,7 @@ library;
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_compass/flutter_compass.dart';
@@ -71,6 +72,22 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Servizio Places API per reverse geocoding (nome del posto da coordinate).
   final PlacesService _placesService = PlacesService();
+
+  final FlutterTts _tts = FlutterTts();
+  bool _ttsEnabled = true;
+
+  Future<void> _initTts() async {
+    await _tts.setLanguage('it-IT');
+    await _tts.setSpeechRate(0.85); // Leggermente più lento per accessibilità
+    await _tts.setVolume(1.0);
+    await _tts.setPitch(1.0);
+  }
+
+  Future<void> _speak(String text) async {
+    if (!_ttsEnabled) return;
+    await _tts.stop(); // Interrompe eventuale lettura in corso
+    await _tts.speak(text);
+  }
 
   /// Nodo di focus per il campo di testo della destinazione.
   /// Controllato qui per poter chiudere la testiera da _handleBack o _onMapTapped.
@@ -340,6 +357,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
     // Carica le ultime 3 ricerche recenti dalla cronologia persistente
     _loadRecentSearches();
+    _initTts();
   }
 
   // ===========================================================================
@@ -443,6 +461,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
         _isArrived = true;
         _overlayState = null; // Non mostrare il banner overlay vecchio
       });
+      _speak(newState!.message);
       _startArrivalAnimation();
       return;
     }
@@ -450,6 +469,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     setState(() {
       _overlayState = newState;
     });
+    if (newState != null) _speak(newState.message);
   }
 
   /// Callback chiamato quando la fase di ricalcolo cambia nel monitor.
@@ -466,6 +486,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
     setState(() {
       _reroutePhase = phase;
     });
+
+    switch (phase) {
+      case ReroutePhase.offRoute:
+      case ReroutePhase.rerouting:
+        _speak('Sto cercando una strada migliore');
+        break;
+      case ReroutePhase.routeChanged:
+        _speak('Va tutto bene. Il percorso è cambiato.');
+        break;
+      case ReroutePhase.none:
+        break;
+    }
 
     // Se il percorso è cambiato, avvia l'animazione progressiva a 3 step
     if (phase == ReroutePhase.routeChanged) {
@@ -614,6 +646,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
         // Il rebuild causa MapWidget.didUpdateWidget() che ricalcola
         // le polyline con il nuovo currentStepIndex.
       });
+      final steps = _directionsResult?.steps;
+      if (steps != null && steps.isNotEmpty) {
+        final idx = _navigationMonitor.currentStepNotifier.value;
+        final safeIdx = idx < steps.length ? idx : steps.length - 1;
+        _speak(steps[safeIdx].instruction);
+      }
     }
   }
 
@@ -977,6 +1015,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // Distrugge il controller e il nodo di focus del campo di testo
     _destinationController.dispose();
     _searchFocusNode.dispose();
+    _tts.stop();
 
     super.dispose();
   }
@@ -2380,6 +2419,18 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   ],
                 ),
 
+                IconButton(
+                  icon: Icon(
+                    _ttsEnabled ? Icons.volume_up : Icons.volume_off,
+                    color: _ttsEnabled ? Colors.green.shade700 : Colors.grey,
+                    size: 30,
+                  ),
+                  onPressed: () {
+                    setState(() { _ttsEnabled = !_ttsEnabled; });
+                    if (!_ttsEnabled) _tts.stop();
+                  },
+                  tooltip: _ttsEnabled ? 'Silenzia voce' : 'Attiva voce',
+                ),
                 const Spacer(),
                 // Pulsante "Termina" — sempre visibile, grande, con icona
                 // Design accessibile: colore rosso evidente, testo esplicito,
