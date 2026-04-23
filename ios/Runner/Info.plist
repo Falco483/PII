@@ -26,6 +26,8 @@
 	<string>Questa app ha bisogno della tua posizione per mostrarti i risultati sulla mappa</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Questa app usa il microfono per la ricerca vocale della destinazione</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Questa app usa il riconoscimento vocale per interpretare i comandi vocali</string>
 	<key>CFBundleGetInfoString</key>
 	<string></string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
