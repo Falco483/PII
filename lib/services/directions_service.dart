@@ -28,6 +28,20 @@ class DirectionStep {
   instruction; // Testo da html_instructions (es. "Svolta a destra")
   final String distance; // Distanza (es. "500 m")
   final String duration; // Durata (es. "2 min")
+
+  /// Distanza dello step in METRI (valore numerico).
+  /// FIX BUG 1: estratto da `step.distance.value` nel JSON della Directions
+  /// API. Usato dal NavigationMonitor per calcolare la distanza residua
+  /// al percorso in tempo reale (somma dei meter degli step non ancora
+  /// percorsi + distanza parziale all'endLocation dello step corrente).
+  final int distanceMeters;
+
+  /// Durata stimata dello step in SECONDI (valore numerico).
+  /// FIX BUG 1: estratto da `step.duration.value` nel JSON della Directions
+  /// API. Usato insieme alla distanza per calcolare il tempo residuo
+  /// stimato in modo proporzionale.
+  final int durationSeconds;
+
   final double startLat; // Latitudine punto di partenza step
   final double startLng; // Longitudine punto di partenza step
   final double endLat; // Latitudine punto di arrivo step
@@ -56,6 +70,8 @@ class DirectionStep {
     required this.instruction,
     required this.distance,
     required this.duration,
+    required this.distanceMeters,
+    required this.durationSeconds,
     required this.startLat,
     required this.startLng,
     required this.endLat,
@@ -88,6 +104,9 @@ class DirectionStep {
       ),
       distance: json['distance']['text'] ?? '',
       duration: json['duration']['text'] ?? '',
+      // FIX BUG 1: campi numerici per il calcolo in tempo reale
+      distanceMeters: (json['distance']['value'] as num?)?.toInt() ?? 0,
+      durationSeconds: (json['duration']['value'] as num?)?.toInt() ?? 0,
       startLat: json['start_location']['lat'].toDouble(),
       startLng: json['start_location']['lng'].toDouble(),
       endLat: json['end_location']['lat'].toDouble(),
@@ -231,6 +250,16 @@ class DirectionsResult {
   final List<DirectionStep> steps; // Lista degli step
   final String totalDistance; // Distanza totale
   final String totalDuration; // Durata totale
+
+  /// FIX BUG 1: distanza totale in METRI (valore numerico da `leg.distance.value`).
+  /// Usata dal NavigationMonitor per calcolare il tempo residuo proporzionale
+  /// alla distanza già percorsa.
+  final int totalDistanceMeters;
+
+  /// FIX BUG 1: durata totale in SECONDI (valore numerico da `leg.duration.value`).
+  /// Usata dal NavigationMonitor per calcolare il tempo residuo proporzionale.
+  final int totalDurationSeconds;
+
   final String encodedPolyline; // Polyline codificata per disegno mappa
   final double originLat; // Latitudine origine
   final double originLng; // Longitudine origine
@@ -241,6 +270,8 @@ class DirectionsResult {
     required this.steps,
     required this.totalDistance,
     required this.totalDuration,
+    required this.totalDistanceMeters,
+    required this.totalDurationSeconds,
     required this.encodedPolyline,
     required this.originLat,
     required this.originLng,
@@ -284,6 +315,16 @@ class RouteData {
   /// Estratta da `legs[0].distance.text` nel JSON.
   final String totalDistance;
 
+  /// FIX BUG 1: distanza totale in METRI (valore numerico).
+  /// Estratta da `legs[0].distance.value`. Usata dal NavigationMonitor
+  /// per calcolare la distanza residua in tempo reale.
+  final int totalDistanceMeters;
+
+  /// FIX BUG 1: durata totale in SECONDI (valore numerico).
+  /// Di fatto ridondante con `durationSeconds` sopra (stesso valore),
+  /// mantenuto come nome esplicito per simmetria con totalDistanceMeters.
+  final int totalDurationSeconds;
+
   /// Polyline codificata originale (stringa compressa di Google).
   /// Serve per passarla al MapWidget che la decodifica internamente
   /// per disegnarla sulla mappa.
@@ -300,6 +341,8 @@ class RouteData {
     required this.durationSeconds,
     required this.totalDuration,
     required this.totalDistance,
+    required this.totalDistanceMeters,
+    required this.totalDurationSeconds,
     required this.encodedPolyline,
     required this.steps,
   });
@@ -444,6 +487,9 @@ class DirectionsService {
         steps: steps,
         totalDistance: leg['distance']['text'],
         totalDuration: leg['duration']['text'],
+        // FIX BUG 1: valori numerici dai campi `value` del JSON
+        totalDistanceMeters: (leg['distance']['value'] as num?)?.toInt() ?? 0,
+        totalDurationSeconds: (leg['duration']['value'] as num?)?.toInt() ?? 0,
         // La polyline è codificata nel formato di Google
         encodedPolyline: route['overview_polyline']['points'],
         originLat: leg['start_location']['lat'].toDouble(),
@@ -580,6 +626,9 @@ class DirectionsService {
         // La API restituisce sia 'text' ("1 ora 23 min") sia 'value' (4980 secondi).
         // Usiamo 'value' per il confronto numerico tra percorsi.
         final int durationSec = leg['duration']['value'] as int;
+        // FIX BUG 1: distanza totale in metri (numerico)
+        final int distanceMetersTotal =
+            (leg['distance']['value'] as num?)?.toInt() ?? 0;
 
         // Crea l'oggetto RouteData con tutti i dati di questo percorso
         final routeData = RouteData(
@@ -587,6 +636,8 @@ class DirectionsService {
           durationSeconds: durationSec,
           totalDuration: leg['duration']['text'] ?? '',
           totalDistance: leg['distance']['text'] ?? '',
+          totalDistanceMeters: distanceMetersTotal,
+          totalDurationSeconds: durationSec,
           encodedPolyline: encodedPoly,
           steps: steps,
         );

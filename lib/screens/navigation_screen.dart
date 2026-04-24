@@ -78,7 +78,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   Future<void> _initTts() async {
     await _tts.setLanguage('it-IT');
-    await _tts.setSpeechRate(0.85); // Leggermente più lento per accessibilità
+    // FIX BUG 3: speech rate abbassato da 0.85 → 0.5 per rendere le
+    // istruzioni vocali più comprensibili ad utenti con disabilità cognitive.
+    // 0.5 è un ritmo lento-naturale, intorno a 150-180 parole/minuto.
+    await _tts.setSpeechRate(0.5);
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
   }
@@ -241,6 +244,17 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Non-null = mostra l'overlay con il messaggio specificato.
   NavigationOverlayState? _overlayState;
 
+  /// FIX BUG 1 + BUG 2 — Progresso in tempo reale del percorso.
+  ///
+  /// Aggiornato dal listener su `_navigationMonitor.progressNotifier`.
+  /// Contiene:
+  /// - distanza residua stimata (per il bottom sheet "tempo + km")
+  /// - tempo residuo stimato (idem)
+  /// - distanza dinamica alla prossima svolta (per il banner verde)
+  ///
+  /// È null all'avvio e durante gli stati non-navigazione.
+  RouteProgress? _progress;
+
   // ===========================================================================
   // STATO RICALCOLO PERCORSO — Bottom Sheet animato
   // ===========================================================================
@@ -348,6 +362,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
     // una svolta), il MapWidget deve spostare il "corridoio verde" al nuovo
     // segmento del percorso.
     _navigationMonitor.currentStepNotifier.addListener(_onStepChanged);
+
+    // FIX BUG 1 + BUG 2 — Ascolta il progresso in tempo reale del percorso.
+    // Il monitor pubblica ad ogni GPS tick:
+    //  - distanza/tempo residui totali → bottom sheet di navigazione
+    //  - distanza dinamica alla prossima svolta → banner verde in alto
+    _navigationMonitor.progressNotifier.addListener(_onProgressChanged);
 
     // Avvia il monitoraggio della posizione GPS
     _initLocationMonitoring();
@@ -650,9 +670,37 @@ class _NavigationScreenState extends State<NavigationScreen> {
       if (steps != null && steps.isNotEmpty) {
         final idx = _navigationMonitor.currentStepNotifier.value;
         final safeIdx = idx < steps.length ? idx : steps.length - 1;
-        _speak(steps[safeIdx].instruction);
+        // FIX BUG 2: dopo un avanzamento "approach-then-leave" l'utente ha
+        // appena svoltato ed è entrato nel segmento nuovo. Leggiamo
+        // vocalmente la prossima istruzione: steps[safeIdx + 1] se
+        // esiste (prossima svolta futura), altrimenti steps[safeIdx]
+        // (ultimo tratto, messaggio di arrivo).
+        if (safeIdx + 1 < steps.length) {
+          _speak(steps[safeIdx + 1].instruction);
+        } else {
+          _speak('Stai arrivando');
+        }
       }
     }
+  }
+
+  /// FIX BUG 1 + BUG 2 — Callback sul progresso aggiornato.
+  ///
+  /// Viene invocato ad ogni GPS tick dal NavigationMonitor (durante la
+  /// navigazione). Aggiorna il campo locale `_progress` e forza il
+  /// rebuild della UI, così il bottom sheet (tempo + distanza totali
+  /// residui) e il banner verde (distanza alla prossima svolta) si
+  /// aggiornano in tempo reale.
+  ///
+  /// Ottimizzazione: skippiamo il setState se siamo in uno stato non
+  /// navigazione (il progress notifier può pubblicare valori di coda
+  /// in brevi finestre temporali durante le transizioni).
+  void _onProgressChanged() {
+    if (!mounted) return;
+    if (_appState != NavigationAppState.navigating) return;
+    setState(() {
+      _progress = _navigationMonitor.progressNotifier.value;
+    });
   }
 
   /// Callback chiamato quando il NavigationMonitor cambia il percorso attivo (TASK 2).
@@ -682,6 +730,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
         steps: newRoute.steps,
         totalDistance: newRoute.totalDistance,
         totalDuration: newRoute.totalDuration,
+        // FIX BUG 1: propago anche i totali numerici del nuovo percorso
+        totalDistanceMeters: newRoute.totalDistanceMeters,
+        totalDurationSeconds: newRoute.totalDurationSeconds,
         encodedPolyline: newRoute.encodedPolyline,
         // Le coordinate di origine e destinazione vengono prese dal
         // risultato completo se disponibile, altrimenti manteniamo
@@ -1003,6 +1054,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
       _onReroutePhaseChanged,
     );
 
+    // FIX BUG 1 + BUG 2: rimuove il listener del progress
+    _navigationMonitor.progressNotifier.removeListener(_onProgressChanged);
+
     // Cancella il timer dell'animazione ricalcolo
     _routeChangedAnimTimer?.cancel();
 
@@ -1023,13 +1077,98 @@ class _NavigationScreenState extends State<NavigationScreen> {
   // ===========================================================================
   // HELPER: BEARING LUNGO IL PERCORSO
   // ===========================================================================
+  // HELPER POSIZIONAMENTO PULSANTE "IO" — FIX BUG 6b
+  // ===========================================================================
 
-  /// Calcola il bearing dalla posizione corrente verso lo step corrente
-  /// del percorso attivo (direzione in cui l'utente DEVE andare).
+  /// Calcola il valore di `bottom` del pulsante "Io" in modo che appoggi
+  /// sempre SOPRA il bottom sheet dello stato corrente, senza lasciare
+  /// spazi morti né sovrapporsi.
+  ///
+  /// Il valore è dato da:
+  ///   altezza_bottom_sheet_stato_corrente + margine_respiro_16px
+  ///
+  /// L'altezza del bottom sheet include SafeArea.bottom perché i sheet
+  /// usano `MediaQuery.padding.bottom + 24` come padding inferiore.
+  ///
+  /// NOTA: i valori di CONTENT_HEIGHT sono stime del contenuto interno
+  /// del sheet (Row con icone+testo+pulsanti). Se in futuro il layout
+  /// del sheet cambia, aggiornare la costante corrispondente.
+  double _computeRecenterButtonBottom(BuildContext context) {
+    final double safeBottom = MediaQuery.of(context).padding.bottom;
+    const double margin = 16.0;
+
+    switch (_appState) {
+      case NavigationAppState.navigating:
+        // _buildNavigatingUI bottom sheet:
+        //   top padding 24 + Row (~60) + bottom padding (safeBottom + 24)
+        //   ≈ 24 + 60 + 24 + safeBottom = 108 + safeBottom
+        const double contentHeight = 108.0;
+        return contentHeight + safeBottom + margin;
+
+      case NavigationAppState.placeSelected:
+        // _buildPlaceSelectedSheet è più alto: Column con titolo +
+        // indirizzo + pulsante "Vai" grande. Stima ≈ 180.
+        const double placeSheetHeight = 180.0;
+        return placeSheetHeight + safeBottom + margin;
+
+      case NavigationAppState.routePreview:
+        // Il preview sheet occupa ~35% dell'altezza dello schermo.
+        // Ancoriamo il pulsante appena sopra.
+        final double screenH = MediaQuery.of(context).size.height;
+        return screenH * 0.35 + margin;
+
+      case NavigationAppState.search:
+      default:
+        // Stato home: solo safe area + margine minimo.
+        return safeBottom + 24.0;
+    }
+  }
+
+  /// FIX BUG 2 — Formatta una distanza in metri per il banner verde.
+  ///
+  /// Usa la stessa convenzione del monitor (`_formatDistance` in
+  /// navigation_monitor.dart): "450 m", "1,2 km", "12 km". Duplicato
+  /// qui lato UI perché ci serve applicare la formattazione anche nel
+  /// caso in cui il progress non sia ancora disponibile e stiamo
+  /// formattando direttamente un valore numerico.
+  ///
+  /// NOTA: se la distanza scende sotto i 10m, mostriamo "Ci sei quasi"
+  /// invece di un numero basso che può sembrare allarmante. Soglia
+  /// pensata per il target d'uso (pedonale con disabilità cognitive).
+  String _formatBannerDistance(double meters) {
+    if (meters < 10) return 'Ci sei quasi';
+    if (meters < 1000) return '${meters.round()} m';
+    if (meters < 10000) {
+      return '${(meters / 1000.0).toStringAsFixed(1).replaceAll('.', ',')} km';
+    }
+    return '${(meters / 1000.0).round()} km';
+  }
+
+  // ===========================================================================
+
+  /// Calcola il bearing della direzione in cui orientare la mappa durante
+  /// la navigazione.
+  ///
+  /// FIX BUG 7: strategia migliorata. Usiamo il bearing del SEGMENTO attivo
+  /// (start → end dello step corrente), non più il bearing dalla posizione
+  /// dell'utente verso la fine dello step.
+  ///
+  /// MOTIVAZIONE:
+  /// Il bearing "utente → endLocation" è intrinsecamente INSTABILE vicino
+  /// al waypoint: quando l'utente arriva a < 10m dalla fine dello step,
+  /// piccoli sbalzi GPS producono variazioni di bearing di 20-40° tra un
+  /// frame e l'altro (atan2 molto sensibile quando la distanza tende a 0).
+  /// Il bearing del SEGMENTO è invece una costante geometrica per ogni
+  /// step: sempre stabile, indipendente dalla posizione istantanea.
+  ///
+  /// FALLBACK a cascata se il bearing del segmento non è disponibile:
+  ///   1) bearing del segmento attivo (start → end)
+  ///   2) bearing verso l'endLocation dello step (come prima)
+  ///   3) bearing affidabile memorizzato nel monitor
+  ///   4) bearing raw dal GPS
   double _getRouteBearing() {
     final double fallback = _navigationMonitor.direction ?? _rawBearing;
 
-    if (_currentLat == null || _currentLng == null) return fallback;
     final steps = _directionsResult?.steps;
     if (steps == null || steps.isEmpty) return fallback;
 
@@ -1037,19 +1176,82 @@ class _NavigationScreenState extends State<NavigationScreen> {
     final int safeIdx = idx < steps.length ? idx : steps.length - 1;
     final step = steps[safeIdx];
 
-    final double targetLat = step.endLat;
-    final double targetLng = step.endLng;
+    // --- STRATEGIA 1: bearing del segmento attivo (PRINCIPALE) ---
+    // Il bearing dallo startLocation allo endLocation dello step è una
+    // proprietà geometrica costante del tratto di strada: stabile e
+    // sempre definita.
+    final double segmentBearing = _bearingBetween(
+      step.startLat,
+      step.startLng,
+      step.endLat,
+      step.endLng,
+    );
 
-    final double lat1 = _currentLat! * (3.141592653589793 / 180.0);
-    final double lat2 = targetLat * (3.141592653589793 / 180.0);
-    final double dLng = (targetLng - _currentLng!) * (3.141592653589793 / 180.0);
+    // Sanity check: se startLocation e endLocation coincidono (step degenere),
+    // cadiamo sul fallback verso l'endLocation dalla posizione utente.
+    final double segLength = haversineDistance(
+      step.startLat,
+      step.startLng,
+      step.endLat,
+      step.endLng,
+    );
+    if (segLength >= 2.0) {
+      // Segmento non degenere → usiamo il suo bearing
+      return segmentBearing;
+    }
+
+    // --- STRATEGIA 2: bearing dall'utente verso la fine dello step ---
+    if (_currentLat != null && _currentLng != null) {
+      final double userDistToEnd = haversineDistance(
+        _currentLat!,
+        _currentLng!,
+        step.endLat,
+        step.endLng,
+      );
+      // Solo se l'utente non è praticamente sopra il waypoint (evita atan2
+      // erratico a distanze sub-metriche).
+      if (userDistToEnd >= 3.0) {
+        return _bearingBetween(
+          _currentLat!,
+          _currentLng!,
+          step.endLat,
+          step.endLng,
+        );
+      }
+    }
+
+    // --- STRATEGIE 3/4: fallback sul bearing affidabile / raw GPS ---
+    return fallback;
+  }
+
+  /// Helper: calcola il bearing in gradi (0-360, convenzione compass
+  /// bearing: 0°=nord, 90°=est) dalla coppia (lat1,lng1) alla (lat2,lng2).
+  ///
+  /// Usa la formula di Vincenty inverse solution semplificata, identica
+  /// a quella usata in precedenza in _getRouteBearing, estratta qui per
+  /// riuso sia sul segmento attivo che sul fallback.
+  double _bearingBetween(
+    double lat1Deg,
+    double lng1Deg,
+    double lat2Deg,
+    double lng2Deg,
+  ) {
+    const double degToRad = 3.141592653589793 / 180.0;
+    const double radToDeg = 180.0 / 3.141592653589793;
+
+    final double lat1 = lat1Deg * degToRad;
+    final double lat2 = lat2Deg * degToRad;
+    final double dLng = (lng2Deg - lng1Deg) * degToRad;
 
     final double x = math.sin(dLng) * math.cos(lat2);
-    final double y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLng);
-    double bearing = math.atan2(x, y) * (180.0 / 3.141592653589793);
+    final double y = math.cos(lat1) * math.sin(lat2) -
+        math.sin(lat1) * math.cos(lat2) * math.cos(dLng);
+    final double bearing = math.atan2(x, y) * radToDeg;
 
     return (bearing + 360) % 360;
   }
+
+  // ===========================================================================
 
   /// Mostra un dialog di conferma per terminare la navigazione.
   ///
@@ -1242,6 +1444,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
         _arrivalAnimStep = 0;
         _walkedPath = [];
         _isReviewingWalkedPath = false;
+        _progress = null; // FIX BUG 1+2: reset progress
 
         // --- Se torniamo alla ricerca, puliamo TUTTO ---
         // L'entry root "search" non ha dati salvati, quindi senza questo
@@ -1303,6 +1506,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
       _arrivalAnimStep = 0;
       _walkedPath = [];
       _isReviewingWalkedPath = false;
+      _progress = null; // FIX BUG 1+2: pulizia progress a fine navigazione
       _destinationController.clear();
     });
     // Ripulisce lo stack e riparte dalla home
@@ -1526,6 +1730,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
             steps: result.bestRoute.steps,
             totalDistance: result.bestRoute.totalDistance,
             totalDuration: result.bestRoute.totalDuration,
+            // FIX BUG 1: popolo anche i campi numerici
+            totalDistanceMeters: result.bestRoute.totalDistanceMeters,
+            totalDurationSeconds: result.bestRoute.totalDurationSeconds,
             encodedPolyline: result.bestRoute.encodedPolyline,
             originLat: result.originLat,
             originLng: result.originLng,
@@ -1599,6 +1806,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
         steps: [],
         totalDistance: '',
         totalDuration: '',
+        // Placeholder senza percorso → totali a zero
+        totalDistanceMeters: 0,
+        totalDurationSeconds: 0,
         encodedPolyline: '', // Nessun percorso
         originLat: _currentLat ?? 0,
         originLng: _currentLng ?? 0,
@@ -1664,6 +1874,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
         steps: [],
         totalDistance: '',
         totalDuration: '',
+        // Placeholder senza percorso → totali a zero
+        totalDistanceMeters: 0,
+        totalDurationSeconds: 0,
         encodedPolyline: '',
         originLat: _currentLat ?? 0,
         originLng: _currentLng ?? 0,
@@ -1899,15 +2112,28 @@ class _NavigationScreenState extends State<NavigationScreen> {
         //
         // In navigazione: riattiva il follow-mode (camera insegue GPS).
         // Negli altri stati: centra la mappa sulla posizione corrente.
-        if (_currentLat != null && !_isFollowingUser)
+        //
+        // FIX BUG 6a: Nascosto durante il ricalcolo del percorso
+        // (offRoute / rerouting / routeChanged). Il bottom sheet arancione
+        // occupa gran parte dello schermo e il pulsante "Io" creerebbe
+        // sovrapposizione visiva, inoltre non ha senso permettere il
+        // recenter mentre l'app sta cambiando rotta.
+        //
+        // FIX BUG 6a: Nascosto anche durante l'arrivo a destinazione
+        // (_isArrived). Il bottom sheet di arrivo ha i suoi controlli.
+        if (_currentLat != null &&
+            !_isFollowingUser &&
+            _reroutePhase == ReroutePhase.none &&
+            !_isArrived)
           Positioned(
-            bottom: _appState == NavigationAppState.navigating
-                ? 210.0
-                : _appState == NavigationAppState.placeSelected
-                    ? 240.0
-                    : _appState == NavigationAppState.routePreview
-                        ? MediaQuery.of(context).size.height * 0.35 + 16
-                        : 24.0,
+            // FIX BUG 6b: bottom calcolato dinamicamente per appoggiarsi
+            // SEMPRE appena sopra il bottom sheet dello stato corrente,
+            // indipendentemente dalla safe area del device.
+            // Prima era un valore fisso (210 in navigazione) che su device
+            // senza safe area (Android) lasciava spazio morto in basso,
+            // mentre su iPhone con safe area ampia rischiava
+            // sovrapposizione.
+            bottom: _computeRecenterButtonBottom(context),
             right: 16,
             child: GestureDetector(
               onTap: () {
@@ -1922,13 +2148,34 @@ class _NavigationScreenState extends State<NavigationScreen> {
                       _currentLng!,
                       _getRouteBearing(),
                     );
+                  } else if (_appState == NavigationAppState.routePreview ||
+                      _appState == NavigationAppState.placeSelected) {
+                    // FIX BUG 7: anche in preview/placeSelected, se c'è un
+                    // percorso, orientiamo la mappa verso il primo tratto.
+                    // Se non c'è percorso, fallback a moveToLocation senza
+                    // rotazione.
+                    final steps = _directionsResult?.steps;
+                    if (steps != null && steps.isNotEmpty) {
+                      _mapKey.currentState?.followUser(
+                        _currentLat!,
+                        _currentLng!,
+                        _getRouteBearing(),
+                      );
+                    } else {
+                      _mapKey.currentState?.moveToLocation(
+                        _currentLat!,
+                        _currentLng!,
+                      );
+                    }
+                    setState(() {
+                      _isFollowingUser = true;
+                    });
                   } else {
-                    // Negli altri stati: centra la mappa sulla posizione GPS
+                    // Stato "search" o altro: nessun percorso, solo recenter
                     _mapKey.currentState?.moveToLocation(
                       _currentLat!,
                       _currentLng!,
                     );
-                    // Nascondiamo il tasto dopo il recenter
                     setState(() {
                       _isFollowingUser = true;
                     });
@@ -2274,15 +2521,64 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 return _buildFallbackBanner();
               }
 
-              final safeIndex = currentStepIndex < steps.length
+              // FIX BUG 2 — Banner mostra la PROSSIMA SVOLTA, non l'azione
+              // iniziale dello step corrente.
+              //
+              // Google Directions definisce step[i].instruction come
+              // "azione da compiere all'INIZIO dello step i" (es. "Svolta
+              // a destra" all'imbocco di Via Verdi). Con la vecchia
+              // semantica, dopo che l'utente aveva svoltato continuava a
+              // vedere "Svolta a destra" per tutto il segmento, fino al
+              // waypoint successivo.
+              //
+              // NUOVA SEMANTICA:
+              //   - currentStepIndex = step che l'utente sta percorrendo
+              //     ORA (aggiornato con la logica approach-then-leave del
+              //     monitor, vedi BUG 2 in navigation_monitor.dart).
+              //   - Banner mostra steps[currentStepIndex + 1]: la prossima
+              //     azione da effettuare (tipicamente una svolta).
+              //   - Distanza = distanza dinamica dall'utente alla fine
+              //     dello step corrente (= inizio del prossimo step).
+              //     Questo valore CALA mentre l'utente cammina, dando un
+              //     preavviso utile per ragazzi con disabilità cognitive.
+              //   - Se non c'è un prossimo step (utente nell'ULTIMO tratto),
+              //     mostriamo un messaggio di arrivo imminente invece di
+              //     lasciare il banner vuoto o statico.
+              final int currentSafeIdx = currentStepIndex < steps.length
                   ? currentStepIndex
                   : steps.length - 1;
 
-              final currentStep = steps[safeIndex];
+              final bool isLastStep = currentSafeIdx + 1 >= steps.length;
 
-              // Determina icona e colore in base al tipo di manovra
-              final IconData directionIcon = _getManeuverIcon(currentStep.maneuver);
-              final Color bannerColor = _getManeuverColor(currentStep.maneuver);
+              // Lo step da MOSTRARE nel banner è quello successivo al
+              // corrente, che descrive la prossima svolta.
+              final DirectionStep bannerStep = isLastStep
+                  ? steps[currentSafeIdx]
+                  : steps[currentSafeIdx + 1];
+
+              // Distanza dinamica alla prossima svolta (valore aggiornato
+              // in tempo reale dal progressNotifier). Fallback al valore
+              // statico dello step se il progress non è ancora disponibile.
+              final String distanceText = _progress != null
+                  ? _formatBannerDistance(_progress!.distanceToNextTurn)
+                  : bannerStep.distance;
+
+              // Nell'ultimo step non c'è una prossima svolta: il banner
+              // ospita un messaggio di arrivo imminente + la distanza
+              // residua fino alla destinazione.
+              final String instructionText = isLastStep
+                  ? 'Stai arrivando'
+                  : bannerStep.instruction;
+
+              // Determina icona e colore in base al tipo di manovra del
+              // banner (prossima svolta). Nell'ultimo step usiamo
+              // un'icona di destinazione.
+              final IconData directionIcon = isLastStep
+                  ? Icons.place
+                  : _getManeuverIcon(bannerStep.maneuver);
+              final Color bannerColor = isLastStep
+                  ? Colors.green.shade700
+                  : _getManeuverColor(bannerStep.maneuver);
 
               return Container(
                 margin: EdgeInsets.only(
@@ -2331,7 +2627,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                         children: [
                           // Istruzione semplificata (es. "Vai a destra")
                           Text(
-                            currentStep.instruction,
+                            instructionText,
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 26,
@@ -2342,7 +2638,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                             overflow: TextOverflow.ellipsis,
                           ),
                           const SizedBox(height: 8),
-                          // Distanza rimanente allo step (es. "120 m")
+                          // Distanza dinamica alla prossima svolta (FIX BUG 2)
                           Container(
                             padding: const EdgeInsets.symmetric(
                               horizontal: 12,
@@ -2353,7 +2649,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
-                              currentStep.distance,
+                              distanceText,
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 18,
@@ -2401,16 +2697,32 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // FIX BUG 1 — Tempo residuo aggiornato in tempo reale.
+                    // Prima mostrava `_directionsResult.totalDuration`, che
+                    // è il valore iniziale restituito dalla Directions API
+                    // e non cambiava mai mentre l'utente camminava.
+                    // Ora leggiamo dal `_progress` emesso dal monitor ad
+                    // ogni GPS tick: il tempo DECRESCE man mano che
+                    // l'utente avanza. Fallback al valore totale iniziale
+                    // se il progress non è ancora stato calcolato (primo
+                    // secondo post-avvio navigazione).
                     Text(
-                      _directionsResult?.totalDuration ?? '',
+                      _progress?.remainingDurationText ??
+                          _directionsResult?.totalDuration ??
+                          '',
                       style: TextStyle(
                         fontSize: 24,
                         fontWeight: FontWeight.bold,
                         color: Colors.green.shade900,
                       ),
                     ),
+                    // FIX BUG 1 — Distanza residua aggiornata in tempo reale.
+                    // Stessa logica: valore dinamico dal progress con
+                    // fallback al testo iniziale totale.
                     Text(
-                      _directionsResult?.totalDistance ?? '',
+                      _progress?.remainingDistanceText ??
+                          _directionsResult?.totalDistance ??
+                          '',
                       style: TextStyle(
                         fontSize: 16,
                         color: Colors.grey.shade600,

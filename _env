@@ -1,0 +1,8 @@
+# File di configurazione dell'app Navigation
+# IMPORTANTE: non committare questo file su Git con le chiavi reali.
+
+# Google Maps / Places / Roads / Directions API Key
+GOOGLE_MAPS_API_KEY=AIzaSyDvmPBsr_i6UzCzl5Rt2d9Pnsg1yV4m5Ww
+
+# Mostra il tasto di debug flottante (solo in debug mode)
+DEBUG_BUTTON_ENABLED=true
