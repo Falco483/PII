@@ -39,7 +39,7 @@ dependencies:
   google_maps_flutter: ^2.5.0
   google_maps_flutter_android: ^2.18.12
   google_maps_flutter_platform_interface: ^2.14.1
-  
+
   # HTTP client per chiamate API
   http: ^1.1.0
   geolocator: ^14.0.2
@@ -47,6 +47,8 @@ dependencies:
   shared_preferences: ^2.5.4
   flutter_compass: ^0.8.1
   flutter_dotenv: ^6.0.0
+  speech_to_text: ^7.3.0
+  flutter_tts: ^4.2.0
 
 dev_dependencies:
   flutter_test:

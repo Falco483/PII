@@ -28,6 +28,7 @@ library;
 
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 import '../models/search_history_item.dart';
 import '../services/places_service.dart';
 
@@ -136,6 +137,10 @@ class _SearchInputState extends State<SearchInput> {
   /// che è per il calcolo del percorso).
   bool _isLoadingSuggestions = false;
 
+  final SpeechToText _speechToText = SpeechToText();
+  bool _speechEnabled = false;
+  bool _isListening = false;
+
   // ===========================================================================
   // CICLO DI VITA
   // ===========================================================================
@@ -153,6 +158,37 @@ class _SearchInputState extends State<SearchInput> {
         setState(() {}); // Ricostruisce per aggiornare la visibilità della history
       }
     });
+    _initSpeech();
+  }
+
+  Future<void> _initSpeech() async {
+    _speechEnabled = await _speechToText.initialize();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _startListening() async {
+    if (!_speechEnabled) return;
+    await _speechToText.listen(
+      onResult: (result) {
+        if (result.finalResult) {
+          widget.destinationController.text = result.recognizedWords;
+          _onTextChanged(result.recognizedWords);
+          setState(() { _isListening = false; });
+        } else {
+          widget.destinationController.text = result.recognizedWords;
+          setState(() {});
+        }
+      },
+      localeId: 'it_IT',
+      cancelOnError: true,
+      partialResults: true,
+    );
+    setState(() { _isListening = true; });
+  }
+
+  Future<void> _stopListening() async {
+    await _speechToText.stop();
+    setState(() { _isListening = false; });
   }
 
   @override
@@ -162,6 +198,7 @@ class _SearchInputState extends State<SearchInput> {
     // il callback del timer tenterà di chiamare setState() su un widget
     // non più montato, causando un errore.
     _debounceTimer?.cancel();
+    _speechToText.cancel();
 
     // Chiama il dispose del parent (StatefulWidget)
     super.dispose();
@@ -406,7 +443,18 @@ class _SearchInputState extends State<SearchInput> {
                         });
                       },
                     )
-                  : null,
+                  : _speechEnabled
+                      ? IconButton(
+                          icon: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 200),
+                            child: _isListening
+                                ? const Icon(Icons.mic, color: Colors.red, key: ValueKey('mic_on'))
+                                : const Icon(Icons.mic_none, color: Colors.grey, key: ValueKey('mic_off')),
+                          ),
+                          onPressed: _isListening ? _stopListening : _startListening,
+                          tooltip: _isListening ? 'Ferma ascolto' : 'Cerca con la voce',
+                        )
+                      : null,
               // Bordo standard del campo
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(8),
