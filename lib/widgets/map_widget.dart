@@ -135,6 +135,19 @@ class MapWidgetState extends State<MapWidget> {
   static const LatLng _initialPosition = LatLng(45.4836315, 9.2249375);
   static const double _initialZoom = 18;
 
+  // FIX BUG 5 — LARGHEZZA POLYLINE COSTANTE
+  //
+  // La polyline blu del percorso attivo (segmento corrente + resto del percorso)
+  // DEVE mantenere sempre la stessa larghezza in ogni stato dell'app.
+  // Prima: current_step=14px, remaining_route=6px, preview=6px → se lo step
+  // corrente non aveva encodedStepPolyline (es. fallback post-reroute),
+  // veniva renderizzata SOLO la remaining/preview a 6px, dando l'effetto
+  // di una polyline "più sottile del normale".
+  // Ora: un unico valore uniforme sia per corrente che per resto/preview.
+  static const double _kRoutePolylineWidth = 14.0;
+  // Il bordo di ombreggiatura è proporzionalmente più largo
+  static const double _kRouteBorderWidth = 18.0;
+
   // =========================================================================
   // FRECCIA DIREZIONALE CUSTOM — BITMAP CACHE
   // =========================================================================
@@ -655,7 +668,9 @@ class MapWidgetState extends State<MapWidget> {
           polylineId: const PolylineId('route'),
           points: polylinePoints,
           color: Colors.blue,
-          width: 6,
+          // FIX BUG 5: stessa larghezza del segmento attivo in navigazione,
+          // per consistenza visiva tra preview e navigazione.
+          width: _kRoutePolylineWidth.toInt(),
           geodesic: true,
           jointType: JointType.round,
           startCap: Cap.roundCap,
@@ -801,7 +816,7 @@ class MapWidgetState extends State<MapWidget> {
         polylineId: const PolylineId('current_border'),
         points: currentPoints,
         color: const Color(0xFF1A56C4), // Blu scuro (ombra)
-        width: 18,
+        width: _kRouteBorderWidth.toInt(), // FIX BUG 5: costante uniforme
         geodesic: true,
         jointType: JointType.round,
         startCap: Cap.roundCap,
@@ -814,7 +829,7 @@ class MapWidgetState extends State<MapWidget> {
         polylineId: const PolylineId('current_step'),
         points: currentPoints,
         color: const Color(0xFF4285F4), // Blu Google Maps
-        width: 14,
+        width: _kRoutePolylineWidth.toInt(), // FIX BUG 5: costante uniforme
         geodesic: true,
         jointType: JointType.round,
         startCap: Cap.roundCap,
@@ -874,7 +889,12 @@ class MapWidgetState extends State<MapWidget> {
           polylineId: const PolylineId('remaining_route'),
           points: allPoints,
           color: const Color(0xFF1A56C4), // Blu scuro (visibile e chiaro)
-          width: 6,
+          // FIX BUG 5: larghezza uniforme a current_step. Prima era 6px,
+          // quindi se lo step corrente non era visibile (encodedStepPolyline
+          // null dopo un fallback/reroute), restava visibile solo questa
+          // polyline sottilissima, dando l'impressione di una polyline
+          // "a volte più piccola". Ora è sempre 14px come il segmento attivo.
+          width: _kRoutePolylineWidth.toInt(),
           geodesic: true,
           jointType: JointType.round,
           startCap: Cap.roundCap,

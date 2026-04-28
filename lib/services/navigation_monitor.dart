@@ -151,6 +151,44 @@ const List<String> kArrivalMessages = [
 /// none → offRoute → routeChanged → none
 enum ReroutePhase { none, offRoute, rerouting, routeChanged }
 
+/// FIX BUG 1 + BUG 2 — Modello per il progresso in tempo reale del percorso.
+///
+/// Incapsula i valori calcolati ad ogni aggiornamento GPS che la UI
+/// deve mostrare in tempo reale:
+///
+/// - [remainingMeters]: distanza stimata residua fino alla destinazione
+///   (somma delle distanze degli step futuri + distanza parziale dallo
+///   step corrente al suo endLocation). Non passa per strade non
+///   percorse; è una stima basata sul percorso attivo.
+/// - [remainingSeconds]: tempo residuo stimato, proporzionale alla
+///   distanza residua rispetto alla distanza totale del percorso.
+///   Usare la velocità media del percorso (non quella istantanea) dà
+///   stime più stabili e coerenti con i tempi mostrati inizialmente
+///   dalla Directions API.
+/// - [remainingDistanceText]: versione human-readable di
+///   [remainingMeters] ("1,2 km", "450 m").
+/// - [remainingDurationText]: versione human-readable di
+///   [remainingSeconds] ("15 min", "1 h 5 min").
+/// - [distanceToNextTurn]: distanza in metri dall'utente alla fine
+///   dello step corrente — ovvero alla PROSSIMA svolta da effettuare.
+///   Usato dal banner verde (BUG 2) per mostrare la distanza dinamica
+///   alla prossima istruzione, invece del valore statico iniziale.
+class RouteProgress {
+  final double remainingMeters;
+  final int remainingSeconds;
+  final String remainingDistanceText;
+  final String remainingDurationText;
+  final double distanceToNextTurn;
+
+  const RouteProgress({
+    required this.remainingMeters,
+    required this.remainingSeconds,
+    required this.remainingDistanceText,
+    required this.remainingDurationText,
+    required this.distanceToNextTurn,
+  });
+}
+
 // =============================================================================
 // CLASSE PRINCIPALE — NAVIGATION MONITOR
 // =============================================================================
@@ -251,6 +289,34 @@ class NavigationMonitor {
   /// "confermata" per almeno N aggiornamenti GPS consecutivi (noi usiamo 2).
   int _consecutiveCloseUpdates = 0;
 
+  /// FIX BUG 2 — Stato "approach-then-leave" per l'avanzamento step.
+  ///
+  /// PROBLEMA DELLA VERSIONE PRECEDENTE:
+  /// L'avanzamento avveniva a 40m dalla endLocation dello step corrente,
+  /// cioè PRIMA della svolta fisica. Il banner mostrava quindi l'istruzione
+  /// del nuovo step (es. "Svolta a destra") mentre l'utente era ancora
+  /// sulla strada precedente. Dopo che l'utente aveva effettivamente
+  /// svoltato, il banner continuava a mostrare "Svolta a destra" finché
+  /// l'utente non arrivava a 40m dal waypoint SUCCESSIVO — un ritardo
+  /// percepibile di parecchie decine di secondi.
+  ///
+  /// LOGICA ATTUALE ("approach-then-leave"):
+  /// 1. L'utente si avvicina all'endLocation dello step corrente.
+  /// 2. Quando dist < 15m, marchiamo `_wasCloseToStepEnd = true`.
+  /// 3. L'utente compie la svolta (fisicamente).
+  /// 4. Quando dist > 25m (allontanamento), l'utente ha superato il
+  ///    waypoint → avanziamo _currentStepIndex e resettiamo il flag.
+  ///
+  /// RISULTATO:
+  /// Il banner si aggiorna DOPO la svolta effettiva, non prima: l'utente
+  /// vede l'istruzione giusta per il tratto che sta realmente percorrendo.
+  ///
+  /// GESTIONE PROSSIMITÀ ALL'ULTIMO STEP:
+  /// Sull'ultimo step il flag non serve perché non c'è "after-turn":
+  /// la logica di arrivo (CASO B) gestisce la convergenza sulla
+  /// destinazione con la sua soglia e le sue 3 conferme consecutive.
+  bool _wasCloseToStepEnd = false;
+
   // ===========================================================================
   // STATO PERCORSI — TASK 2
   // ===========================================================================
@@ -307,6 +373,24 @@ class NavigationMonitor {
   /// consecutive (3 = circa 3 secondi). Questo evita falsi arrivi
   /// causati da salti GPS momentanei.
   int _consecutiveArrivalUpdates = 0;
+
+  /// Parsifica `_originalDestination` nel formato "lat,lng" in una coppia
+  /// [lat, lng] di double, oppure null se non disponibile o malformato.
+  ///
+  /// FIX BUG 4: usato nel rilevamento arrivo come fallback alla
+  /// endLocation dell'ultimo step del percorso attivo, che può essere
+  /// stata "snapped" da Google a una coordinata leggermente diversa
+  /// dopo un ricalcolo.
+  List<double>? _parseOriginalDestination() {
+    final String? dest = _originalDestination;
+    if (dest == null || dest.isEmpty) return null;
+    final parts = dest.split(',');
+    if (parts.length != 2) return null;
+    final double? lat = double.tryParse(parts[0].trim());
+    final double? lng = double.tryParse(parts[1].trim());
+    if (lat == null || lng == null) return null;
+    return [lat, lng];
+  }
 
   // ===========================================================================
   // STATO "SCELTA PERCORSO" — Percorso precedente salvato
@@ -441,6 +525,22 @@ class NavigationMonitor {
   /// L'utente tocca "Mostra il nuovo percorso" → none
   final ValueNotifier<ReroutePhase> reroutePhaseNotifier =
       ValueNotifier<ReroutePhase>(ReroutePhase.none);
+
+  /// FIX BUG 1 + BUG 2 — Notifier che emette il progresso in tempo reale
+  /// del percorso attivo: distanza/tempo residui e distanza alla prossima
+  /// svolta.
+  ///
+  /// Viene aggiornato ad ogni chiamata a updatePosition() quando è in
+  /// corso una navigazione. Il valore è null quando:
+  /// - la navigazione non è ancora stata avviata
+  /// - la posizione GPS non è ancora disponibile
+  /// - il percorso attivo non ha totalDistanceMeters valido
+  ///
+  /// La UI (NavigationScreen) ascolta questo notifier per aggiornare:
+  /// - Il bottom sheet di navigazione (tempo + distanza totali residui)
+  /// - Il banner verde superiore (distanza dinamica alla prossima svolta)
+  final ValueNotifier<RouteProgress?> progressNotifier =
+      ValueNotifier<RouteProgress?>(null);
 
   // ===========================================================================
   // SERVIZI
@@ -579,19 +679,30 @@ class NavigationMonitor {
     // Viene eseguita ad ogni singolo aggiornamento GPS, fintanto che
     // ci sono step validi ed è attiva una rotta.
     //
-    // MIGLIORAMENTI RISPETTO ALLA VERSIONE PRECEDENTE:
-    // 1. Soglia aumentata da 25m a 40m → l'istruzione successiva appare
-    //    PRIMA che l'utente arrivi all'incrocio (più tempo per leggere/reagire).
-    //    Cruciale per utenti con disabilità cognitive.
-    // 2. While loop anziché if singolo → se l'utente ha superato più step
-    //    corti in un singolo ciclo GPS (es. due traverse da 15m), il banner
-    //    salta direttamente allo step corretto invece di restare indietro.
+    // FIX BUG 2 — NUOVA LOGICA "approach-then-leave":
+    // Prima: avanzamento a 40m dalla endLocation (PRIMA della svolta).
+    //        → il banner mostrava la nuova istruzione prima che l'utente
+    //          avesse fisicamente svoltato, e dopo la svolta continuava
+    //          a mostrare la stessa istruzione perché l'avanzamento
+    //          successivo avveniva solo al waypoint SEGUENTE.
+    // Ora: avanzamento "dopo la svolta". L'utente deve prima avvicinarsi
+    //      al waypoint (dist < 15m → _wasCloseToStepEnd = true), poi
+    //      allontanarsene (dist > 25m → avanza).
+    //
+    // FALLBACK DI SICUREZZA:
+    // Se l'utente non si avvicina mai sotto i 15m (es. imbocca una
+    // scorciatoia che taglia l'angolo dell'incrocio) ma si trova già
+    // oltre il waypoint, manteniamo anche l'avanzamento diretto a < 40m
+    // come "salvagente" per gli step intermedi, in modo da non bloccare
+    // il banner su un'istruzione vecchia. Questo fallback è attivato
+    // SOLO se l'utente è già "oltre" il waypoint (più vicino allo step
+    // successivo che a quello corrente).
     if (_activeRoute != null && _routeSteps.isNotEmpty) {
       // Flag per sapere se abbiamo avanzato almeno uno step in questo ciclo
       bool didAdvance = false;
 
       // While loop: continua ad avanzare finché lo step corrente risulta
-      // "superato" (utente entro 40m dall'endpoint) E c'è un prossimo step.
+      // "superato" E c'è un prossimo step.
       while (_currentStepIndex < _routeSteps.length) {
         final currentStep = _routeSteps[_currentStepIndex];
 
@@ -604,16 +715,61 @@ class NavigationMonitor {
         );
 
         // --- CASO A: step intermedi (non l'ultimo) ---
-        // Soglia 40m: dà ~8-10 secondi di preavviso a passo normale (5 km/h)
         if (_currentStepIndex + 1 < _routeSteps.length) {
-          if (distanceToEnd < 40.0) {
-            _currentStepIndex++;
-            didAdvance = true;
-            // Continua il loop: verifica se anche il prossimo step
-            // è già stato superato (step corti in sequenza)
-          } else {
-            break; // Ancora lontano → fermati
+          // Fase 1 — Approach: l'utente si sta avvicinando al waypoint
+          if (distanceToEnd < 15.0) {
+            if (!_wasCloseToStepEnd) {
+              print(
+                '📍 APPROACH: utente vicino all\'endLoc step $_currentStepIndex '
+                '(${distanceToEnd.toStringAsFixed(1)}m) — attendo la svolta',
+              );
+            }
+            _wasCloseToStepEnd = true;
+            break; // Aspettiamo che l'utente svolti e si allontani
           }
+
+          // Fase 2 — Leave: dopo essersi avvicinato, l'utente si allontana
+          // → ha superato il waypoint, svolta completata.
+          if (_wasCloseToStepEnd && distanceToEnd > 25.0) {
+            print(
+              '📍 LEAVE: utente ha superato l\'endLoc step $_currentStepIndex '
+              '(${distanceToEnd.toStringAsFixed(1)}m) — avanzamento step',
+            );
+            _currentStepIndex++;
+            _wasCloseToStepEnd = false;
+            didAdvance = true;
+            // Continua il loop: se anche il prossimo step è già stato
+            // superato (step cortissimi in sequenza), avanziamo di nuovo.
+            continue;
+          }
+
+          // Fase 3 — Salvagente: se siamo molto vicini al prossimo
+          // waypoint (endLocation dello step successivo) senza essere
+          // mai passati dalla fase Approach, significa che l'utente ha
+          // tagliato o che il GPS non ha campionato abbastanza bassa la
+          // distanza. In quel caso forziamo l'avanzamento per non
+          // bloccare il banner su un'istruzione obsoleta.
+          final nextStep = _routeSteps[_currentStepIndex + 1];
+          final double distanceToNextEnd = distanceBetween(
+            lat,
+            lng,
+            nextStep.endLat,
+            nextStep.endLng,
+          );
+          // L'utente è più vicino alla fine del prossimo step che a
+          // quella del corrente → è sicuramente oltre il waypoint.
+          if (distanceToNextEnd < distanceToEnd && distanceToEnd > 40.0) {
+            print(
+              '📍 SALVAGENTE: utente è oltre l\'endLoc step $_currentStepIndex '
+              'senza essere passato dalla fase approach — avanzamento forzato',
+            );
+            _currentStepIndex++;
+            _wasCloseToStepEnd = false;
+            didAdvance = true;
+            continue;
+          }
+
+          break; // Ancora dentro il segmento corrente, non fare nulla
         }
         // --- CASO B: ULTIMO step → rilevamento ARRIVO ---
         //
@@ -631,16 +787,44 @@ class NavigationMonitor {
         // ogni aggiornamento GPS successivo riemetteva arrivalCelebration,
         // resettando l'animazione del bottom sheet e impedendo a
         // "Vuoi rivedere il percorso?" di apparire (step 2 mai raggiunto).
+        //
+        // FIX BUG 4 — ANCORAGGIO DOPPIO ALLA DESTINAZIONE:
+        // Dopo un ricalcolo percorso, Google può fare snap della destinazione
+        // a una coordinata leggermente diversa da quella originale
+        // selezionata dall'utente. In quel caso, distanceToEnd (verso
+        // l'endLocation dell'ULTIMO step del nuovo percorso) può rimanere
+        // sempre > 20m anche se l'utente è fisicamente dove voleva andare.
+        // Usiamo la DISTANZA MINIMA tra end-step e destinazione-originale
+        // parsata: così scatta l'arrivo indipendentemente da quale delle
+        // due coordinate l'utente raggiunge per prima.
         else {
           if (_hasArrived) {
             break; // Già emesso, non ripetere
           }
 
-          if (distanceToEnd < 20.0) {
+          // Distanza dall'endLocation dell'ultimo step (default)
+          double arrivalDistance = distanceToEnd;
+
+          // Se c'è una destinazione originale salvata e parsabile,
+          // considera anche quella come candidato di arrivo.
+          final List<double>? origDest = _parseOriginalDestination();
+          if (origDest != null) {
+            final double distToOriginal = distanceBetween(
+              lat,
+              lng,
+              origDest[0],
+              origDest[1],
+            );
+            if (distToOriginal < arrivalDistance) {
+              arrivalDistance = distToOriginal;
+            }
+          }
+
+          if (arrivalDistance < 20.0) {
             _consecutiveArrivalUpdates++;
             print(
               '📍 ARRIVO DEBUG: entro 20m dalla destinazione '
-              '(${distanceToEnd.toStringAsFixed(1)}m, '
+              '(${arrivalDistance.toStringAsFixed(1)}m, '
               'conferma $_consecutiveArrivalUpdates/3)',
             );
 
@@ -676,7 +860,122 @@ class NavigationMonitor {
           '(${_routeSteps[_currentStepIndex].instruction})',
         );
       }
+
+      // FIX BUG 1 + BUG 2 — Calcolo progresso in tempo reale
+      //
+      // Dopo aver eventualmente avanzato _currentStepIndex, calcoliamo:
+      //   - distanceToNextTurn: distanza dall'utente all'endLocation dello
+      //     step corrente (= alla prossima svolta da effettuare).
+      //   - remainingMeters: somma delle distanze degli step successivi +
+      //     distanza parziale all'endLocation dello step corrente.
+      //   - remainingSeconds: proporzionale alla distanza residua, usando
+      //     la velocità media del percorso originale (metri/secondo).
+      //
+      // Il calcolo è stabile: non usa la velocità istantanea (che oscilla
+      // a basse velocità) ma il rapporto distanza_totale/durata_totale,
+      // lo stesso che la Directions API ha usato inizialmente.
+      _emitRouteProgress(lat, lng);
     }
+  }
+
+  /// FIX BUG 1 + BUG 2 — Calcola e pubblica il RouteProgress corrente.
+  ///
+  /// Chiamato alla fine di updatePosition(), quando la posizione e
+  /// l'indice dello step corrente sono aggiornati.
+  ///
+  /// REGOLE DI STABILITÀ:
+  /// - Non pubblichiamo nulla se il percorso attivo non ha dati
+  ///   numerici validi (totalDistanceMeters <= 0).
+  /// - Clampiamo `distanceToNextTurn` a zero per evitare micro-valori
+  ///   negativi dovuti ad arrotondamenti.
+  /// - Il tempo residuo è calcolato da: velocità_media_percorso *
+  ///   distanza_residua. Questo fornisce stime coerenti con quelle
+  ///   mostrate inizialmente dall'API.
+  void _emitRouteProgress(double lat, double lng) {
+    final RouteData? route = _activeRoute;
+    if (route == null) return;
+    if (_routeSteps.isEmpty) return;
+    if (route.totalDistanceMeters <= 0) {
+      // Senza dati numerici totali non possiamo calcolare il tempo
+      // proporzionale — non emettiamo nulla.
+      return;
+    }
+
+    // Clamp dell'indice corrente al range valido
+    final int idx = _currentStepIndex < _routeSteps.length
+        ? _currentStepIndex
+        : _routeSteps.length - 1;
+    final DirectionStep currentStep = _routeSteps[idx];
+
+    // Distanza alla prossima svolta = distanza dall'utente all'endLocation
+    // dello step corrente (next turn = fine tratto attuale).
+    final double distToNext = distanceBetween(
+      lat,
+      lng,
+      currentStep.endLat,
+      currentStep.endLng,
+    );
+
+    // Distanza residua lungo il percorso = distanza parziale nello step
+    // corrente + somma delle distanze degli step successivi.
+    double remaining = distToNext;
+    for (int i = idx + 1; i < _routeSteps.length; i++) {
+      remaining += _routeSteps[i].distanceMeters.toDouble();
+    }
+    if (remaining < 0) remaining = 0;
+
+    // Tempo residuo stimato proporzionale alla distanza residua.
+    // velocità_media = totalDistanceMeters / totalDurationSeconds
+    // tempo_residuo = remaining / velocità_media = remaining *
+    //                 totalDurationSeconds / totalDistanceMeters
+    final int totalDist = route.totalDistanceMeters;
+    final int totalDur = route.totalDurationSeconds;
+    int remainingSec;
+    if (totalDist > 0 && totalDur > 0) {
+      remainingSec = (remaining * totalDur / totalDist).round();
+    } else {
+      remainingSec = 0;
+    }
+    if (remainingSec < 0) remainingSec = 0;
+
+    // Pubblica il progresso aggiornato
+    progressNotifier.value = RouteProgress(
+      remainingMeters: remaining,
+      remainingSeconds: remainingSec,
+      remainingDistanceText: _formatDistance(remaining),
+      remainingDurationText: _formatDuration(remainingSec),
+      distanceToNextTurn: distToNext.clamp(0.0, double.infinity),
+    );
+  }
+
+  /// Formatta una distanza in metri come stringa human-readable.
+  /// Esempi: 750 → "750 m", 1200 → "1,2 km", 12500 → "12 km".
+  String _formatDistance(double meters) {
+    if (meters < 1000) {
+      return '${meters.round()} m';
+    } else if (meters < 10000) {
+      // Sotto 10 km mostriamo un decimale (es. "1,2 km"), virgola it-IT.
+      final double km = meters / 1000.0;
+      return '${km.toStringAsFixed(1).replaceAll('.', ',')} km';
+    } else {
+      return '${(meters / 1000.0).round()} km';
+    }
+  }
+
+  /// Formatta una durata in secondi come stringa human-readable.
+  /// Esempi: 45 → "1 min", 300 → "5 min", 3900 → "1 h 5 min".
+  String _formatDuration(int seconds) {
+    if (seconds < 60) {
+      return '1 min'; // Minimo user-friendly, "0 min" è strano
+    }
+    final int totalMin = (seconds / 60).round();
+    if (totalMin < 60) {
+      return '$totalMin min';
+    }
+    final int h = totalMin ~/ 60;
+    final int m = totalMin % 60;
+    if (m == 0) return '$h h';
+    return '$h h $m min';
   }
 
   /// Aggiorna la lista degli step del percorso.
@@ -752,6 +1051,7 @@ class NavigationMonitor {
     // Resetta la progressione step
     _currentStepIndex = 0;
     _consecutiveCloseUpdates = 0;
+    _wasCloseToStepEnd = false; // FIX BUG 2: reset stato approach-then-leave
     currentStepNotifier.value = 0;
     _consecutiveOffRouteDetects = 0;
     _routeCheckTicks = 0;
@@ -835,6 +1135,7 @@ class NavigationMonitor {
     // Resetta lo stato di tracciamento degli Step
     _currentStepIndex = 0;
     _consecutiveCloseUpdates = 0;
+    _wasCloseToStepEnd = false; // FIX BUG 2: reset stato approach-then-leave
     currentStepNotifier.value = 0;
 
     // Resetta lo stato di arrivo
@@ -844,6 +1145,10 @@ class NavigationMonitor {
     // Resetta l'overlay: se un overlay era visibile, lo rimuoviamo
     // per evitare che resti appeso dopo lo stop.
     overlayNotifier.value = null;
+
+    // FIX BUG 1+2: azzera il progress notifier quando la navigazione
+    // termina, così la UI non mostra valori vecchi.
+    progressNotifier.value = null;
 
     // Resetta le variabili di cooldown spaziale dell'analisi
     _lastAnalysisLat = null;
@@ -892,6 +1197,13 @@ class NavigationMonitor {
     _consecutiveOffRouteDetects = 0;
     _routeCheckTicks = 0;
 
+    // FIX BUG 4: reset sicurezza dei contatori di arrivo.
+    // Anche se già resettati in Task 2b/2c, ripetiamo qui come guard-rail:
+    // questo metodo può essere chiamato a posteriori e garantisce che lo
+    // stato di arrivo sia pulito quando l'utente conferma il nuovo percorso.
+    _hasArrived = false;
+    _consecutiveArrivalUpdates = 0;
+
     // Chiude il bottom sheet
     reroutePhaseNotifier.value = ReroutePhase.none;
   }
@@ -924,7 +1236,14 @@ class NavigationMonitor {
     // Ripristina l'indice dello step (dove era arrivato l'utente)
     _currentStepIndex = _previousStepIndex;
     _consecutiveCloseUpdates = 0;
+    _wasCloseToStepEnd = false; // FIX BUG 2: reset stato approach-then-leave
     currentStepNotifier.value = _previousStepIndex;
+
+    // FIX BUG 4: reset contatori di arrivo.
+    // Rientrando sul percorso vecchio (che potrebbe avere l'ultimo step
+    // diverso), partiamo puliti per il rilevamento arrivo.
+    _hasArrived = false;
+    _consecutiveArrivalUpdates = 0;
 
     // Cancella il backup (ripristino completato)
     _previousRoute = null;
@@ -976,6 +1295,7 @@ class NavigationMonitor {
     overlayNotifier.dispose();
     activeRouteNotifier.dispose();
     reroutePhaseNotifier.dispose();
+    progressNotifier.dispose(); // FIX BUG 1+2
   }
 
   // ===========================================================================
@@ -1690,7 +2010,15 @@ class NavigationMonitor {
         // azzeriamo tutti i conteggi per fargli ricalcolare dal rigo 0 le sue istruzioni
         _currentStepIndex = 0;
         _consecutiveCloseUpdates = 0;
+        _wasCloseToStepEnd = false; // FIX BUG 2: reset stato approach-then-leave
         currentStepNotifier.value = 0;
+
+        // FIX BUG 4: reset contatori di arrivo sul nuovo percorso.
+        // Senza questo reset, un contatore residuo (es. 2) dal percorso
+        // precedente poteva portare a falsi arrivi o comunque a
+        // comportamenti incoerenti sul nuovo percorso.
+        _hasArrived = false;
+        _consecutiveArrivalUpdates = 0;
 
         // Notifica la UI che il percorso attivo è cambiato.
         // La NavigationScreen si occuperà di aggiornare:
@@ -1837,7 +2165,17 @@ class NavigationMonitor {
       // Resetta la progressione step per il nuovo percorso
       _currentStepIndex = 0;
       _consecutiveCloseUpdates = 0;
+      _wasCloseToStepEnd = false; // FIX BUG 2: reset stato approach-then-leave
       currentStepNotifier.value = 0;
+
+      // FIX BUG 4: reset contatori di arrivo sul nuovo percorso ricalcolato.
+      // Il nuovo percorso può avere una endLocation "snapped" leggermente
+      // diversa dall'originale; resettiamo anche perché senza questo reset,
+      // eventuali conferme parziali accumulate sul vecchio percorso
+      // restavano dirty e potevano produrre arrivi prematuri oppure
+      // impedire il normale conteggio sul nuovo.
+      _hasArrived = false;
+      _consecutiveArrivalUpdates = 0;
 
       // Notifica la UI che il percorso è cambiato.
       // La NavigationScreen aggiornerà mappa, indicazioni, ecc.
