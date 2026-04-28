@@ -23,7 +23,7 @@ void main() async {
   try {
     await dotenv.load(fileName: '.env');
   } catch (e) {
-    debugPrint('⚠️ Errore caricamento .env: $e. Continuando con valori di default...');
+    debugPrint(' Errore caricamento .env: $e. Continuando con valori di default...');
   }
 
   // Inizializza il renderer Google Maps su Android.

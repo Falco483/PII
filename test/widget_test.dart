@@ -13,6 +13,6 @@ void main() {
     await tester.pumpWidget(NavigationApp(navigatorKey: GlobalKey<NavigatorState>()));
 
     // Verifica che il titolo sia visibile
-    expect(find.text('Navigation App'), findsOneWidget);
+    expect(find.text('La mia mappa'), findsOneWidget);
   });
 }

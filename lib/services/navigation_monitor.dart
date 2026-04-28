@@ -961,6 +961,11 @@ class NavigationMonitor {
   /// memory leak e timer orfani che continuano a girare dopo la
   /// distruzione del widget.
   void dispose() {
+    // Se l'app viene chiusa durante la navigazione, salviamo la sessione
+    if (_currentSession != null) {
+      stopNavigation();
+    }
+
     // Cancella il timer di campionamento del bearing
     _bearingTimer?.cancel();
     _bearingTimer = null;

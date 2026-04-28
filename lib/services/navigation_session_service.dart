@@ -45,6 +45,7 @@ class NavigationSessionService {
                 jsonDecode(s) as Map<String, dynamic>,
               ))
           .toList();
+      sessions.sort((a, b) => b.startTime.compareTo(a.startTime));
       print('✅ NavigationSessionService: Caricate ${sessions.length} sessioni');
       for (var s in sessions) {
         print('   → ID: ${s.sessionId}, Overlay: ${s.overlays.length}, Ricalcoli: ${s.rerouteCount}');
