@@ -1,43 +1,64 @@
 @startuml
 title Architecture Block Diagram
 
-package "User Interface (UI)" {
+skinparam linetype ortho
+skinparam nodesep 70
+skinparam ranksep 80
+skinparam componentStyle rectangle
+
+package "User Interface (UI) Layer" {
+  [NavigationHistoryDebugScreen]
+  [NavigationOverlay]
+  [DirectionsList]
   [NavigationScreen]
   [MapWidget]
   [SearchInput]
-  [DirectionsList]
-  [NavigationOverlay]
 }
 
-package "Business Logic (Services)" {
-  [NavigationMonitor]
+package "Business Logic (Services) Layer" {
   [NavigationHistoryService]
+  [NavigationMonitor]
+  [NavigationSessionService]
+  [SearchHistoryService]
   [GeoUtils]
 }
 
-package "External Services / APIs" {
+package "External Services / APIs Layer" {
   [DirectionsService]
   [PlacesService]
   [RoadsService]
 }
 
-package "Sensors" {
+package "Sensors & Persistence Layer" {
   [Geolocator Platform]
   [Compass Platform]
+  [Local Storage]
 }
 
-[NavigationScreen] --> [MapWidget]
-[NavigationScreen] --> [SearchInput]
-[NavigationScreen] --> [DirectionsList]
-[NavigationScreen] --> [NavigationOverlay]
+' Intra-package UI relationships
+[NavigationScreen] -r-> [MapWidget] : "Controls map"
+[NavigationScreen] -l-> [SearchInput] : "Search UI"
+[NavigationScreen] -u-> [DirectionsList] : "Shows steps"
+[NavigationScreen] -u-> [NavigationOverlay] : "Alerts"
 
-[NavigationScreen] --> [NavigationMonitor] : "Listens & Updates"
-[NavigationScreen] --> [NavigationHistoryService] : "State Mgmt"
+' UI to Logic
+[NavigationScreen] --> [NavigationMonitor] : "Listens state"
+[NavigationScreen] --> [NavigationHistoryService] : "Back-Stack"
+[SearchInput] --> [SearchHistoryService] : "History"
+[NavigationHistoryDebugScreen] --> [NavigationSessionService] : "Reads history"
 
-[NavigationMonitor] --> [RoadsService] : "Analyze laterals"
-[NavigationMonitor] --> [DirectionsService] : "Off-route Check"
-[SearchInput] --> [PlacesService] : "Autocomplete & Geocode"
+' Logic to APIs
+[NavigationMonitor] --> [RoadsService] : "Laterals"
+[NavigationMonitor] --> [DirectionsService] : "Off-route"
+[NavigationMonitor] -r-> [NavigationSessionService] : "Logs metrics"
+[SearchInput] --> [PlacesService] : "Places API"
 
-[Geolocator Platform] --> [NavigationScreen] : "Stream"
-[Compass Platform] --> [NavigationScreen] : "Stream"
+' Sensors to UI (Pointing up so Sensors stay below)
+[Geolocator Platform] .u.> [NavigationScreen] : "GPS Stream"
+[Compass Platform] .u.> [NavigationScreen] : "Heading Stream"
+
+' Logic to Persistence
+[NavigationSessionService] --> [Local Storage] : "Persists data"
+[SearchHistoryService] --> [Local Storage] : "Persists data"
+
 @enduml

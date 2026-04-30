@@ -51,7 +51,7 @@ entity "AllRoutesResult" as AllRoutesResult {
   * destLng : double
 }
 
-entity "NavigationSession" as NavigationSession {
+entity "NavigationMonitorState" as NavigationMonitorState {
   * isNavigating : bool
   * hasArrived : bool
   * isRerouting : bool
@@ -65,6 +65,24 @@ entity "NavigationSession" as NavigationSession {
   * consecutiveArrivalUpdates : int
   * consecutiveOffRouteDetects : int
   * navigationStartTime : datetime
+}
+
+entity "NavigationSession" as NavigationSession {
+  * sessionId : string <<PK>>
+  --
+  * destination : string
+  * startTime : string
+  * endTime : string
+  * rerouteCount : int
+  * destinationReached : bool
+  * extraData : map
+}
+
+entity "OverlayRecord" as OverlayRecord {
+  * timestamp : string <<PK>>
+  --
+  * type : string
+  * message : string
 }
 
 entity "NavigationOverlayState" as NavigationOverlayState {
@@ -114,19 +132,21 @@ entity "NavigationHistoryEntry" as NavigationHistoryEntry {
 
 AllRoutesResult ||--|{ RouteData : "bestRoute + allRoutes"
 RouteData ||--|{ DirectionStep : "composed of"
-NavigationSession ||--|| RouteData : "activeRoute"
-NavigationSession ||--o| RouteData : "previousRoute"
-NavigationSession ||--o{ RouteData : "alternativeRoutes"
-NavigationSession ||--o{ DirectionStep : "routeSteps"
-NavigationSession ||--o{ WalkedPath : "tracks"
-NavigationSession ||--o| NavigationOverlayState : "emits"
-NavigationSession ||--|| RerouteState : "reroutePhase"
-NavigationSession ||--|| ArrivalState : "arrivalState"
-NavigationSession ||--|| UIState : "drives"
+NavigationMonitorState ||--|| RouteData : "activeRoute"
+NavigationMonitorState ||--o| RouteData : "previousRoute"
+NavigationMonitorState ||--o{ RouteData : "alternativeRoutes"
+NavigationMonitorState ||--o{ DirectionStep : "routeSteps"
+NavigationMonitorState ||--o{ WalkedPath : "tracks"
+NavigationMonitorState ||--o| NavigationOverlayState : "emits"
+NavigationMonitorState ||--|| RerouteState : "reroutePhase"
+NavigationMonitorState ||--|| ArrivalState : "arrivalState"
+NavigationMonitorState ||--|| UIState : "drives"
 UIState ||--o{ NavigationHistoryEntry : "backStack"
 PlaceSuggestion ||--|| PlaceDetails : "resolves to"
 PlaceDetails ||--o| AllRoutesResult : "destination for"
 SearchHistoryItem ||--o| AllRoutesResult : "quick-launch to"
-SnappedPoint }o--|| NavigationSession : "lateral road analysis"
+SnappedPoint }o--|| NavigationMonitorState : "lateral road analysis"
+NavigationSession ||--o{ OverlayRecord : "contains"
+NavigationMonitorState ||--o| NavigationSession : "tracked by"
 
 @enduml

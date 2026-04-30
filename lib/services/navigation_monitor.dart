@@ -1734,24 +1734,36 @@ class NavigationMonitor {
 
       if (distance < closestDistance) {
         closestDistance = distance;
-        closestInstruction = step.instruction;
+        // Se siamo vicini alla fine di questo step, l'istruzione corretta
+        // è quella dello step SUCCESSIVO, perché è lì che inizia la nuova manovra.
+        if (i + 1 < _routeSteps.length) {
+          closestInstruction = _routeSteps[i + 1].instruction;
+        } else {
+          closestInstruction = 'Arrivo a destinazione';
+        }
       }
 
       if (distance <= kTurnWaypointRadiusMeters) {
         // L'utente è fermo esattamente su un punto di svolta del percorso!
-        // Mostra l'istruzione di navigazione con un prefisso di incoraggiamento
-        // randomizzato per rendere l'esperienza più positiva e rassicurante.
-        //
-        // ESEMPIO: "Ci siamo quasi! Svolta a destra in Via Roma"
-        final String prefix =
-            kTurnEncouragementPrefixes[_random.nextInt(
-              kTurnEncouragementPrefixes.length,
-            )];
-        return NavigationOverlayState(
-          type: OverlayType.turnInstruction,
-          message: '$prefix${step.instruction}',
-          maneuver: step.maneuver,
-        );
+        // Ma attenzione: la endLocation dello step corrente coincide con
+        // l'incrocio in cui l'utente deve eseguire la manovra dello step SUCCESSIVO.
+        // Quindi se c'è uno step successivo, mostriamo la sua istruzione.
+        if (i + 1 < _routeSteps.length) {
+          final nextStep = _routeSteps[i + 1];
+          final String prefix =
+              kTurnEncouragementPrefixes[_random.nextInt(
+                kTurnEncouragementPrefixes.length,
+              )];
+          return NavigationOverlayState(
+            type: OverlayType.turnInstruction,
+            message: '$prefix${nextStep.instruction}',
+            maneuver: nextStep.maneuver,
+          );
+        } else {
+          // Siamo alla fine dell'ultimo step. L'arrivo a destinazione verrà
+          // gestito dalla logica apposita, quindi qui non emettiamo overlay di svolta.
+          return null;
+        }
       }
     }
 

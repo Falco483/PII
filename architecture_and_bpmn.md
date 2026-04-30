@@ -1,12 +1,12 @@
 # PII Navigation App - Architettura e Flusso di Processo (BPMN)
 
 Questo documento presenta:
-1. Il **Diagramma a Blocchi** (Architettura del Sistema) che mostra come interagiscono i vari componenti, servizi e widget.
-2. Il processo **BPMN** (rappresentato tramite flowchart) che illustra la logica di funzionamento passo dopo passo, dalla ricerca della destinazione fino alla navigazione e arrivo.
+1. L'**Architecture Block Diagram** (Architettura del Sistema) che mostra come interagiscono i vari componenti, layer, servizi e widget.
+2. Il processo **BPMN** (rappresentato tramite flowchart) che illustra la logica di funzionamento passo dopo passo, dalla ricerca della destinazione fino alla navigazione a piedi e arrivo.
 
 ---
 
-## 1. Diagramma a Blocchi (Architettura del Sistema)
+## 1. Architecture Block Diagram (Architettura del Sistema)
 
 La nostra applicazione è basata su Flutter. Il `NavigationScreen` funge da punto di coordinamento principale, collegando i Widget visivi della UI con i Servizi logici che chiamano le API esterne e il dispositivo (GPS / Bussola).
 
@@ -18,11 +18,13 @@ flowchart TD
         SI["SearchInput<br>Google Places Search"]
         DL["DirectionsList<br>Turn-by-turn UI"]
         NO["NavigationOverlay<br>Alerts & Status"]
+        NHDS["NavigationHistoryDebugScreen<br>Session Debugger"]
     end
 
     subgraph Logic["Business Logic (Services)"]
         NM["NavigationMonitor<br>GPS & Routing State"]
         NHS["NavigationHistoryService<br>Back-Stack Manager"]
+        NSS["NavigationSessionService<br>Session Persistence"]
         SHS["SearchHistoryService<br>Recent Searches"]
         GU["GeoUtils<br>Math & Geometry"]
     end
@@ -33,9 +35,10 @@ flowchart TD
         RS["RoadsService<br>Google Roads API"]
     end
 
-    subgraph Hardware["Device Sensors"]
+    subgraph Hardware["Sensors & Hardware"]
         GPS["GPS Stream<br>Geolocator"]
         Compass["Magnetometer<br>FlutterCompass"]
+        Storage["Local Storage<br>SQLite / SharedPreferences"]
     end
 
     %% Relazioni UI
@@ -43,6 +46,7 @@ flowchart TD
     NS -->|Controls UI State| SI
     NS -->|Controls UI State| DL
     NS -->|Controls UI State| NO
+    NHDS -->|Reads History| NSS
 
     %% Relazioni NavigationScreen con Logic e Sensori
     GPS -.->|Location Updates| NS
@@ -55,7 +59,11 @@ flowchart TD
     SI <-->|History| SHS
     NM <-->|Rerouting| DS
     NM <-->|Lateral Detection| RS
+    NM -->|Logs metrics| NSS
     NM -.->|Uses| GU
+
+    NSS -->|Persists Data| Storage
+    SHS -->|Persists Data| Storage
 
     %% Navigation Monitor notifica la UI
     NM -.->|"State Notifiers<br>Overlay, Route, Step"| NS

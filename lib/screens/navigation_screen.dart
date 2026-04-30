@@ -78,14 +78,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   Future<void> _initTts() async {
     await _tts.setLanguage('it-IT');
-<<<<<<< Updated upstream
-    await _tts.setSpeechRate(0.85); // Leggermente più lento per accessibilità
-=======
     // FIX BUG 3: speech rate abbassato da 0.85 → 0.5 per rendere le
     // istruzioni vocali più comprensibili ad utenti con disabilità cognitive.
     // 0.5 è un ritmo lento-naturale, intorno a 150-180 parole/minuto.
     await _tts.setSpeechRate(0.5);
->>>>>>> Stashed changes
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
   }
@@ -554,19 +550,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
     });
   }
 
-  /// Chiude il bottom sheet di ricalcolo e resetta lo stato.
-  ///
-  /// Usato INTERNAMENTE per le fasi offRoute/rerouting (se l'utente
-  /// torna da solo sul percorso). Per la fase routeChanged, l'utente
-  /// deve usare i pulsanti dedicati (conferma o ripristino).
-  void _dismissRerouteSheet() {
-    _routeChangedAnimTimer?.cancel();
-    setState(() {
-      _reroutePhase = ReroutePhase.none;
-      _routeChangedAnimStep = 0;
-    });
-    _navigationMonitor.reroutePhaseNotifier.value = ReroutePhase.none;
-  }
+
 
   /// L'utente ha scelto "Continua col nuovo percorso".
   ///
@@ -674,9 +658,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
       if (steps != null && steps.isNotEmpty) {
         final idx = _navigationMonitor.currentStepNotifier.value;
         final safeIdx = idx < steps.length ? idx : steps.length - 1;
-<<<<<<< Updated upstream
-        _speak(steps[safeIdx].instruction);
-=======
         // FIX BUG 2: dopo un avanzamento "approach-then-leave" l'utente ha
         // appena svoltato ed è entrato nel segmento nuovo. Leggiamo
         // vocalmente la prossima istruzione: steps[safeIdx + 1] se
@@ -687,7 +668,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
         } else {
           _speak('Stai arrivando');
         }
->>>>>>> Stashed changes
       }
     }
   }
@@ -1126,7 +1106,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
         return screenH * 0.35 + margin;
 
       case NavigationAppState.search:
-      default:
         // Stato home: solo safe area + margine minimo.
         return safeBottom + 24.0;
     }
@@ -1946,7 +1925,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
       return PopScope(
       canPop: false,
-      onPopInvoked: (didPop) async {
+      onPopInvokedWithResult: (didPop, result) async {
         if (didPop) return;
         final bool shouldExit = await _handleBack();
         if (shouldExit && mounted) {

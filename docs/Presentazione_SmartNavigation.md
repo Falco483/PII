@@ -17,7 +17,7 @@
 **Titolo:** Perché un nuovo navigatore? (Il Problema)
 **Punti Elenco:**
 - **Feature Creep:** I navigatori moderni (Google Maps, Waze) sono diventati "super-app" cariche di distrazioni (social, pubblicità, recensioni).
-- **Carico Cognitivo:** Troppe informazioni a schermo aumentano i tempi di reazione del guidatore.
+- **Carico Cognitivo:** Troppe informazioni a schermo aumentano i tempi di reazione del pedone.
 - **Ricalcoli Inefficienti:** I sistemi tradizionali usano "geofence" circolari larghi. Accorgersi di aver sbagliato strada richiede troppo tempo e spazio percorso.
 
 ---
@@ -27,7 +27,7 @@
 **Punti Elenco:**
 - **Reattività:** Sviluppare un algoritmo matematico proprietario per il ricalcolo istantaneo del percorso.
 - **Minimalismo UI/UX:** Fornire informazioni essenziali riducendo a zero le distrazioni.
-- **Consapevolezza (Context Awareness):** Avvisare l'utente del contesto stradale circostante solo quando è sicuro farlo (es. veicolo fermo).
+- **Consapevolezza (Context Awareness):** Avvisare l'utente del contesto urbano circostante solo quando è sicuro farlo (es. utente fermo).
 - **Fluidità:** Implementare un'architettura "Single-Screen" senza caricamenti tra le pagine di ricerca e navigazione.
 
 ---
@@ -58,7 +58,7 @@
 **Titolo:** Innovazione: Geometric Off-Route
 **Contenuto:**
 - **Approccio Standard:** Geofence circolare attorno al GPS.
-- **Nostro Approccio (Punto-Poligono):** Calcolo in tempo reale della *distanza proiettata ortogonalmente* tra l'auto e i vettori della polyline del percorso.
+- **Nostro Approccio (Punto-Poligono):** Calcolo in tempo reale della *distanza proiettata ortogonalmente* tra l'utente e i vettori della polyline del percorso.
 - **Vantaggio:** Il sistema capisce in frazioni di secondo se si sta percorrendo una strada parallela errata, innescando il ricalcolo molto prima dei sistemi commerciali.
 
 ---
