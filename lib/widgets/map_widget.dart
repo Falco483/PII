@@ -12,6 +12,7 @@
 ///    → restituisce placeId, nome e coordinate del POI
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'dart:ui' as ui;
 import 'dart:math' as math;
@@ -114,7 +115,8 @@ class MapWidget extends StatefulWidget {
   State<MapWidget> createState() => MapWidgetState();
 }
 
-class MapWidgetState extends State<MapWidget> {
+class MapWidgetState extends State<MapWidget>
+    with SingleTickerProviderStateMixin {
   // Controller per la mappa Google
   GoogleMapController? _mapController;
 
@@ -123,6 +125,42 @@ class MapWidgetState extends State<MapWidget> {
 
   // Marker freccia utente (separato per aggiornamento indipendente)
   Marker? _userArrowMarker;
+
+  // ===========================================================================
+  // ANIMAZIONE FLUIDA DELLA FRECCIA UTENTE
+  // ===========================================================================
+  //
+  // PROBLEMA: ogni update GPS (~1Hz) sposta il marker discretamente. A passo
+  // normale di 1.1 m/s, il marker salta di ~1m ogni secondo → effetto "scatti".
+  //
+  // SOLUZIONE: tra un update e l'altro interpoliamo la posizione/bearing del
+  // marker a 60fps via Ticker. L'occhio percepisce un movimento continuo.
+  //
+  // Strategia: quando arriva una nuova lettura GPS, fissiamo la posizione
+  // corrente come "from", la nuova come "to", e animiamo lungo l'intervallo
+  // misurato (clamped 300-2000ms). Se l'animazione precedente non è ancora
+  // finita, ripartiamo dal punto interpolato corrente — niente scatti.
+
+  /// Ticker che interpola la posizione della freccia tra letture GPS.
+  Ticker? _arrowTicker;
+
+  /// Posizione/bearing visualizzati attualmente (anche durante animazione).
+  /// Sono diversi da widget.userLat/Lng/Bearing durante l'interpolazione.
+  double? _displayedLat;
+  double? _displayedLng;
+  double? _displayedBearing;
+
+  /// Estremi dell'interpolazione corrente.
+  double? _arrowFromLat, _arrowFromLng, _arrowFromBearing;
+  double? _arrowToLat, _arrowToLng, _arrowToBearing;
+
+  /// Tempo di inizio e durata dell'interpolazione corrente.
+  DateTime? _arrowAnimStart;
+  Duration _arrowAnimDuration = const Duration(milliseconds: 1000);
+
+  /// Timestamp dell'ultimo update GPS ricevuto, per stimare l'intervallo
+  /// reale tra letture (varia tra 500ms e 2s a seconda del device).
+  DateTime? _lastGpsTimestamp;
 
   // Set di polyline sulla mappa
   Set<Polyline> _polylines = {};
@@ -187,6 +225,82 @@ class MapWidgetState extends State<MapWidget> {
     _createArrowBitmap();
     _createChevronBitmap();
     _createBigArrowBitmap();
+
+    // Ticker per l'interpolazione fluida della freccia. Non lo avviamo qui:
+    // viene avviato dal primo update GPS in didUpdateWidget.
+    _arrowTicker = createTicker(_onArrowTick);
+  }
+
+  @override
+  void dispose() {
+    _arrowTicker?.dispose();
+    super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // INTERPOLAZIONE FLUIDA POSIZIONE/BEARING — chiamato a ~60fps dal Ticker
+  // ---------------------------------------------------------------------------
+
+  /// Interpolazione "shortest-arc" tra due bearing, gestendo il wrap-around
+  /// 359°→0°. Senza questa funzione, ruotare da 350° a 10° farebbe attraversare
+  /// 180° (rotazione lunga indietro).
+  double _lerpBearing(double from, double to, double t) {
+    double diff = (to - from) % 360;
+    if (diff > 180) diff -= 360;
+    if (diff < -180) diff += 360;
+    final double result = (from + diff * t) % 360;
+    return result < 0 ? result + 360 : result;
+  }
+
+  /// Tick callback: aggiorna la posizione visualizzata interpolando da
+  /// _arrowFrom* a _arrowTo* sulla durata stimata dall'ultimo intervallo GPS.
+  void _onArrowTick(Duration _) {
+    if (_arrowAnimStart == null ||
+        _arrowFromLat == null ||
+        _arrowToLat == null) {
+      return;
+    }
+    final int elapsedMs =
+        DateTime.now().difference(_arrowAnimStart!).inMilliseconds;
+    final int durationMs = _arrowAnimDuration.inMilliseconds;
+    final double tProgress =
+        (elapsedMs / durationMs).clamp(0.0, 1.0);
+
+    _displayedLat =
+        _arrowFromLat! + (_arrowToLat! - _arrowFromLat!) * tProgress;
+    _displayedLng =
+        _arrowFromLng! + (_arrowToLng! - _arrowFromLng!) * tProgress;
+    _displayedBearing =
+        _lerpBearing(_arrowFromBearing!, _arrowToBearing!, tProgress);
+
+    _refreshUserMarkerFromDisplayed();
+
+    // Se l'animazione è completa, fermiamo il ticker per non bruciare CPU.
+    if (tProgress >= 1.0 && _arrowTicker?.isActive == true) {
+      _arrowTicker?.stop();
+    }
+  }
+
+  /// Ricostruisce _userArrowMarker usando _displayed* e ricarica via setState.
+  /// Chiamato dal ticker ad ogni frame durante l'animazione.
+  void _refreshUserMarkerFromDisplayed() {
+    if (!widget.isNavigating ||
+        _displayedLat == null ||
+        _displayedLng == null ||
+        _arrowBitmap == null) {
+      return;
+    }
+    setState(() {
+      _userArrowMarker = Marker(
+        markerId: const MarkerId('user_arrow'),
+        position: LatLng(_displayedLat!, _displayedLng!),
+        icon: _arrowBitmap!,
+        rotation: _displayedBearing ?? 0,
+        flat: true,
+        anchor: const Offset(0.5, 0.5),
+        zIndexInt: 10,
+      );
+    });
   }
 
   /// Crea il bitmap della freccia direzionale usando Canvas.
@@ -539,11 +653,28 @@ class MapWidgetState extends State<MapWidget> {
 
   /// Centra la camera sulla posizione fornita (chiamato dal parent per il
   /// pulsante "Torna alla mia posizione").
-  void moveToLocation(double lat, double lng) {
+  ///
+  /// FIX BUG 2 (B2.1): aggiunti parametri opzionali [bearing], [tilt],
+  /// [zoom]. Senza un bearing esplicito, la camera animava verso una
+  /// CameraPosition con bearing default 0° → la mappa ruotava verso Nord
+  /// ad ogni recenter dal tasto "Io" in stati senza percorso. Ora il
+  /// chiamante può preservare l'orientamento desiderato (es. bussola).
+  void moveToLocation(
+    double lat,
+    double lng, {
+    double? bearing,
+    double tilt = 0.0,
+    double? zoom,
+  }) {
     _isProgrammaticMove = true;
     _mapController?.animateCamera(
       CameraUpdate.newCameraPosition(
-        CameraPosition(target: LatLng(lat, lng), zoom: _initialZoom),
+        CameraPosition(
+          target: LatLng(lat, lng),
+          zoom: zoom ?? _initialZoom,
+          bearing: bearing ?? 0.0,
+          tilt: tilt,
+        ),
       ),
     );
   }
@@ -724,18 +855,27 @@ class MapWidgetState extends State<MapWidget> {
 
   /// Aggiorna il marker freccia dell'utente sulla mappa.
   ///
-  /// Chiamato ad ogni aggiornamento GPS (~500ms) e quando cambia la modalità.
-  /// - In navigazione: mostra la freccia BLU custom al posto del pallino
+  /// Chiamato ad ogni aggiornamento GPS (~500ms-1s) e quando cambia la modalità.
+  /// - In navigazione: mostra la freccia custom al posto del pallino
   /// - Fuori navigazione: nessun marker custom (usa il pallino blu di Google)
   ///
-  /// PERFORMANCE: Questo metodo crea solo un oggetto Marker (leggero) e
-  /// chiama setState. Non ricostruisce le polyline né gli altri marker.
+  /// FIX SCATTI FRECCIA: invece di settare istantaneamente la posizione del
+  /// marker sul valore GPS appena arrivato, programma un'INTERPOLAZIONE da
+  /// quella attualmente visualizzata (_displayed*) alla nuova (widget.user*)
+  /// sulla durata stimata dell'intervallo GPS. Il Ticker chiama _onArrowTick
+  /// a 60fps interpolando lat/lng/bearing. Risultato: movimento continuo
+  /// invece di scatti discreti ogni secondo.
   void _updateUserMarker() {
     if (!widget.isNavigating ||
         widget.userLat == null ||
         widget.userLng == null ||
         _arrowBitmap == null) {
-      // Fuori navigazione o dati mancanti: nessun marker custom
+      // Fuori navigazione o dati mancanti: nessun marker custom + ferma anim.
+      _arrowTicker?.stop();
+      _arrowAnimStart = null;
+      _displayedLat = null;
+      _displayedLng = null;
+      _displayedBearing = null;
       if (_userArrowMarker != null) {
         setState(() {
           _userArrowMarker = null;
@@ -744,38 +884,48 @@ class MapWidgetState extends State<MapWidget> {
       return;
     }
 
-    setState(() {
-      _userArrowMarker = Marker(
-        markerId: const MarkerId('user_arrow'),
-        position: LatLng(widget.userLat!, widget.userLng!),
-        icon: _arrowBitmap!,
+    // Stima dell'intervallo GPS reale (clamped 300ms-2000ms). Adattiamo la
+    // durata dell'animazione così la freccia "arriva" giusto in tempo per
+    // il prossimo update — niente lag percettibile, niente scatti.
+    final DateTime now = DateTime.now();
+    Duration nextDuration = const Duration(milliseconds: 1000);
+    if (_lastGpsTimestamp != null) {
+      final int intervalMs =
+          now.difference(_lastGpsTimestamp!).inMilliseconds;
+      nextDuration = Duration(milliseconds: intervalMs.clamp(300, 2000));
+    }
+    _lastGpsTimestamp = now;
 
-        // --- ROTAZIONE ---
-        // La freccia ruota per puntare nella direzione di marcia.
-        // Il bitmap è disegnato con la punta verso l'alto (nord/0°),
-        // quindi `rotation` lo orienta direttamente sul bearing GPS.
-        rotation: widget.userBearing,
+    // Punto di partenza dell'interpolazione = posizione attualmente visualizzata.
+    // Se è la prima animazione, partiamo dal valore GPS stesso (snap iniziale).
+    final double fromLat = _displayedLat ?? widget.userLat!;
+    final double fromLng = _displayedLng ?? widget.userLng!;
+    final double fromBearing = _displayedBearing ?? widget.userBearing;
 
-        // --- FLAT = TRUE ---
-        // Il marker giace piatto sulla mappa (come un adesivo sul pavimento),
-        // non come un cartello verticale. Questo è fondamentale perché:
-        // 1. Con tilt 55° un marker verticale apparirebbe storto e confuso
-        // 2. Un marker piatto ruota naturalmente con la mappa
-        // 3. L'effetto "sto camminando su questa freccia" è più intuitivo
-        flat: true,
+    _arrowFromLat = fromLat;
+    _arrowFromLng = fromLng;
+    _arrowFromBearing = fromBearing;
+    _arrowToLat = widget.userLat!;
+    _arrowToLng = widget.userLng!;
+    _arrowToBearing = widget.userBearing;
+    _arrowAnimStart = now;
+    _arrowAnimDuration = nextDuration;
 
-        // --- ANCHOR AL CENTRO ---
-        // Il marker è ancorato al centro (0.5, 0.5) anziché al fondo.
-        // Così la posizione GPS corrisponde al CENTRO della freccia,
-        // non alla base — l'utente si sente "dentro" la freccia.
-        anchor: const Offset(0.5, 0.5),
+    // Se _displayed* erano null (primo frame), inizializziamoli al "from"
+    // così l'animazione parte da una posizione valida.
+    _displayedLat ??= fromLat;
+    _displayedLng ??= fromLng;
+    _displayedBearing ??= fromBearing;
 
-        // --- PRIORITÀ Z ---
-        // Il marker utente deve stare SOPRA tutto: sopra i marker di
-        // percorso, sopra le polyline. Non deve mai essere coperto.
-        zIndexInt: 10,
-      );
-    });
+    // Avvia il ticker se fermo. Quando l'animazione completa (t=1.0)
+    // il ticker si auto-ferma in _onArrowTick per non bruciare CPU.
+    if (_arrowTicker?.isActive != true) {
+      _arrowTicker?.start();
+    }
+
+    // Genera subito il marker con la posizione "displayed" attuale così
+    // c'è qualcosa da renderizzare in attesa del prossimo tick.
+    _refreshUserMarkerFromDisplayed();
   }
 
   /// Controlla se gli step hanno polyline individuali disponibili.

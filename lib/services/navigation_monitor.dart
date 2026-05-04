@@ -252,10 +252,26 @@ class NavigationMonitor {
   int _routeCheckTicks = 0;
 
   /// Counter delle deviazioni consecutive (Strikes).
+  /// Per pedoni (speed < 10 km/h) servono 3 strikes (6s); per veicoli 2 (4s).
   int _consecutiveOffRouteDetects = 0;
 
   /// Bearing raw corrente dal GPS (può essere inaffidabile a basse velocità).
   double _rawBearing = 0.0;
+
+  /// Timer per il fallback di avanzamento step (FIX BUG 3+4).
+  ///
+  /// Quando l'utente è fermo o quasi-fermo (speed < 2 km/h) a 15-30m
+  /// dalla svolta senza mai avvicinarsi abbastanza per attivare
+  /// l'approche, questo timer forza l'avanzamento dopo 15 secondi.
+  /// Questo evita che l'istruzione resti bloccata per sempre in coda
+  /// o a un semaforo.
+  Timer? _stallTimer;
+
+  /// Timestamp dell'ultimo aggiornamento istruzione (FIX BUG 4).
+  ///
+  /// Usato per evitare aggiornamenti troppo rapidi dell'istruzione
+  /// che confonderebbero l'utente (minimo 500ms tra istruzioni).
+  DateTime? _lastInstructionTime;
 
   /// Accuratezza GPS corrente in metri (0.0 = sconosciuta).
   /// Aggiornata ad ogni chiamata updatePosition() e usata in _onRouteCheckTick()
@@ -679,24 +695,22 @@ class NavigationMonitor {
     // Viene eseguita ad ogni singolo aggiornamento GPS, fintanto che
     // ci sono step validi ed è attiva una rotta.
     //
-    // FIX BUG 2 — NUOVA LOGICA "approach-then-leave":
-    // Prima: avanzamento a 40m dalla endLocation (PRIMA della svolta).
-    //        → il banner mostrava la nuova istruzione prima che l'utente
-    //          avesse fisicamente svoltato, e dopo la svolta continuava
-    //          a mostrare la stessa istruzione perché l'avanzamento
-    //          successivo avveniva solo al waypoint SEGUENTE.
-    // Ora: avanzamento "dopo la svolta". L'utente deve prima avvicinarsi
-    //      al waypoint (dist < 15m → _wasCloseToStepEnd = true), poi
-    //      allontanarsene (dist > 25m → avanza).
+    // FIX BUG 4 — AVANZAMENTO BASATO SU PROIEZIONE ORTOGONALE:
+    // Avanziamo lo step quando la proiezione del punto utente sul segmento
+    // [step.start, step.end] cade OLTRE la fine (parametro t >= 1.0) e la
+    // distanza laterale dal segmento è entro la soglia di deviazione.
     //
-    // FALLBACK DI SICUREZZA:
-    // Se l'utente non si avvicina mai sotto i 15m (es. imbocca una
-    // scorciatoia che taglia l'angolo dell'incrocio) ma si trova già
-    // oltre il waypoint, manteniamo anche l'avanzamento diretto a < 40m
-    // come "salvagente" per gli step intermedi, in modo da non bloccare
-    // il banner su un'istruzione vecchia. Questo fallback è attivato
-    // SOLO se l'utente è già "oltre" il waypoint (più vicino allo step
-    // successivo che a quello corrente).
+    // Vantaggi rispetto alle soglie scalari (versione precedente):
+    //  1. "Cambia troppo presto" risolto: serve attraversare il vertice in
+    //     proiezione, non basta avvicinarsi geometricamente.
+    //  2. "Non cambia subito dopo" risolto: t scatta a 1.0 al momento esatto
+    //     dell'attraversamento (a piedi, ~1 GPS update = 1-2s di latenza).
+    //  3. Funziona anche con svolte a 90° dove la distanza scalare cresce
+    //     lentamente (geometria tangenziale).
+    //
+    // Conferma su 2 letture consecutive per filtrare jitter GPS.
+    // Lo Stall Timer (15s a velocità ~0) resta come fallback per chi
+    // resta fermo prima di una svolta (es. coda al semaforo).
     if (_activeRoute != null && _routeSteps.isNotEmpty) {
       // Flag per sapere se abbiamo avanzato almeno uno step in questo ciclo
       bool didAdvance = false;
@@ -716,60 +730,209 @@ class NavigationMonitor {
 
         // --- CASO A: step intermedi (non l'ultimo) ---
         if (_currentStepIndex + 1 < _routeSteps.length) {
-          // Fase 1 — Approach: l'utente si sta avvicinando al waypoint
-          if (distanceToEnd < 15.0) {
-            if (!_wasCloseToStepEnd) {
-              print(
-                '📍 APPROACH: utente vicino all\'endLoc step $_currentStepIndex '
-                '(${distanceToEnd.toStringAsFixed(1)}m) — attendo la svolta',
-              );
-            }
-            _wasCloseToStepEnd = true;
-            break; // Aspettiamo che l'utente svolti e si allontani
-          }
-
-          // Fase 2 — Leave: dopo essersi avvicinato, l'utente si allontana
-          // → ha superato il waypoint, svolta completata.
-          if (_wasCloseToStepEnd && distanceToEnd > 25.0) {
-            print(
-              '📍 LEAVE: utente ha superato l\'endLoc step $_currentStepIndex '
-              '(${distanceToEnd.toStringAsFixed(1)}m) — avanzamento step',
-            );
-            _currentStepIndex++;
-            _wasCloseToStepEnd = false;
-            didAdvance = true;
-            // Continua il loop: se anche il prossimo step è già stato
-            // superato (step cortissimi in sequenza), avanziamo di nuovo.
-            continue;
-          }
-
-          // Fase 3 — Salvagente: se siamo molto vicini al prossimo
-          // waypoint (endLocation dello step successivo) senza essere
-          // mai passati dalla fase Approach, significa che l'utente ha
-          // tagliato o che il GPS non ha campionato abbastanza bassa la
-          // distanza. In quel caso forziamo l'avanzamento per non
-          // bloccare il banner su un'istruzione obsoleta.
-          final nextStep = _routeSteps[_currentStepIndex + 1];
-          final double distanceToNextEnd = distanceBetween(
+          // FIX BUG 4 — TIMING DI AVANZAMENTO PRECISO
+          //
+          // Strategia in cascata:
+          //   1. NEXT-SEG-MATCH (B4.6): se l'utente è già geometricamente
+          //      sul segmento successivo (t∈[0.05,1] e lateral≤12m), avanza
+          //      subito. Risolve le svolte secche dove t del segmento
+          //      corrente oscilla attorno a 1.0 per disturbo trigonometrico.
+          //   2. OVERSHOOT (B4.2): se t≥1.15 con lateral≤12m → advance in 1
+          //      lettura (overshoot inequivocabile, non serve 2ª conferma).
+          //   3. PROJECTED-PAST CONFIRMED (B4.2): se t∈[1.0,1.15) e
+          //      lateral≤12m → 2 letture consecutive prima di avanzare.
+          //   4. HYSTERESIS (B4.2): non resettare il counter finché t<0.92
+          //      (zona di disambiguazione). Evita il "ping-pong" sui jitter
+          //      GPS attorno alla soglia.
+          //
+          // Differenze chiave vs versione precedente:
+          //   - Soglia laterale 12m (kStepAdvanceLateralThresholdMeters)
+          //     invece di 30m (kRouteDeviationThresholdMeters): evita
+          //     l'avanzamento prematuro quando l'utente è su via parallela.
+          //   - Hysteresis impedisce reset spuri del counter.
+          //   - Next-seg match risolve il caso "t resta sotto 1.0 sulla
+          //     svolta secca" che bloccava l'avanzamento per 5-10s.
+          final SegmentProjection proj = projectPointOnSegment(
             lat,
             lng,
+            currentStep.startLat,
+            currentStep.startLng,
+            currentStep.endLat,
+            currentStep.endLng,
+          );
+
+          // Approach: utente è negli ultimi 15m della endLocation. Stato
+          // informativo, usato anche per gatekeeper dello stall timer.
+          if (distanceToEnd < 15.0 && !_wasCloseToStepEnd) {
+            print(
+              '📍 APPROACH: utente vicino all\'endLoc step $_currentStepIndex '
+              '(${distanceToEnd.toStringAsFixed(1)}m, t=${proj.t.toStringAsFixed(2)})',
+            );
+            _wasCloseToStepEnd = true;
+          }
+
+          final bool onSegment =
+              proj.lateralDistanceMeters <= kStepAdvanceLateralThresholdMeters;
+
+          // --- STRATEGIA 1: NEXT-SEG-MATCH (FIX B4.6 + multi-skip) ---
+          // Calcoliamo la proiezione sul segmento successivo. Se l'utente è
+          // GIÀ all'inizio del prossimo segmento (con t≥0.05 per evitare il
+          // match sull'esatto vertice di giunzione), avanziamo subito.
+          //
+          // FIX MULTI-SKIP: rimosso il limite superiore `t ≤ 1.0`. Se dopo
+          // un gap GPS l'utente è oltre il prossimo segmento (t > 1.0), ma
+          // ancora geometricamente coerente (lateral ≤ 12m sulla retta del
+          // segmento), avanziamo comunque. Il while loop poi rivaluterà lo
+          // step dopo, generando un secondo advance se anche quel segmento
+          // è stato superato. Così copriamo i recovery dopo gallerie/buchi.
+          final nextStep = _routeSteps[_currentStepIndex + 1];
+          final SegmentProjection nextProj = projectPointOnSegment(
+            lat,
+            lng,
+            nextStep.startLat,
+            nextStep.startLng,
             nextStep.endLat,
             nextStep.endLng,
           );
-          // L'utente è più vicino alla fine del prossimo step che a
-          // quella del corrente → è sicuramente oltre il waypoint.
-          if (distanceToNextEnd < distanceToEnd && distanceToEnd > 40.0) {
+          final bool nextSegMatch = nextProj.t >= 0.05 &&
+              nextProj.lateralDistanceMeters <=
+                  kStepAdvanceLateralThresholdMeters;
+          if (nextSegMatch) {
             print(
-              '📍 SALVAGENTE: utente è oltre l\'endLoc step $_currentStepIndex '
-              'senza essere passato dalla fase approach — avanzamento forzato',
+              '📍 NEXT-SEG-MATCH: step $_currentStepIndex → '
+              '${_currentStepIndex + 1} '
+              '(next t=${nextProj.t.toStringAsFixed(2)}, '
+              'lat=${nextProj.lateralDistanceMeters.toStringAsFixed(1)}m)',
             );
-            _currentStepIndex++;
-            _wasCloseToStepEnd = false;
+            _advanceStepLocal(lat, lng, reason: 'next-seg-match');
             didAdvance = true;
             continue;
           }
 
-          break; // Ancora dentro il segmento corrente, non fare nulla
+          // --- STRATEGIA 2: OVERSHOOT (FIX B4.2) ---
+          if (proj.t >= 1.15 && onSegment) {
+            print(
+              '📍 PROJ-OVERSHOOT: step $_currentStepIndex — '
+              't=${proj.t.toStringAsFixed(2)} (≥1.15) → advance immediato',
+            );
+            _advanceStepLocal(lat, lng, reason: 'overshoot');
+            didAdvance = true;
+            continue;
+          }
+
+          // --- STRATEGIA 3: PROJECTED-PAST con conferma (zona [1.0, 1.15)) ---
+          if (proj.t >= 1.0 && onSegment) {
+            _consecutiveCloseUpdates++;
+            print(
+              '📍 PROJ-PAST: step $_currentStepIndex — '
+              't=${proj.t.toStringAsFixed(2)}, '
+              'lat=${proj.lateralDistanceMeters.toStringAsFixed(1)}m '
+              '(conferma $_consecutiveCloseUpdates/2)',
+            );
+            if (_consecutiveCloseUpdates >= 2) {
+              _advanceStepLocal(lat, lng, reason: 'projected-past-confirmed');
+              didAdvance = true;
+              continue;
+            }
+            break;
+          }
+
+          // --- STRATEGIA 4: HYSTERESIS (FIX B4.2) ---
+          // Reset del counter SOLO se ben sotto la soglia. Tra 0.92 e 1.0
+          // tratteniamo il counter così un singolo jitter sotto 1.0 non
+          // azzera la conferma in corso.
+          if (proj.t < 0.92) {
+            _consecutiveCloseUpdates = 0;
+          }
+
+          // --- STRATEGIA 5: LOOKAHEAD MULTI-STEP (recovery profondo) ---
+          //
+          // PROBLEMA: dopo gap GPS lungo (es. galleria, indoor a inizio
+          // navigazione) l'utente può ricomparire OLTRE 2+ segmenti dal
+          // currentStep. Le strategie 1-3 non scattano:
+          //  - step+1 next-seg-match: t può essere >1 e lateral grande
+          //    (clamped projection cade sull'endpoint di step+1, che è
+          //    distante dall'utente reale).
+          //  - strategia 2/3 (sul current): onSegment FALSE per lat alta.
+          // → currentStep resta indietro per tutto il percorso.
+          //
+          // SOLUZIONE: scansione di al massimo +3 step in avanti. Per
+          // ciascuno, calcoliamo la proiezione sul SUO segmento. Se uno
+          // di questi ha t∈[0.05, 1.0] e lateral≤12m, l'utente è
+          // realmente su quello step → avanziamo step-by-step fino a
+          // raggiungerlo. Limite +3 evita salti in avanti irrealistici
+          // dovuti a errori GPS estremi (utente teletrasportato).
+          const int kMaxLookaheadSteps = 3;
+          int? lookaheadTargetIdx;
+          for (int i = _currentStepIndex + 1;
+              i < _routeSteps.length &&
+                  i <= _currentStepIndex + kMaxLookaheadSteps;
+              i++) {
+            final lookStep = _routeSteps[i];
+            // Skip step degeneri: la proiezione è instabile.
+            final double segLen = haversineDistance(
+              lookStep.startLat,
+              lookStep.startLng,
+              lookStep.endLat,
+              lookStep.endLng,
+            );
+            if (segLen < 2.0) continue;
+
+            final SegmentProjection lookProj = projectPointOnSegment(
+              lat,
+              lng,
+              lookStep.startLat,
+              lookStep.startLng,
+              lookStep.endLat,
+              lookStep.endLng,
+            );
+            if (lookProj.t >= 0.05 &&
+                lookProj.t <= 1.0 &&
+                lookProj.lateralDistanceMeters <=
+                    kStepAdvanceLateralThresholdMeters) {
+              lookaheadTargetIdx = i;
+              break; // Prendiamo il PRIMO match (più vicino al current)
+            }
+          }
+          if (lookaheadTargetIdx != null) {
+            print(
+              '📍 LOOKAHEAD: $_currentStepIndex → $lookaheadTargetIdx '
+              '(utente già su step futuro, recovery dopo gap)',
+            );
+            // Avanziamo step-per-step così _verifyAdvancementCoherence
+            // viene chiamato per ogni transizione (logging diagnostico).
+            while (_currentStepIndex < lookaheadTargetIdx) {
+              _advanceStepLocal(lat, lng, reason: 'lookahead');
+            }
+            didAdvance = true;
+            continue;
+          }
+
+          // --- STALL TIMER (FIX B4.4): utente fermo nella "zona morta" ---
+          //
+          // Se l'utente è praticamente fermo (speedKmH < 2 km/h) E si trova
+          // nella zona 15-35m dalla svolta, l'istruzione resterebbe bloccata
+          // per sempre (es. coda a semaforo). Avanziamo dopo 15s di stallo,
+          // MA solo se la verifica direzionale conferma che il next-step è
+          // più vicino del cur-step end. Vedi _onStallTimerExpired.
+          if (speedKmH < 2.0 &&
+              distanceToEnd >= 15.0 &&
+              distanceToEnd <= 35.0 &&
+              !_wasCloseToStepEnd) {
+            if (_stallTimer == null) {
+              print(
+                '⏱️ STALL: utente fermo a ${distanceToEnd.toStringAsFixed(1)}m '
+                'dalla svolta — avvio stall timer (15s)',
+              );
+              _stallTimer =
+                  Timer(const Duration(seconds: 15), _onStallTimerExpired);
+            }
+          } else {
+            _stallTimer?.cancel();
+            _stallTimer = null;
+          }
+
+          break; // Ancora dentro il segmento corrente
         }
         // --- CASO B: ULTIMO step → rilevamento ARRIVO ---
         //
@@ -878,6 +1041,112 @@ class NavigationMonitor {
     }
   }
 
+  // ===========================================================================
+  // FIX BUG 4 — HELPER DI AVANZAMENTO STEP
+  // ===========================================================================
+
+  /// Avanza lo step corrente di 1 e resetta i flag locali. Non aggiorna
+  /// `currentStepNotifier`: la pubblicazione viene fatta una volta sola in
+  /// fondo al while loop (più efficiente di N notifiche per N skip).
+  ///
+  /// Esegue anche la verifica di coerenza geometrica: se la posizione
+  /// dell'utente non è plausibile sul nuovo segmento, log warning (il
+  /// rerouter prenderà in carico la deviazione).
+  void _advanceStepLocal(
+    double lat,
+    double lng, {
+    required String reason,
+  }) {
+    _stallTimer?.cancel();
+    _stallTimer = null;
+    _currentStepIndex++;
+    _wasCloseToStepEnd = false;
+    _consecutiveCloseUpdates = 0;
+    print('📍 ADVANCE → $_currentStepIndex (reason: $reason)');
+    _verifyAdvancementCoherence(lat, lng);
+  }
+
+  /// Verifica che dopo l'avanzamento la posizione utente sia coerente con
+  /// il nuovo segmento. Loga un warning ma NON ripristina l'indice: la
+  /// gestione della deviazione è già coperta dal sistema di reroute.
+  void _verifyAdvancementCoherence(double lat, double lng) {
+    if (_currentStepIndex >= _routeSteps.length) return;
+    final newStep = _routeSteps[_currentStepIndex];
+    final SegmentProjection proj = projectPointOnSegment(
+      lat,
+      lng,
+      newStep.startLat,
+      newStep.startLng,
+      newStep.endLat,
+      newStep.endLng,
+    );
+    if (proj.lateralDistanceMeters > kRouteDeviationThresholdMeters &&
+        proj.t > 0.5) {
+      print(
+        '⚠️ ADVANCE INCOERENTE: utente non sul nuovo segmento '
+        '(lat-dist=${proj.lateralDistanceMeters.toStringAsFixed(1)}m, '
+        't=${proj.t.toStringAsFixed(2)}). '
+        'Il rerouter dovrebbe rilevare la deviazione.',
+      );
+    }
+  }
+
+  /// Callback dello stall timer (15s). FIX B4.4: avanziamo SOLO se il
+  /// next-step start è più vicino della current-step end. Altrimenti
+  /// significa che l'utente è andato indietro o si è fermato in posizione
+  /// anomala (es. intersezione complessa, strada interrotta) — avanzare
+  /// sarebbe scorretto e produrrebbe istruzioni errate persistenti.
+  void _onStallTimerExpired() {
+    _stallTimer = null;
+    if (_currentStepIndex >= _routeSteps.length) return;
+
+    final double? lat = _currentLat;
+    final double? lng = _currentLng;
+    if (lat == null || lng == null) {
+      print('⏱️ STALL: timer scaduto ma posizione GPS null — skip');
+      return;
+    }
+
+    final cur = _routeSteps[_currentStepIndex];
+    final int nextIdx = _currentStepIndex + 1;
+    final bool hasNext = nextIdx < _routeSteps.length;
+
+    final double distCurEnd = haversineDistance(
+      lat,
+      lng,
+      cur.endLat,
+      cur.endLng,
+    );
+    final double distNextStart = hasNext
+        ? haversineDistance(
+            lat,
+            lng,
+            _routeSteps[nextIdx].startLat,
+            _routeSteps[nextIdx].startLng,
+          )
+        : double.infinity;
+
+    if (!hasNext || distNextStart < distCurEnd) {
+      print(
+        '⏱️ STALL: avanzamento applicato '
+        '(next-start=${distNextStart.toStringAsFixed(1)}m '
+        '< cur-end=${distCurEnd.toStringAsFixed(1)}m)',
+      );
+      _currentStepIndex++;
+      _wasCloseToStepEnd = false;
+      _consecutiveCloseUpdates = 0;
+      currentStepNotifier.value = _currentStepIndex;
+      _verifyAdvancementCoherence(lat, lng);
+    } else {
+      print(
+        '⏱️ STALL: avanzamento NON applicato — utente più vicino alla fine '
+        'corrente (${distCurEnd.toStringAsFixed(1)}m) '
+        'che al next-start (${distNextStart.toStringAsFixed(1)}m). '
+        'Possibile deviazione: il rerouter prenderà in carico.',
+      );
+    }
+  }
+
   /// FIX BUG 1 + BUG 2 — Calcola e pubblica il RouteProgress corrente.
   ///
   /// Chiamato alla fine di updatePosition(), quando la posizione e
@@ -938,6 +1207,18 @@ class NavigationMonitor {
     }
     if (remainingSec < 0) remainingSec = 0;
 
+    // FIX BUG 4 — Minimum instruction interval (500ms)
+    // Evita aggiornamenti troppo rapidi dell'istruzione che confonderebbero
+    // l'utente. Dopo una svolta, la nuova istruzione non deve apparire
+    // prima di 500ms (tempo minimo per leggere/assimilare).
+    if (_lastInstructionTime != null) {
+      final elapsed = DateTime.now().difference(_lastInstructionTime!).inMilliseconds;
+      if (elapsed < 500) {
+        // Skip this update, UI already showing current instruction
+        return;
+      }
+    }
+
     // Pubblica il progresso aggiornato
     progressNotifier.value = RouteProgress(
       remainingMeters: remaining,
@@ -946,6 +1227,9 @@ class NavigationMonitor {
       remainingDurationText: _formatDuration(remainingSec),
       distanceToNextTurn: distToNext.clamp(0.0, double.infinity),
     );
+
+    // Aggiorna il timestamp dell'ultima istruzione emessa
+    _lastInstructionTime = DateTime.now();
   }
 
   /// Formatta una distanza in metri come stringa human-readable.
@@ -1516,11 +1800,13 @@ class NavigationMonitor {
 
       if (turnResult != null) {
         // L'utente è vicino a un waypoint di svolta!
-        // Mostra l'istruzione di navigazione e interrompi.
-        // FORCE REFRESH: resettiamo a null prima di settare il nuovo valore.
-        // Questo garantisce che NavigationOverlay.didUpdateWidget() veda
-        // sempre la transizione null → non-null e riavvii animazione + timer.
-        overlayNotifier.value = null;
+        // FIX BUG 3 (B3.2): rimosso il pattern `value = null; value = X`.
+        // Era stato introdotto per forzare la riemissione del listener,
+        // ma causava la riproduzione TTS multipla della stessa istruzione.
+        // Una nuova NavigationOverlayState() ha sempre reference != della
+        // precedente → il ValueNotifier fire comunque, e
+        // NavigationOverlay.didUpdateWidget riavvia l'animazione.
+        // Il dedup TTS (B3.1) gestisce eventuali ripetizioni semantiche.
         print(
           '🔵 OVERLAY DEBUG: WAYPOINT DI SVOLTA RILEVATO! '
           'Messaggio: "${turnResult.message}", maneuver: ${turnResult.maneuver}',
@@ -1536,6 +1822,38 @@ class NavigationMonitor {
         '(${_routeSteps.length} step controllati, raggio=${kTurnWaypointRadiusMeters}m). '
         'Nessun overlay emesso.',
       );
+
+      // =====================================================================
+      // FIX OVERLAY ARANCIONE — SKIP SE PROSSIMA SVOLTA VICINA (< 50m)
+      // =====================================================================
+      //
+      // PROBLEMA: tra 25m (kTurnWaypointRadiusMeters) e ~50m da una svolta,
+      // il check waypoint sopra non scatta (troppo lontano), ma se l'utente
+      // si ferma 10s in quella zona l'analisi laterale emette
+      // "Continua dritto" — fuorviante perché l'utente sta per dover svoltare.
+      //
+      // SOLUZIONE: se la prossima endLocation step è entro 50m, sopprimiamo
+      // l'overlay laterale. La fascia 25-50m diventa una "zona muta": né
+      // turn instruction né lateral road. L'utente vede comunque il banner
+      // alto con la prossima svolta — sufficiente.
+      const double kSuppressLateralIfNextTurnWithinM = 50.0;
+      if (_currentStepIndex < _routeSteps.length) {
+        final cur = _routeSteps[_currentStepIndex];
+        final double distNextTurn = haversineDistance(
+          snapshotLat,
+          snapshotLng,
+          cur.endLat,
+          cur.endLng,
+        );
+        if (distNextTurn < kSuppressLateralIfNextTurnWithinM) {
+          print(
+            '⏸️ OVERLAY DEBUG: prossima svolta a '
+            '${distNextTurn.toStringAsFixed(1)}m < ${kSuppressLateralIfNextTurnWithinM}m '
+            '— skip lateralRoad (utente sta per svoltare)',
+          );
+          return;
+        }
+      }
 
       // =====================================================================
       // STEP 2.4 — CONTROLLO COOLDOWN SPAZIALE (ANTI-SPAM)
@@ -1602,10 +1920,47 @@ class NavigationMonitor {
       _lastApiCallTime = DateTime.now(); // Registra il momento della chiamata
       final snappedPoints = await _roadsService.findNearestRoads(lateralPoints);
 
-      if (snappedPoints != null && snappedPoints.isNotEmpty) {
+      // FIX OVERLAY ARANCIONE — FILTRO SNAP POINTS SUL PERCORSO
+      //
+      // PROBLEMA: Roads API ritorna QUALSIASI strada vicina, comprese quelle
+      // che fanno parte del nostro percorso (es. lo step successivo dopo
+      // una svolta). Senza filtro, l'overlay arancione "Vai dritto" usciva
+      // anche all'imbocco di uscite/svolte che sono parte della rotta.
+      //
+      // SOLUZIONE: scartiamo gli snap points che si trovano a < 5m dalla
+      // polyline del percorso attivo. Quelli rimanenti sono *davvero*
+      // strade laterali esterne al percorso → l'avviso "non svoltare,
+      // continua dritto" diventa appropriato.
+      const double kRoutePolylineProximityM = 5.0;
+      List<SnappedPoint>? filteredSnapped = snappedPoints;
+      final List<List<double>>? routePolyline =
+          _activeRoute?.decodedPolyline;
+      if (snappedPoints != null &&
+          snappedPoints.isNotEmpty &&
+          routePolyline != null &&
+          routePolyline.isNotEmpty) {
+        filteredSnapped = snappedPoints.where((sp) {
+          final double distToRoute = minDistanceToPolyline(
+            sp.latitude,
+            sp.longitude,
+            routePolyline,
+          );
+          return distToRoute > kRoutePolylineProximityM;
+        }).toList();
+        if (filteredSnapped.length < snappedPoints.length) {
+          print(
+            '🔎 OVERLAY DEBUG: filtrati ${snappedPoints.length - filteredSnapped.length}/${snappedPoints.length} '
+            'snap points che cadevano sulla polyline del percorso',
+          );
+        }
+      }
+
+      if (filteredSnapped != null && filteredSnapped.isNotEmpty) {
         final msg =
             kLateralRoadMessages[_random.nextInt(kLateralRoadMessages.length)];
-        overlayNotifier.value = null; // force refresh
+        // FIX BUG 3 (B3.2): rimosso il `value = null` di force refresh.
+        // Vedi commento esteso più sopra (turnInstruction). Il dedup TTS
+        // ora previene la ripetizione vocale sui retrigger ravvicinati.
         overlayNotifier.value = NavigationOverlayState(
           type: OverlayType.lateralRoadDetected,
           message: msg,
@@ -1618,7 +1973,7 @@ class NavigationMonitor {
         _lastAnalysisLng = snapshotLng;
       } else {
         print(
-          '⬜ OVERLAY DEBUG: Nessuna strada laterale rilevata in questo punto.',
+          '⬜ OVERLAY DEBUG: Nessuna strada laterale OFF-ROUTE rilevata in questo punto.',
         );
       }
     } finally {
@@ -1910,11 +2265,12 @@ class NavigationMonitor {
     // Chiama isOnRoute() che internamente:
     // 1. Calcola la distanza tra (lat, lng) e ogni punto della polyline
     // 2. Trova la distanza minima
-    // 3. Confronta con la soglia di 40 metri
+    // 3. Confronta con la soglia (FIX BUG 5: adattiva, 50m per pedoni)
     final bool onActiveRoute = isOnRoute(
       lat,
       lng,
       _activeRoute!.decodedPolyline,
+      speedKmH: _currentSpeed,
     );
 
     // Se l'utente è sul percorso, tutto OK. Nessuna azione necessaria.
@@ -1945,14 +2301,36 @@ class NavigationMonitor {
     }
 
     // TASK 5 - Strikes System (Verifica su più letture)
+    // FIX BUG 5: strikes adattativi per velocità.
+    // Pedoni (< 10 km/h): 3 strike = 6 secondi. Il GPS pedonale è più
+    // rumoroso e l'utente sul lato opposto della strada non deve scatenare
+    // ricalcoli per un jitter momentaneo.
+    // Veicoli (>= 10 km/h): 2 strike = 4 secondi (comportamento precedente).
+    final int requiredStrikes = _currentSpeed < 10.0 ? 3 : 2;
     _consecutiveOffRouteDetects++;
-    if (_consecutiveOffRouteDetects < 2) {
+    if (_consecutiveOffRouteDetects < requiredStrikes) {
       print(
-        '⚠️ Deviazione rilevata (Strike $_consecutiveOffRouteDetects). Attendo conferma...',
+        '⚠️ Deviazione rilevata (Strike $_consecutiveOffRouteDetects/$requiredStrikes). Attendo conferma...',
       );
       return;
     }
     _consecutiveOffRouteDetects = 0; // Azzera prima del varo ricalcolo
+
+    // FIX BUG 5: Tolerance laterale per pedestriani
+    // Se l'utente è a piedi (< 10 km/h) E si sta muovendo nella direzione
+    // generale del percorso, non forzare il ricalcolo.
+    // Questo gestisce il caso di utente sul marciapiede opposto ma che
+    // sta comunque andando nella direzione corretta.
+    if (_currentSpeed < 10.0 && _activeRoute != null) {
+      final bool movingTowardRoute = _isMovingGenerallyTowardRoute(lat, lng);
+      if (movingTowardRoute) {
+        print(
+          '✅ FIX BUG 5: Utente a piedi fuori dal percorso ma direzione corretta. '
+          'Nessun ricalcolo forzato. Velocità: ${_currentSpeed.toStringAsFixed(1)} km/h',
+        );
+        return; // Non considerare off-route, continua navigazione
+      }
+    }
 
     // Ora controlliamo se è finito su uno dei percorsi alternativi.
 
@@ -1981,11 +2359,12 @@ class NavigationMonitor {
       // e sappiamo che l'utente NON è su di esso.
       if (alternativeRoute == _activeRoute) continue;
 
-      // Verifica se l'utente è entro 40m dalla polyline di questo alternativo
+      // Verifica se l'utente è entro soglia (FIX BUG 5: adattiva per pedoni)
       final bool onAlternative = isOnRoute(
         lat,
         lng,
         alternativeRoute.decodedPolyline,
+        speedKmH: _currentSpeed,
       );
 
       if (onAlternative) {
@@ -2224,6 +2603,84 @@ class NavigationMonitor {
       // (nessun nuovo ricalcolo verrebbe mai avviato).
       _isRerouting = false;
     }
+  }
+
+  /// FIX BUG 5: Verifica se l'utente si sta muovendo nella direzione
+  /// generale del percorso (invece che nella direzione opposta).
+  ///
+  /// Questo è usato per la tolerance laterale: un pedone sul marciapiede
+  /// opposto che cammina nella direzione del percorso non viene forzato
+  /// al ricalcolo.
+  ///
+  /// LOGICA:
+  /// 1. Trova il punto della polyline più vicino all'utente
+  /// 2. Trova il PROSSIMO punto sulla polyline (direzione di marcia)
+  /// 3. Calcola il bearing da utente → prossimo punto polyline
+  /// 4. Confronta con la direzione di movimento dell'utente (_rawBearing)
+  /// 5. Se la differenza è < 90°, l'utente sta andando verso il percorso
+  bool _isMovingGenerallyTowardRoute(double lat, double lng) {
+    if (_activeRoute == null || _activeRoute!.decodedPolyline.isEmpty) {
+      return false;
+    }
+
+    final polyline = _activeRoute!.decodedPolyline;
+
+    // FIX BUG 5A: trovare il segmento più vicino con proiezione ortogonale,
+    // non il vertice più vicino. La overview_polyline è compressa: un tratto
+    // di 200m può avere solo 2 punti. Il vertice più vicino può essere a
+    // centinaia di metri mentre la proiezione sul segmento è vicina.
+    int nearestSegIdx = 0;
+    double minLateralDist = double.infinity;
+
+    for (int i = 0; i < polyline.length - 1; i++) {
+      final proj = projectPointOnSegment(
+        lat, lng,
+        polyline[i][0], polyline[i][1],
+        polyline[i + 1][0], polyline[i + 1][1],
+      );
+      if (proj.lateralDistanceMeters < minLateralDist) {
+        minLateralDist = proj.lateralDistanceMeters;
+        nearestSegIdx = i;
+      }
+    }
+
+    // Il bearing della direzione di marcia del percorso sul segmento più vicino
+    // (non verso il vertice successivo, ma nella direzione del segmento stesso).
+    final double routeSegBearing = calculateBearing(
+      polyline[nearestSegIdx][0],
+      polyline[nearestSegIdx][1],
+      polyline[nearestSegIdx + 1][0],
+      polyline[nearestSegIdx + 1][1],
+    );
+
+    // FIX BUG 5B: usa _direction (bearing filtrato GPS, aggiornato solo sopra
+    // soglia di velocità) invece di _rawBearing (inaffidabile a bassa velocità).
+    // Se _direction è null (utente mai mosso abbastanza), preferiamo non
+    // ricalcolare: è più probabile che l'utente stia percorrendo il percorso
+    // sul lato sbagliato della strada che non che abbia realmente deviato.
+    final double? userBearing = _direction ?? (_rawBearing != 0.0 ? _rawBearing : null);
+    if (userBearing == null) {
+      print(
+        '🧭 FIX BUG 5: bearing utente sconosciuto — nessun ricalcolo (fail-safe)',
+      );
+      return true; // Fail-safe: senza bearing, non ricalcolare
+    }
+
+    // L'utente è "generalmente nella direzione del percorso" se la sua
+    // direzione di marcia è entro ±90° rispetto alla direzione del segmento.
+    // Usiamo il bearing del SEGMENTO (stabile, geometrico) invece del bearing
+    // verso un vertice (instabile, dipende dalla posizione relativa).
+    double diff = (routeSegBearing - userBearing + 360) % 360;
+    if (diff > 180) diff -= 360;
+    final absDiff = diff.abs();
+
+    final bool movingToward = absDiff < 90.0;
+    print(
+      '🧭 FIX BUG 5: segBearing=${routeSegBearing.toStringAsFixed(1)}°, '
+      'userBearing=${userBearing.toStringAsFixed(1)}°, diff=${absDiff.toStringAsFixed(1)}° '
+      '→ movingTowardRoute=$movingToward (lateralDist=${minLateralDist.toStringAsFixed(1)}m)',
+    );
+    return movingToward;
   }
 
   /// Registra un overlay emesso nella sessione corrente.

@@ -65,6 +65,8 @@ AllRoutesResult createMockRoutes() {
     durationSeconds: 1000,
     totalDuration: '10 min',
     totalDistance: '1 km',
+    totalDistanceMeters: 1000,
+    totalDurationSeconds: 1000,
     encodedPolyline: 'encoded_1',
     steps: [],
   );
@@ -74,6 +76,8 @@ AllRoutesResult createMockRoutes() {
     durationSeconds: 1200,
     totalDuration: '12 min',
     totalDistance: '1.2 km',
+    totalDistanceMeters: 1200,
+    totalDurationSeconds: 1200,
     encodedPolyline: 'encoded_2',
     steps: [],
   );

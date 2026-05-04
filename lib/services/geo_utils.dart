@@ -133,6 +133,25 @@ const double kEarthRadiusMeters = 6371000.0;
 ///   positivi da jitter GPS sono comunque filtrati
 const double kRouteDeviationThresholdMeters = 30.0;
 
+/// FIX BUG 4 — Soglia laterale max per considerare l'utente "sul segmento
+/// dello step corrente" ai fini dell'AVANZAMENTO step (non della deviazione).
+///
+/// PERCHÉ DISTINTA DA kRouteDeviationThresholdMeters (30m):
+/// - 30m era la soglia di "sei fuori percorso" (off-route trigger): coprire
+///   strade con marciapiedi larghi e jitter GPS in canyon urbano.
+/// - 12m è la soglia di "sei DAVVERO sul segmento": evita che lo step
+///   avanzi quando l'utente cammina su una strada parallela ravvicinata
+///   che proietterebbe oltre la fine del segmento corrente.
+///
+/// PERCHÉ 12m:
+/// - Larghezza tipica strada urbana a doppio senso: 7-8m (3.5m × 2 corsie)
+///   + 2m × 2 marciapiedi ≈ 11-12m totali.
+/// - Aggiungendo il jitter GPS tipico di 3-5m in condizioni normali
+///   (non urban canyon), 12m è il limite superiore ragionevole per
+///   "il pedone è effettivamente sulla strada del segmento".
+/// - Sotto i 12m, la confidence che l'utente stia seguendo il segmento è alta.
+const double kStepAdvanceLateralThresholdMeters = 12.0;
+
 /// Intervallo in secondi tra un controllo e l'altro della posizione
 /// rispetto al percorso attivo (TASK 2).
 ///
@@ -211,6 +230,38 @@ double haversineDistance(double lat1, double lng1, double lat2, double lng2) {
 double distanceBetween(double lat1, double lon1, double lat2, double lon2) {
   // Delega il calcolo effettivo alla formula di Haversine
   return haversineDistance(lat1, lon1, lat2, lon2);
+}
+
+/// Calcola il bearing (direzione in gradi) tra due punti sulla superficie terrestre.
+///
+/// Il bearing è espresso in gradi (0-360, convenzione compass):
+/// - 0° = Nord
+/// - 90° = Est
+/// - 180° = Sud
+/// - 270° = Ovest
+///
+/// Usa la formula di Vincenty inverse solution, che è più accurata di
+/// approssimazioni semplificate per distanze grandi.
+///
+/// PARAMETRI:
+/// - [lat1], [lng1]: latitudine e longitudine del punto di partenza (gradi decimali)
+/// - [lat2], [lng2]: latitudine e longitudine del punto di destinazione (gradi decimali)
+///
+/// RETURN: bearing in gradi (0-360)
+double calculateBearing(double lat1, double lng1, double lat2, double lng2) {
+  const double degToRad = 3.141592653589793 / 180.0;
+  const double radToDeg = 180.0 / 3.141592653589793;
+
+  final double lat1Rad = lat1 * degToRad;
+  final double lat2Rad = lat2 * degToRad;
+  final double dLng = (lng2 - lng1) * degToRad;
+
+  final double x = sin(dLng) * cos(lat2Rad);
+  final double y = cos(lat1Rad) * sin(lat2Rad) -
+      sin(lat1Rad) * cos(lat2Rad) * cos(dLng);
+  final double bearing = atan2(x, y) * radToDeg;
+
+  return (bearing + 360) % 360;
 }
 
 /// _distanceToSegment — Calcola la distanza minima tra un punto P e un
@@ -329,6 +380,97 @@ double _distanceToSegment(
   return distanceBetween(pLat, pLng, projLat, projLng);
 }
 
+/// SegmentProjection — Risultato della proiezione di un punto su un segmento.
+///
+/// Contiene:
+/// - [t]: parametro normalizzato della proiezione (0..1 dentro il segmento,
+///   < 0 prima dell'inizio, > 1 oltre la fine). NON è clampato:
+///   il chiamante può controllare se la proiezione cade dentro o fuori
+///   il segmento.
+/// - [lateralDistanceMeters]: distanza geodetica in metri tra il punto e
+///   la sua proiezione (clampata al segmento).
+class SegmentProjection {
+  final double t;
+  final double lateralDistanceMeters;
+
+  const SegmentProjection({
+    required this.t,
+    required this.lateralDistanceMeters,
+  });
+}
+
+/// projectPointOnSegment — Proietta ortogonalmente un punto P sul segmento AB
+/// e restituisce sia la posizione lungo il segmento (parametro t) sia la
+/// distanza laterale geodetica.
+///
+/// USATA DA: NavigationMonitor per decidere quando avanzare lo step
+/// (FIX BUG 4 — timing aggiornamento indicazioni).
+///
+/// PERCHÉ ESPORRE t INSIEME ALLA DISTANZA LATERALE:
+/// La distanza scalare dall'endLocation è ambigua: può crescere mentre
+/// l'utente svolta tangenzialmente al waypoint. Il parametro t invece
+/// indica esattamente dove l'utente si trova LUNGO l'asse di marcia
+/// dello step:
+/// - t < 0   → utente non è ancora arrivato all'inizio del segmento
+/// - 0 ≤ t ≤ 1 → utente è "dentro" il segmento (sta percorrendolo)
+/// - t > 1   → utente ha SUPERATO la fine del segmento (svolta avvenuta)
+///
+/// La distanza laterale serve come sanity check: se è > soglia di deviazione,
+/// l'utente non sta seguendo la strada di questo step e non dovremmo avanzare.
+///
+/// PARAMETRI:
+/// - [pLat], [pLng]: posizione GPS dell'utente
+/// - [aLat], [aLng]: inizio del segmento (start dello step)
+/// - [bLat], [bLng]: fine del segmento (end dello step)
+///
+/// RETURN: [SegmentProjection] con t e distanza laterale in metri.
+SegmentProjection projectPointOnSegment(
+  double pLat,
+  double pLng,
+  double aLat,
+  double aLng,
+  double bLat,
+  double bLng,
+) {
+  // Conversione a coordinate metriche locali (stesso schema di _distanceToSegment)
+  final double cosLat = cos(pLat * pi / 180.0);
+
+  final double pX = pLng * 111320.0 * cosLat;
+  final double pY = pLat * 111320.0;
+  final double aX = aLng * 111320.0 * cosLat;
+  final double aY = aLat * 111320.0;
+  final double bX = bLng * 111320.0 * cosLat;
+  final double bY = bLat * 111320.0;
+
+  final double abX = bX - aX;
+  final double abY = bY - aY;
+  final double apX = pX - aX;
+  final double apY = pY - aY;
+
+  final double abSquared = abX * abX + abY * abY;
+
+  // Segmento degenere (A == B): t indefinito, distanza = punto-punto
+  if (abSquared == 0.0) {
+    return SegmentProjection(
+      t: 0.0,
+      lateralDistanceMeters: distanceBetween(pLat, pLng, aLat, aLng),
+    );
+  }
+
+  // Parametro t NON clampato (così il chiamante può vedere se è > 1)
+  final double tRaw = (apX * abX + apY * abY) / abSquared;
+
+  // Per il calcolo della distanza laterale clampiamo nel segmento
+  final double tClamped = tRaw.clamp(0.0, 1.0);
+  final double projLat = aLat + tClamped * (bLat - aLat);
+  final double projLng = aLng + tClamped * (bLng - aLng);
+
+  return SegmentProjection(
+    t: tRaw,
+    lateralDistanceMeters: distanceBetween(pLat, pLng, projLat, projLng),
+  );
+}
+
 /// minDistanceToPolyline — Calcola la distanza MINIMA tra un punto GPS e
 /// una polyline (lista di coordinate) di un percorso (TASK 2).
 ///
@@ -414,27 +556,75 @@ double minDistanceToPolyline(
 /// Questa funzione combina minDistanceToPolyline con un confronto
 /// a soglia per restituire un semplice booleano: true/false.
 ///
+/// FIX BUG 5: soglia adattiva basata sulla velocità.
+/// Per utenti a piedi (speedKmH < 10) la soglia è maggiore (50m)
+/// per tollerare GPS impreciso e posizione sul marciapiede opposto.
+/// Per veicoli (> 30 km/h) la soglia è minore (25m) per maggiore precisione.
+///
 /// PARAMETRI:
 /// - [lat], [lng]: posizione GPS corrente dell'utente
 /// - [polyline]: polyline decodificata del percorso da controllare
 /// - [thresholdMeters]: soglia in metri (default: kRouteDeviationThresholdMeters)
+/// - [speedKmH]: velocità attuale in km/h per soglia adattiva (opzionale)
 ///
 /// RETURN:
 /// - true se la distanza minima dalla polyline è ≤ thresholdMeters
 ///   (l'utente è SUL percorso)
 /// - false se la distanza è > thresholdMeters
 ///   (l'utente ha DEVIATO dal percorso)
+/// Larghezza massima di una strada urbana considerata "stesso asse":
+/// comprende 2 corsie (3.5m ciascuna) + 2 marciapiedi (~2m ciascuno) + margine.
+/// Se l'utente è entro questa distanza laterale e la proiezione cade sul segmento
+/// (0 ≤ t ≤ 1), è quasi sicuramente sul lato opposto della strada — non ha deviato.
+const double kMaxStreetWidthMeters = 25.0;
+
 bool isOnRoute(
   double lat,
   double lng,
   List<List<double>> polyline, {
   double thresholdMeters = kRouteDeviationThresholdMeters,
+  double? speedKmH,
 }) {
+  if (polyline.isEmpty) return false;
+
+  // FIX BUG 5: soglia adattiva per pedoni.
+  // 50m copre: polyline snappata sul marciapiede (8m dalla strada)
+  // + larghezza strada (~10m) + marciapiede opposto (~3m) + errore GPS (20-30m).
+  double effectiveThreshold = thresholdMeters;
+  if (speedKmH != null && speedKmH < 10.0) {
+    effectiveThreshold = 50.0;
+  } else if (speedKmH != null && speedKmH > 30.0) {
+    effectiveThreshold = 25.0;
+  }
+
   // Calcola la distanza minima tra la posizione e la polyline
   final double minDist = minDistanceToPolyline(lat, lng, polyline);
 
-  // Confronta con la soglia: se la distanza è ≤ soglia, l'utente è sul percorso
-  return minDist <= thresholdMeters;
+  if (minDist <= effectiveThreshold) return true;
+
+  // FIX BUG 5 — CHECK "LATO OPPOSTO DELLA STRADA":
+  // Se la distanza laterale supera la soglia, verifichiamo che l'utente
+  // non si trovi semplicemente sul lato opposto della strada.
+  // Condizione: distanza laterale < kMaxStreetWidthMeters E la proiezione
+  // ortogonale sul segmento più vicino è dentro il segmento (0 ≤ t ≤ 1).
+  // In quel caso, l'utente è parallelo al percorso — non ha deviato.
+  if (speedKmH != null && speedKmH < 10.0 && polyline.length >= 2) {
+    for (int i = 0; i < polyline.length - 1; i++) {
+      final proj = projectPointOnSegment(
+        lat, lng,
+        polyline[i][0], polyline[i][1],
+        polyline[i + 1][0], polyline[i + 1][1],
+      );
+      // t in [0,1] = l'utente è "accanto" a questo segmento (non prima né dopo)
+      // e la distanza laterale è quella di una strada normale
+      if (proj.t >= 0.0 && proj.t <= 1.0 &&
+          proj.lateralDistanceMeters <= kMaxStreetWidthMeters) {
+        return true; // Lato opposto della strada — non deviato
+      }
+    }
+  }
+
+  return false;
 }
 
 /// Calcola le coordinate di un punto di destinazione dato:

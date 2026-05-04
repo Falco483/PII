@@ -76,6 +76,65 @@ class _NavigationScreenState extends State<NavigationScreen> {
   final FlutterTts _tts = FlutterTts();
   bool _ttsEnabled = true;
 
+  // ===========================================================================
+  // FIX BUG 3 — TTS QUEUE CON DEDUP, PRIORITÀ E AWAIT-COMPLETION
+  // ===========================================================================
+  //
+  // Il vecchio _speak() chiamava `stop()` e poi `speak()` in sequenza ad ogni
+  // richiesta. Su iOS questo causa una race condition documentata di
+  // flutter_tts: stop()→speak() troppo ravvicinati possono ingoiare la
+  // seconda chiamata, lasciando l'utente senza voce. Inoltre, con tre
+  // sorgenti TTS indipendenti (overlay, step, reroute) le frasi si
+  // troncavano/sovrapponevano.
+  //
+  // NUOVO MECCANISMO: tutte le richieste passano per _enqueueSpeech, che:
+  //  1. Deduplica le richieste identiche emesse entro 5s (chiave dedupKey).
+  //  2. Permette interruzioni SOLO se la nuova richiesta ha priorità
+  //     strettamente superiore (criticality ladder).
+  //  3. Usa awaitSpeakCompletion(true) + completionHandler per processare
+  //     una sola pending alla volta — niente più troncamenti casuali.
+
+  /// Ultimo messaggio effettivamente parlato (usato come dedup key).
+  String? _lastSpokenText;
+
+  /// Timestamp dell'ultima emissione effettiva (per dedup temporale).
+  DateTime? _lastSpokenAt;
+
+  /// Flag: vero finché TTS sta pronunciando una frase.
+  /// Impostato in _speakNow, resettato dal completion/cancel handler.
+  bool _isSpeaking = false;
+
+  /// Richiesta in attesa: viene eseguita appena la corrente termina.
+  /// Sostituita se ne arriva una di pari o maggior priorità.
+  _SpeechRequest? _pendingSpeech;
+
+  /// FIX BUG 3 (B3.3): ultimo indice di step già annunciato vocalmente.
+  /// Permette di rilevare i "multi-skip" (avanzamento di > 1 step in un
+  /// solo GPS tick) e annunciare l'istruzione che sarebbe stata saltata.
+  /// -1 = nessuna istruzione ancora annunciata in questa sessione.
+  int _lastAnnouncedStep = -1;
+
+  /// FIX BUG 4 (B4.5): timestamp dell'ultimo avanzamento step. Usato dal
+  /// banner per mostrare la "fase di rinforzo post-svolta" per N secondi
+  /// (vedi `_kPostTurnReinforcementWindow`): subito dopo aver svoltato,
+  /// invece di mostrare la prossima manovra (che spesso è a 100m+ di
+  /// distanza), mostriamo "Bravo! <istruzione step corrente>" — coerente
+  /// con la prosa positiva di kTurnEncouragementPrefixes.
+  DateTime? _lastStepAdvanceAt;
+
+  /// Durata della finestra di rinforzo post-svolta. Valore scelto come
+  /// compromesso tra: dare all'utente conferma che ha svoltato bene
+  /// (4s sono sufficienti per leggere e elaborare) e tornare in tempo
+  /// utile a mostrare la prossima manovra (i passi pedonali sono spesso
+  /// 50-200m, percorsi in 30s-2min — 4s di "delay" sull'istruzione
+  /// successiva sono trascurabili).
+  static const Duration _kPostTurnReinforcementWindow = Duration(seconds: 4);
+
+  /// Timer che forza un rebuild quando termina la finestra di rinforzo.
+  /// Senza questo, il banner mostrerebbe "Bravo!" per sempre finché un
+  /// altro evento non triggerasse setState.
+  Timer? _postTurnRebuildTimer;
+
   Future<void> _initTts() async {
     await _tts.setLanguage('it-IT');
     // FIX BUG 3: speech rate abbassato da 0.85 → 0.5 per rendere le
@@ -84,12 +143,109 @@ class _NavigationScreenState extends State<NavigationScreen> {
     await _tts.setSpeechRate(0.5);
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
+    // FIX BUG 3 (B3.5): senza awaitSpeakCompletion il completion handler non
+    // scatta su iOS → la coda non avanza. Con true, _tts.speak ritorna solo
+    // quando la frase è completata oppure cancellata.
+    await _tts.awaitSpeakCompletion(true);
+    _tts.setCompletionHandler(_onTtsCompleted);
+    _tts.setCancelHandler(_onTtsCancelled);
+    _tts.setErrorHandler((_) => _onTtsCancelled());
   }
 
-  Future<void> _speak(String text) async {
+  void _onTtsCompleted() {
+    _isSpeaking = false;
+    _processPendingSpeech();
+  }
+
+  void _onTtsCancelled() {
+    _isSpeaking = false;
+    // Non processiamo la pending: l'interruzione è stata voluta.
+  }
+
+  /// API pubblica per richiedere una frase vocale. Tutti i siti che prima
+  /// chiamavano _speak() ora usano questa.
+  ///
+  /// - [text]: il testo da pronunciare.
+  /// - [priority]: serve per decidere se interrompere una frase in corso.
+  /// - [dedupKey]: chiave logica per il dedup (default = text). Permette di
+  ///   marcare frasi semanticamente identiche con prefissi random come
+  ///   "una sola istruzione" (es. dedupKey="step-3").
+  void _enqueueSpeech(
+    String text, {
+    SpeechPriority priority = SpeechPriority.normal,
+    String? dedupKey,
+  }) {
     if (!_ttsEnabled) return;
-    await _tts.stop(); // Interrompe eventuale lettura in corso
-    await _tts.speak(text);
+    final String key = dedupKey ?? text;
+
+    // Dedup temporale: se abbiamo già detto questa cosa < 5s fa, skip.
+    // Eccezione: critical bypassa SEMPRE il dedup (es. arrivo).
+    final bool withinDedupWindow = _lastSpokenText == key &&
+        _lastSpokenAt != null &&
+        DateTime.now().difference(_lastSpokenAt!) <
+            const Duration(seconds: 5);
+    if (withinDedupWindow && priority != SpeechPriority.critical) {
+      return;
+    }
+
+    final request = _SpeechRequest(text: text, priority: priority, dedupKey: key);
+
+    if (!_isSpeaking) {
+      _speakNow(request);
+      return;
+    }
+
+    // C'è una frase in corso. Decidiamo se interrompere.
+    final SpeechPriority currentPriority =
+        _pendingSpeech?.priority ?? SpeechPriority.normal;
+    if (priority.index > currentPriority.index) {
+      // Più importante della corrente → interrompiamo (cancel handler
+      // resetta _isSpeaking) e parliamo subito.
+      _pendingSpeech = null;
+      _tts.stop();
+      _speakNow(request);
+    } else {
+      // Pari o minore importanza → aspetta che la corrente finisca.
+      // Sostituiamo la pending solo se la nuova è più importante della
+      // pending precedente (le richieste di priorità superiore prevalgono).
+      if (_pendingSpeech == null ||
+          priority.index >= _pendingSpeech!.priority.index) {
+        _pendingSpeech = request;
+      }
+    }
+  }
+
+  Future<void> _speakNow(_SpeechRequest req) async {
+    _isSpeaking = true;
+    _lastSpokenText = req.dedupKey;
+    _lastSpokenAt = DateTime.now();
+    await _tts.speak(req.text);
+  }
+
+  void _processPendingSpeech() {
+    final pending = _pendingSpeech;
+    _pendingSpeech = null;
+    if (pending == null) return;
+    if (!_ttsEnabled) return;
+    _speakNow(pending);
+  }
+
+  /// Reset completo dello stato TTS — chiamato in transizioni di stato
+  /// (start/stop navigation, dispose). Vedi B3.6.
+  ///
+  /// FIX BUG 4 (B4.5): resetta anche la finestra di rinforzo post-svolta
+  /// così il banner non mostra "Bravo!" all'avvio di una nuova navigazione
+  /// se l'ultima sessione si era chiusa durante la finestra di rinforzo.
+  Future<void> _resetTtsState() async {
+    _pendingSpeech = null;
+    _lastSpokenText = null;
+    _lastSpokenAt = null;
+    _lastAnnouncedStep = -1;
+    _lastStepAdvanceAt = null;
+    _postTurnRebuildTimer?.cancel();
+    _postTurnRebuildTimer = null;
+    await _tts.stop();
+    _isSpeaking = false;
   }
 
   /// Nodo di focus per il campo di testo della destinazione.
@@ -316,6 +472,28 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// direzione di marcia (bearing).
   bool _isFollowingUser = false;
 
+  /// Ultimo bearing applicato alla camera (gradi 0-360).
+  /// Aggiornato ogni volta che si chiama followUser() o snapToRoute(),
+  /// così _applyGradualBearing() può calcolare la differenza di rotazione
+  /// rispetto alla posizione REALE della camera (non rispetto al GPS bearing).
+  double _cameraBearing = 0.0;
+
+  /// FIX BUG 1: ultima posizione (lat/lng) effettivamente inviata alla camera
+  /// con followUser(). Usata da _followCameraThrottled() per evitare di
+  /// chiamare animateCamera quando né bearing né posizione sono cambiati
+  /// abbastanza da giustificare una nuova animazione (le animazioni
+  /// sovrapposte di Google Maps si annullano a vicenda → effetto "scatti").
+  double? _lastAppliedLat;
+  double? _lastAppliedLng;
+
+  /// FIX BUG 2 (B2.3): timer cancellabile per il completamento della
+  /// rotazione graduale (>90°). Prima usavamo Future.delayed che non si
+  /// può cancellare: se durante i 500ms intermedi arrivava una nuova
+  /// chiamata a _applyGradualBearing (es. tap multiplo su IO o GPS update
+  /// con bearing molto diverso), il vecchio Future.delayed atterrava
+  /// comunque su un target ormai obsoleto, facendo oscillare la camera.
+  Timer? _gradualRotationCompletionTimer;
+
   /// Flag per il primo fix GPS. Al primo aggiornamento GPS valido,
   /// spostiamo la camera sulla posizione reale dell'utente.
   bool _hasInitialFix = false;
@@ -481,7 +659,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
         _isArrived = true;
         _overlayState = null; // Non mostrare il banner overlay vecchio
       });
-      _speak(newState!.message);
+      // FIX BUG 3: arrivo è critico — bypassa dedup, interrompe altre frasi.
+      _enqueueSpeech(
+        newState!.message,
+        priority: SpeechPriority.critical,
+        dedupKey: 'arrival',
+      );
       _startArrivalAnimation();
       return;
     }
@@ -489,7 +672,32 @@ class _NavigationScreenState extends State<NavigationScreen> {
     setState(() {
       _overlayState = newState;
     });
-    if (newState != null) _speak(newState.message);
+    if (newState != null) {
+      // FIX BUG 3: priorità per tipo di overlay.
+      //  - turnInstruction: important (guida la marcia)
+      //  - returnToRoute: important (utente sta tornando sul percorso)
+      //  - lateralRoadDetected: background (informativo, non urgente)
+      // dedupKey usa solo type + tipo di azione per evitare ripetizioni
+      // anche quando il prefisso random cambia il messaggio.
+      final SpeechPriority priority;
+      switch (newState.type) {
+        case OverlayType.turnInstruction:
+        case OverlayType.returnToRoute:
+          priority = SpeechPriority.important;
+          break;
+        case OverlayType.lateralRoadDetected:
+          priority = SpeechPriority.background;
+          break;
+        case OverlayType.arrivalCelebration:
+          priority = SpeechPriority.critical;
+          break;
+      }
+      // dedupKey: type + maneuver garantisce che la stessa svolta non venga
+      // ridetta entro la finestra anche se il prefisso random cambia.
+      final String dedupKey =
+          '${newState.type.name}:${newState.maneuver ?? newState.message}';
+      _enqueueSpeech(newState.message, priority: priority, dedupKey: dedupKey);
+    }
   }
 
   /// Callback chiamato quando la fase di ricalcolo cambia nel monitor.
@@ -510,10 +718,20 @@ class _NavigationScreenState extends State<NavigationScreen> {
     switch (phase) {
       case ReroutePhase.offRoute:
       case ReroutePhase.rerouting:
-        _speak('Sto cercando una strada migliore');
+        // FIX BUG 3: dedupKey condiviso tra offRoute e rerouting così non
+        // ridiciamo la stessa frase quando si transita tra le due fasi.
+        _enqueueSpeech(
+          'Sto cercando una strada migliore',
+          priority: SpeechPriority.normal,
+          dedupKey: 'rerouting',
+        );
         break;
       case ReroutePhase.routeChanged:
-        _speak('Va tutto bene. Il percorso è cambiato.');
+        _enqueueSpeech(
+          'Va tutto bene. Il percorso è cambiato.',
+          priority: SpeechPriority.important,
+          dedupKey: 'routeChanged',
+        );
         break;
       case ReroutePhase.none:
         break;
@@ -650,25 +868,71 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// che ricostruisce le polyline segmentate (verde=nuovo step, grigio=dopo).
   void _onStepChanged() {
     if (_appState == NavigationAppState.navigating) {
+      // FIX BUG 4 (B4.5): apre la finestra di rinforzo post-svolta.
+      // Il banner userà _lastStepAdvanceAt per decidere se mostrare la
+      // versione "Bravo! <step corrente>" o la versione classica
+      // (prossima manovra). Programmiamo un rebuild a fine finestra così
+      // il banner torna a mostrare la prossima manovra senza dover
+      // attendere un altro evento (GPS update, overlay change, ...).
+      _lastStepAdvanceAt = DateTime.now();
+      _postTurnRebuildTimer?.cancel();
+      _postTurnRebuildTimer = Timer(_kPostTurnReinforcementWindow, () {
+        if (mounted) setState(() {});
+      });
+
+      // FIX BUG 4 (B4.7): se c'è un overlay turnInstruction attivo per la
+      // svolta appena consumata, lo dismissiamo. Senza questo, l'utente
+      // vede contemporaneamente l'overlay grande della svolta passata e
+      // il banner della prossima — confusione massima per disabilità
+      // cognitive. returnToRoute / lateralRoadDetected / arrivalCelebration
+      // restano (sono indipendenti dallo step corrente).
+      if (_overlayState?.type == OverlayType.turnInstruction) {
+        _overlayState = null;
+      }
+
       setState(() {
         // Il rebuild causa MapWidget.didUpdateWidget() che ricalcola
         // le polyline con il nuovo currentStepIndex.
       });
       final steps = _directionsResult?.steps;
-      if (steps != null && steps.isNotEmpty) {
-        final idx = _navigationMonitor.currentStepNotifier.value;
-        final safeIdx = idx < steps.length ? idx : steps.length - 1;
-        // FIX BUG 2: dopo un avanzamento "approach-then-leave" l'utente ha
-        // appena svoltato ed è entrato nel segmento nuovo. Leggiamo
-        // vocalmente la prossima istruzione: steps[safeIdx + 1] se
-        // esiste (prossima svolta futura), altrimenti steps[safeIdx]
-        // (ultimo tratto, messaggio di arrivo).
-        if (safeIdx + 1 < steps.length) {
-          _speak(steps[safeIdx + 1].instruction);
-        } else {
-          _speak('Stai arrivando');
+      if (steps == null || steps.isEmpty) return;
+
+      final int idx = _navigationMonitor.currentStepNotifier.value;
+      final int safeIdx = idx < steps.length ? idx : steps.length - 1;
+
+      // FIX BUG 3 (B3.3) — Multi-skip detection.
+      //
+      // Il monitor può avanzare di > 1 step in un solo GPS tick (while loop
+      // su deviazioni o waypoint molto vicini). In quel caso un'istruzione
+      // intermedia (es. "Vai a sinistra") rischierebbe di essere saltata
+      // dall'annuncio vocale, lasciando l'utente confuso. Quando rileviamo
+      // un salto di > 1, premettiamo "Hai svoltato" e aggiungiamo
+      // l'istruzione intermedia che era stata saltata.
+      final bool isLastStep = safeIdx + 1 >= steps.length;
+      final String nextInstruction =
+          isLastStep ? 'Stai arrivando' : steps[safeIdx + 1].instruction;
+
+      String text = nextInstruction;
+      if (_lastAnnouncedStep >= 0 && safeIdx - _lastAnnouncedStep > 1) {
+        // Multi-skip: l'utente ha attraversato più waypoint senza che
+        // l'avessimo annunciato. Diciamo cosa è appena successo + cosa
+        // fare ora, in una frase sola.
+        final int missedIdx = _lastAnnouncedStep + 1;
+        if (missedIdx < steps.length) {
+          final String missed = steps[missedIdx].instruction;
+          text = 'Hai svoltato. $missed. Ora $nextInstruction';
         }
       }
+
+      // FIX BUG 3 (B3.1): priorità "important" per le istruzioni di marcia.
+      // dedupKey legato all'indice dello step così la stessa transizione
+      // non viene riannunciata se lo stato si ricostruisce.
+      _enqueueSpeech(
+        text,
+        priority: SpeechPriority.important,
+        dedupKey: 'step-$safeIdx',
+      );
+      _lastAnnouncedStep = safeIdx;
     }
   }
 
@@ -993,17 +1257,20 @@ class _NavigationScreenState extends State<NavigationScreen> {
           }
 
           // --- FOLLOW-MODE: insegui la posizione GPS sulla mappa ---
-          // FIX: usiamo _getRouteBearing() che calcola il bearing geometrico
-          // dalla posizione corrente verso lo step corrente del percorso.
-          // Prima usavamo _navigationMonitor.direction ?? _rawBearing, che
-          // all'avvio è 0° (nord) perché il monitor non ha ancora acquisito
-          // un bearing affidabile → la camera ruotava verso nord annullando
-          // l'orientamento impostato da snapToRoute().
-          // _getRouteBearing() ha già il fallback interno a
-          // _navigationMonitor.direction ?? _rawBearing se non ci sono steps.
-          if (_appState == NavigationAppState.navigating && _isFollowingUser) {
-            final double navBearing = _getRouteBearing();
-            _mapKey.currentState?.followUser(
+          // FIX BUG 1:
+          // - Esteso a routePreview così la mappa ruota anche prima di "Avvia"
+          //   se l'utente sta camminando lungo il percorso.
+          // - Escluso durante il review della walked path (vista panoramica).
+          // - Usa _getMapBearing(): combina segmento percorso (in marcia) e
+          //   bussola (da fermo) in modo coerente con la freccia direzionale.
+          // - Usa _followCameraThrottled(): rotazione graduale al cambio
+          //   step (>90°) e throttle delle animazioni sovrapposte.
+          final bool isFollowEligible = !_isReviewingWalkedPath &&
+              (_appState == NavigationAppState.navigating ||
+                  _appState == NavigationAppState.routePreview);
+          if (isFollowEligible && _isFollowingUser) {
+            final double navBearing = _getMapBearing();
+            _followCameraThrottled(
               _currentLat!,
               _currentLng!,
               navBearing,
@@ -1050,6 +1317,13 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
     // Cancella il timer dell'animazione arrivo
     _arrivalAnimTimer?.cancel();
+
+    // FIX BUG 4 (B4.5): cancella il timer della finestra di rinforzo
+    // post-svolta.
+    _postTurnRebuildTimer?.cancel();
+
+    // FIX BUG 2 (B2.3): cancella il timer della rotazione graduale.
+    _gradualRotationCompletionTimer?.cancel();
 
     // Distrugge il NavigationMonitor (cancella tutti i timer interni)
     _navigationMonitor.dispose();
@@ -1150,14 +1424,21 @@ class _NavigationScreenState extends State<NavigationScreen> {
   ///
   /// FALLBACK a cascata se il bearing del segmento non è disponibile:
   ///   1) bearing del segmento attivo (start → end)
-  ///   2) bearing verso l'endLocation dello step (come prima)
-  ///   3) bearing affidabile memorizzato nel monitor
-  ///   4) bearing raw dal GPS
+  ///   2) bearing verso l'endLocation dello step
+  ///   3) bearing affidabile memorizzato nel monitor (GPS sopra soglia)
+  ///   4) compass/magnetometro (funziona da fermo — FIX BUG 2)
+  ///   5) raw GPS bearing se non zero, altrimenti _cameraBearing precedente
+  ///      (FIX BUG 1: evita snap silenzioso a 0°/Nord quando il GPS bearing
+  ///      non è ancora stato acquisito)
   double _getRouteBearing() {
-    final double fallback = _navigationMonitor.direction ?? _rawBearing;
-
     final steps = _directionsResult?.steps;
-    if (steps == null || steps.isEmpty) return fallback;
+    if (steps == null || steps.isEmpty) {
+      // Nessun percorso attivo: cascata monitor → compass → raw GPS → camera
+      if (_navigationMonitor.direction != null) return _navigationMonitor.direction!;
+      if (_compassHeading != 0.0) return _compassHeading;
+      if (_rawBearing != 0.0) return _rawBearing;
+      return _cameraBearing;
+    }
 
     final int idx = _navigationMonitor.currentStepNotifier.value;
     final int safeIdx = idx < steps.length ? idx : steps.length - 1;
@@ -1207,8 +1488,22 @@ class _NavigationScreenState extends State<NavigationScreen> {
       }
     }
 
-    // --- STRATEGIE 3/4: fallback sul bearing affidabile / raw GPS ---
-    return fallback;
+    // --- STRATEGIA 3: bearing affidabile del monitor (GPS sopra soglia) ---
+    if (_navigationMonitor.direction != null) return _navigationMonitor.direction!;
+
+    // --- STRATEGIA 4 (FIX BUG 2): compass/magnetometro ---
+    // Il magnetometro funziona da fermo, a differenza del GPS bearing.
+    // Usato quando l'utente non si è ancora mosso abbastanza per avere
+    // un _navigationMonitor.direction valido. Evita il fallback a 0° (Nord).
+    if (_compassHeading != 0.0) return _compassHeading;
+
+    // --- STRATEGIA 5: raw GPS se non è zero (FIX BUG 1) ---
+    if (_rawBearing != 0.0) return _rawBearing;
+
+    // --- STRATEGIA 6 (FIX BUG 1): mantieni l'ultimo bearing applicato ---
+    // Mai snappare a 0°/Nord come ultimo ricorso: una rotazione "silenziosa"
+    // verso Nord è più disorientante che lasciare la camera ferma.
+    return _cameraBearing;
   }
 
   /// Helper: calcola il bearing in gradi (0-360, convenzione compass
@@ -1236,6 +1531,265 @@ class _NavigationScreenState extends State<NavigationScreen> {
     final double bearing = math.atan2(x, y) * radToDeg;
 
     return (bearing + 360) % 360;
+  }
+
+  /// FIX BUG 1: bearing per la rotazione della MAPPA (non della freccia).
+  ///
+  /// Combina segmento del percorso e bussola in modo coerente con la
+  /// freccia direzionale (che usa sempre `_compassHeading`):
+  ///
+  /// - Se l'utente cammina (velocità ≥ 3.5 km/h) e abbiamo un bearing
+  ///   GPS affidabile, ritorna il bearing del segmento attivo. È stabile
+  ///   geometricamente e non oscilla per il jitter del magnetometro.
+  /// - Altrimenti (utente fermo o lento) usa la bussola: la mappa segue
+  ///   la testa dell'utente in tempo reale, *coerente* con la freccia.
+  /// - Se la bussola non è disponibile, fallback su `_getRouteBearing()`.
+  ///
+  /// MOTIVAZIONE: quando la freccia (bussola) e la mappa (segmento) usano
+  /// fonti diverse, l'utente con disabilità cognitive vede la freccia girare
+  /// senza che la mappa la segua. Da fermo usiamo la stessa fonte; in marcia
+  /// la mappa si stabilizza sul segmento (no jitter), e la freccia comunque
+  /// punta dove guarda l'utente.
+  double _getMapBearing() {
+    const double kWalkingSpeedKmH = 3.5;
+    final bool hasReliableGpsBearing = _navigationMonitor.direction != null;
+    final bool isMoving = _currentSpeed >= kWalkingSpeedKmH;
+
+    if (isMoving && hasReliableGpsBearing) {
+      return _getRouteBearing();
+    }
+    if (_compassHeading != 0.0) {
+      return _compassHeading;
+    }
+    return _getRouteBearing();
+  }
+
+  /// FIX BUG 2 (B2.2) — Bearing per il tasto "Io" (recenter).
+  ///
+  /// Sorgente unica della verità: in qualsiasi stato dell'app, dato lo
+  /// stato corrente decide il bearing più sensato per orientare la mappa
+  /// quando l'utente preme "Io". Sostituisce le code-path multiple che
+  /// prima usavano _getRouteBearing() (con risultati incoerenti) o
+  /// moveToLocation senza bearing (snap a Nord).
+  ///
+  /// STRATEGIA:
+  ///   1. Navigating → delega a _getMapBearing() (segmento se in marcia,
+  ///      bussola se fermo). Coerente col follow-mode (Bug 1).
+  ///   2. routePreview / placeSelected con percorso → trova il primo step
+  ///      ancora "davanti" all'utente (proiezione t < 1.0):
+  ///      - Se l'utente è ≤ 5m dalla startLoc → bearing del segmento.
+  ///      - Altrimenti → bearing utente → endLoc dello step (più
+  ///        intuitivo: "guarda dove devi andare ORA").
+  ///   3. Search / fallback → bussola se disponibile, altrimenti
+  ///      _cameraBearing precedente (mai snap silenzioso a Nord).
+  double _getRecenterBearing() {
+    final double? lat = _currentLat;
+    final double? lng = _currentLng;
+
+    // 1. Navigating: usa la stessa fonte del follow-mode (coerenza col Bug 1).
+    if (_appState == NavigationAppState.navigating) {
+      return _getMapBearing();
+    }
+
+    // 2. Preview / placeSelected con percorso pronto: cerca lo step
+    //    rilevante per la posizione corrente.
+    if ((_appState == NavigationAppState.routePreview ||
+            _appState == NavigationAppState.placeSelected) &&
+        lat != null &&
+        lng != null) {
+      final steps = _directionsResult?.steps;
+      if (steps != null && steps.isNotEmpty) {
+        for (final step in steps) {
+          // Salta step degeneri (start ≈ end) per evitare proiezioni instabili.
+          final double segLen = haversineDistance(
+            step.startLat,
+            step.startLng,
+            step.endLat,
+            step.endLng,
+          );
+          if (segLen < 2.0) continue;
+
+          final SegmentProjection proj = projectPointOnSegment(
+            lat,
+            lng,
+            step.startLat,
+            step.startLng,
+            step.endLat,
+            step.endLng,
+          );
+          if (proj.t >= 1.0) continue; // Step già superato
+
+          // Trovato lo step più rilevante.
+          final double distToStart = haversineDistance(
+            lat,
+            lng,
+            step.startLat,
+            step.startLng,
+          );
+          if (distToStart > 5.0) {
+            // Utente non è sopra startLoc → bearing user → endLoc.
+            return _bearingBetween(lat, lng, step.endLat, step.endLng);
+          }
+          return _bearingBetween(
+            step.startLat,
+            step.startLng,
+            step.endLat,
+            step.endLng,
+          );
+        }
+        // Tutti gli step sono dietro l'utente: cade in fallback bussola.
+      }
+    }
+
+    // 3. Fallback: bussola → _cameraBearing.
+    if (_compassHeading != 0.0) return _compassHeading;
+    return _cameraBearing;
+  }
+
+  /// FIX BUG 2 (B2.4) — Handler unificato del tasto "Io" (recenter).
+  ///
+  /// Sostituisce il vecchio if/elseif con tre code-path divergenti
+  /// (navigating / preview&placeSelected / search). Ora la decisione
+  /// è scomposta in:
+  ///   - **Bearing**: deciso da _getRecenterBearing() — uniforme.
+  ///   - **Camera mode**:
+  ///     - navigating + routePreview → vista guidata (followUser:
+  ///       tilt 40, zoom 18, rotazione graduale se diff > 90°).
+  ///     - placeSelected + search → vista panoramica (moveToLocation
+  ///       con bearing, tilt 0, zoom default). Prima usava moveToLocation
+  ///       senza bearing → mappa snappava a Nord.
+  ///   - **Follow-mode**: setState(_isFollowingUser=true) DOPO
+  ///     l'animazione, evitando race tra rebuild e camera move.
+  void _onRecenterPressed() {
+    final double? lat = _currentLat;
+    final double? lng = _currentLng;
+    if (lat == null || lng == null) return;
+
+    final double bearing = _getRecenterBearing();
+    final bool useNavView =
+        _appState == NavigationAppState.navigating ||
+            _appState == NavigationAppState.routePreview;
+
+    if (useNavView) {
+      _applyGradualBearing(lat, lng, bearing);
+    } else {
+      // FIX B2.1: passiamo il bearing così la camera non snappa a Nord.
+      _mapKey.currentState?.moveToLocation(lat, lng, bearing: bearing);
+      _cameraBearing = bearing;
+      _lastAppliedLat = lat;
+      _lastAppliedLng = lng;
+    }
+
+    setState(() {
+      _isFollowingUser = true;
+    });
+  }
+
+  // ===========================================================================
+  // FIX BUG 2 — GRADUAL BEARING ROTATION FOR IO BUTTON
+  // ===========================================================================
+
+  /// Applica la rotazione della mappa con gradualità se la differenza
+  /// di bearing è troppo ampia (> 90°).
+  ///
+  /// PROBLEMA: quando l'utente preme "IO" e il bearing del percorso è
+  /// opposto alla direzione in cui l'utente sta guardando (es. 180° di
+  /// differenza), una rotazione istantanea di 180° disorienta completamente.
+  ///
+  /// SOLUZIONE: se la differenza è > 90°, ruotiamo prima di 90° verso
+  /// la direzione corretta, poi dopo 500ms completiamo la rotazione.
+  /// Questo dà all'utente tempo di orientarsi durante la transizione.
+  void _applyGradualBearing(double lat, double lng, double targetBearing) {
+    // FIX BUG 2 (B2.3): cancella eventuale completion pendente prima di
+    // iniziare una nuova rotazione. Senza questa cancellazione, due chiamate
+    // ravvicinate (tap doppio IO, GPS update durante i 500ms intermedi)
+    // facevano atterrare il vecchio Future.delayed su un target obsoleto
+    // → la camera oscillava avanti e indietro per ~1 secondo.
+    _gradualRotationCompletionTimer?.cancel();
+    _gradualRotationCompletionTimer = null;
+
+    // FIX BUG 2: usa _cameraBearing (bearing reale della camera) invece di
+    // _rawBearing (bearing GPS). _rawBearing è inaffidabile da fermo e non
+    // riflette la rotazione attuale della camera se l'utente ha fatto pan.
+    final double currentBearing = _cameraBearing;
+
+    // Calcola la differenza tra i due bearing (in range -180 a +180)
+    double diff = (targetBearing - currentBearing + 360) % 360;
+    if (diff > 180) diff -= 360;
+    final double absDiff = diff.abs();
+
+    if (absDiff > 90) {
+      // Rotazione troppo ampia → graduale in due step
+      final double intermediateBearing = (currentBearing + (diff > 0 ? 90 : -90)) % 360;
+      _cameraBearing = intermediateBearing;
+      _lastAppliedLat = lat;
+      _lastAppliedLng = lng;
+      _mapKey.currentState?.followUser(lat, lng, intermediateBearing);
+
+      // Completa la rotazione dopo 500ms con un Timer cancellabile.
+      _gradualRotationCompletionTimer = Timer(
+        const Duration(milliseconds: 500),
+        () {
+          _gradualRotationCompletionTimer = null;
+          if (!mounted) return;
+          _cameraBearing = targetBearing;
+          _lastAppliedLat = lat;
+          _lastAppliedLng = lng;
+          _mapKey.currentState?.followUser(lat, lng, targetBearing);
+        },
+      );
+    } else {
+      // Rotazione accettabile (< 90°) → diretta
+      _cameraBearing = targetBearing;
+      _lastAppliedLat = lat;
+      _lastAppliedLng = lng;
+      _mapKey.currentState?.followUser(lat, lng, targetBearing);
+    }
+  }
+
+  /// FIX BUG 1: variante "follow-mode" con throttle e gradual rotation.
+  ///
+  /// Chiamata ad ogni aggiornamento GPS (~500ms) durante la navigazione.
+  /// A differenza di [_applyGradualBearing] (usata dal tasto IO), questa:
+  ///
+  /// 1. Applica la **rotazione graduale** se il bearing salta di > 90°
+  ///    (tipicamente al cambio di step su una svolta secca) — riusa la
+  ///    logica di _applyGradualBearing.
+  /// 2. Applica un **throttle** se la variazione è piccola: salta la
+  ///    chiamata `animateCamera` se sia il bearing (< 2°) sia la posizione
+  ///    (< 1.5m) sono praticamente invariate. Evita le animazioni
+  ///    sovrapposte di Google Maps che si annullano a vicenda producendo
+  ///    l'effetto "scatti".
+  ///
+  /// Le soglie 2°/1.5m sono sotto la soglia di percezione su uno schermo
+  /// di smartphone con zoom 18.
+  void _followCameraThrottled(double lat, double lng, double targetBearing) {
+    const double kMinBearingDeltaDeg = 2.0;
+    const double kMinPosDeltaM = 1.5;
+
+    // Diff in [-180, +180]
+    double diff = (targetBearing - _cameraBearing + 360) % 360;
+    if (diff > 180) diff -= 360;
+    final double absDiff = diff.abs();
+
+    // Big jump (es. cambio step su svolta) → rotazione graduale.
+    if (absDiff > 90) {
+      _applyGradualBearing(lat, lng, targetBearing);
+      return;
+    }
+
+    // Throttle: skip se né bearing né posizione cambiano abbastanza.
+    final double posDelta = (_lastAppliedLat == null || _lastAppliedLng == null)
+        ? double.infinity
+        : haversineDistance(_lastAppliedLat!, _lastAppliedLng!, lat, lng);
+    if (absDiff < kMinBearingDeltaDeg && posDelta < kMinPosDeltaM) {
+      return;
+    }
+
+    _cameraBearing = targetBearing;
+    _lastAppliedLat = lat;
+    _lastAppliedLng = lng;
+    _mapKey.currentState?.followUser(lat, lng, targetBearing);
   }
 
   // ===========================================================================
@@ -1417,6 +1971,8 @@ class _NavigationScreenState extends State<NavigationScreen> {
         _navigationMonitor.stopNavigation();
         _routeChangedAnimTimer?.cancel();
         _arrivalAnimTimer?.cancel();
+        // FIX BUG 3 (B3.6): cleanup TTS sull'uscita dalla navigazione via back.
+        _resetTtsState();
       }
 
       setState(() {
@@ -1480,6 +2036,9 @@ class _NavigationScreenState extends State<NavigationScreen> {
     _navigationMonitor.stopNavigation();
     _routeChangedAnimTimer?.cancel();
     _arrivalAnimTimer?.cancel();
+    // FIX BUG 3 (B3.6): cleanup TTS al reset così non parla mentre si
+    // torna alla schermata di ricerca.
+    _resetTtsState();
     setState(() {
       _appState = NavigationAppState.search;
       _directionsResult = null;
@@ -1606,6 +2165,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
         _isReviewingWalkedPath = false;
       });
 
+      // FIX BUG 3 (B3.6): cleanup TTS prima di iniziare una nuova navigazione,
+      // così eventuali frasi residue ("Sto cercando una strada migliore",
+      // pending non ancora pronunciate) non si accavallano sulle istruzioni
+      // della nuova sessione.
+      _resetTtsState();
+
       // FIX: Passa le COORDINATE della destinazione (formato "lat,lng"),
       // NON l'indirizzo testuale. Il monitor usa _originalDestination per
       // i ricalcoli (Task 2c): se passiamo il testo, ogni ricalcolo
@@ -1622,10 +2187,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
       final double startLat = _currentLat ?? _allRoutesResult!.originLat;
       final double startLng = _currentLng ?? _allRoutesResult!.originLng;
 
+      final double routeBearing = _getRouteBearing();
+      _cameraBearing = routeBearing;
       _mapKey.currentState?.snapToRoute(
         startLat,
         startLng,
-        _getRouteBearing(),
+        routeBearing,
       );
     }
   }
@@ -2123,52 +2690,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
             bottom: _computeRecenterButtonBottom(context),
             right: 16,
             child: GestureDetector(
-              onTap: () {
-                if (_currentLat != null && _currentLng != null) {
-                  if (_appState == NavigationAppState.navigating) {
-                    // In navigazione: riattiva follow-mode con bearing del percorso
-                    setState(() {
-                      _isFollowingUser = true;
-                    });
-                    _mapKey.currentState?.followUser(
-                      _currentLat!,
-                      _currentLng!,
-                      _getRouteBearing(),
-                    );
-                  } else if (_appState == NavigationAppState.routePreview ||
-                      _appState == NavigationAppState.placeSelected) {
-                    // FIX BUG 7: anche in preview/placeSelected, se c'è un
-                    // percorso, orientiamo la mappa verso il primo tratto.
-                    // Se non c'è percorso, fallback a moveToLocation senza
-                    // rotazione.
-                    final steps = _directionsResult?.steps;
-                    if (steps != null && steps.isNotEmpty) {
-                      _mapKey.currentState?.followUser(
-                        _currentLat!,
-                        _currentLng!,
-                        _getRouteBearing(),
-                      );
-                    } else {
-                      _mapKey.currentState?.moveToLocation(
-                        _currentLat!,
-                        _currentLng!,
-                      );
-                    }
-                    setState(() {
-                      _isFollowingUser = true;
-                    });
-                  } else {
-                    // Stato "search" o altro: nessun percorso, solo recenter
-                    _mapKey.currentState?.moveToLocation(
-                      _currentLat!,
-                      _currentLng!,
-                    );
-                    setState(() {
-                      _isFollowingUser = true;
-                    });
-                  }
-                }
-              },
+              onTap: _onRecenterPressed,
               child: Container(
                 width: 64,
                 height: 64,
@@ -2499,9 +3021,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
               // Qualsiasi setState (da _onActiveRouteChanged, _onStepChanged,
               // o qualsiasi altra fonte) ricostruisce il banner con i dati
               // aggiornati (nuovi step + indice corretto).
-              child: Builder(
-                builder: (context) {
-                  final int currentStepIndex = _navigationMonitor.currentStepNotifier.value;
+              //
+              // FIX BUG 3 (B3.4): usiamo ValueListenableBuilder così il
+              // banner si aggiorna ANCHE se per qualche motivo nessun
+              // setState del parent gira (robustezza). Prima dipendevamo
+              // dal fatto che _onStepChanged() chiamasse setState.
+              child: ValueListenableBuilder<int>(
+                valueListenable: _navigationMonitor.currentStepNotifier,
+                builder: (context, currentStepIndex, _) {
                   final steps = _directionsResult?.steps ?? [];
 
               if (steps.isEmpty) {
@@ -2537,11 +3064,29 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
               final bool isLastStep = currentSafeIdx + 1 >= steps.length;
 
+              // FIX BUG 4 (B4.5): finestra di rinforzo post-svolta.
+              // Per ~4s dopo l'avanzamento, mostriamo l'istruzione dello
+              // step CORRENTE con un prefisso positivo ("Bravo! Continua
+              // su Via Roma"), invece della prossima manovra. Questo
+              // evita la sensazione di "indicazione cambia troppo presto"
+              // — l'utente ha appena svoltato e vuole conferma, non già
+              // la prossima istruzione.
+              final bool inReinforcementWindow = !isLastStep &&
+                  _lastStepAdvanceAt != null &&
+                  DateTime.now().difference(_lastStepAdvanceAt!) <
+                      _kPostTurnReinforcementWindow;
+
               // Lo step da MOSTRARE nel banner è quello successivo al
-              // corrente, che descrive la prossima svolta.
-              final DirectionStep bannerStep = isLastStep
-                  ? steps[currentSafeIdx]
-                  : steps[currentSafeIdx + 1];
+              // corrente (la prossima svolta), oppure quello corrente
+              // durante la finestra di rinforzo.
+              final DirectionStep bannerStep;
+              if (isLastStep) {
+                bannerStep = steps[currentSafeIdx];
+              } else if (inReinforcementWindow) {
+                bannerStep = steps[currentSafeIdx];
+              } else {
+                bannerStep = steps[currentSafeIdx + 1];
+              }
 
               // Distanza dinamica alla prossima svolta (valore aggiornato
               // in tempo reale dal progressNotifier). Fallback al valore
@@ -2551,11 +3096,17 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   : bannerStep.distance;
 
               // Nell'ultimo step non c'è una prossima svolta: il banner
-              // ospita un messaggio di arrivo imminente + la distanza
-              // residua fino alla destinazione.
-              final String instructionText = isLastStep
-                  ? 'Stai arrivando'
-                  : bannerStep.instruction;
+              // ospita un messaggio di arrivo imminente. Durante la
+              // finestra di rinforzo, prefissiamo "Bravo!" per dare
+              // conferma positiva all'utente.
+              final String instructionText;
+              if (isLastStep) {
+                instructionText = 'Stai arrivando';
+              } else if (inReinforcementWindow) {
+                instructionText = 'Bravo! ${bannerStep.instruction}';
+              } else {
+                instructionText = bannerStep.instruction;
+              }
 
               // Determina icona e colore in base al tipo di manovra del
               // banner (prossima svolta). Nell'ultimo step usiamo
@@ -3727,4 +4278,30 @@ class _NavigationScreenState extends State<NavigationScreen> {
       ),
     );
   }
+}
+
+// =============================================================================
+// FIX BUG 3 — Tipi di supporto per il TTS queue
+// =============================================================================
+
+/// Livello di priorità di una richiesta vocale. Una richiesta può
+/// interrompere una in corso solo se ha priorità STRETTAMENTE superiore.
+///
+/// - background: messaggi informativi non urgenti (es. strada laterale)
+/// - normal: stato della navigazione (es. "Sto cercando una strada migliore")
+/// - important: istruzioni di marcia (svolte, cambi step)
+/// - critical: arrivo a destinazione, eventi che richiedono attenzione
+///   immediata. Bypassa anche il dedup temporale.
+enum SpeechPriority { background, normal, important, critical }
+
+/// Richiesta di pronuncia vocale tracciata dal queue.
+class _SpeechRequest {
+  final String text;
+  final SpeechPriority priority;
+  final String dedupKey;
+  _SpeechRequest({
+    required this.text,
+    required this.priority,
+    required this.dedupKey,
+  });
 }
