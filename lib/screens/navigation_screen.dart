@@ -136,6 +136,19 @@ class _NavigationScreenState extends State<NavigationScreen> {
   Timer? _postTurnRebuildTimer;
 
   Future<void> _initTts() async {
+    if (Platform.isIOS) {
+      await _tts.setSharedInstance(true);
+      await _tts.setIosAudioCategory(
+        IosTextToSpeechAudioCategory.playback,
+        [
+          IosTextToSpeechAudioCategoryOptions.allowBluetooth,
+          IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
+          IosTextToSpeechAudioCategoryOptions.mixWithOthers,
+          IosTextToSpeechAudioCategoryOptions.defaultToSpeaker
+        ],
+        IosTextToSpeechAudioMode.voicePrompt,
+      );
+    }
     await _tts.setLanguage('it-IT');
     // FIX BUG 3: speech rate abbassato da 0.85 → 0.5 per rendere le
     // istruzioni vocali più comprensibili ad utenti con disabilità cognitive.
