@@ -1549,10 +1549,12 @@ class NavigationMonitor {
     // e le chiamate API per dare all'utente tempo di tornare sul percorso.
     _returnToRouteLockUntil = DateTime.now().add(const Duration(seconds: 15));
 
-    // Emette overlay arancione "Torna indietro"
+    // Emette overlay arancione "torna indietro" — guida semplice e
+    // rassicurante (NavigationOverlay sceglie l'icona Icons.u_turn_left
+    // per OverlayType.returnToRoute, freccia che indica il ritorno).
     overlayNotifier.value = NavigationOverlayState(
       type: OverlayType.returnToRoute,
-      message: 'Torna indietro e riprendi il percorso!',
+      message: 'torna indietro',
     );
 
     print('✅ Percorso precedente ripristinato: ${_activeRoute!.totalDuration}');

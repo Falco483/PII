@@ -108,11 +108,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Sostituita se ne arriva una di pari o maggior priorità.
   _SpeechRequest? _pendingSpeech;
 
-  /// FIX BUG 3 (B3.3): ultimo indice di step già annunciato vocalmente.
-  /// Permette di rilevare i "multi-skip" (avanzamento di > 1 step in un
-  /// solo GPS tick) e annunciare l'istruzione che sarebbe stata saltata.
-  /// -1 = nessuna istruzione ancora annunciata in questa sessione.
-  int _lastAnnouncedStep = -1;
 
   /// FIX BUG 4 (B4.5): timestamp dell'ultimo avanzamento step. Usato dal
   /// banner per mostrare la "fase di rinforzo post-svolta" per N secondi
@@ -134,6 +129,43 @@ class _NavigationScreenState extends State<NavigationScreen> {
   /// Senza questo, il banner mostrerebbe "Bravo!" per sempre finché un
   /// altro evento non triggerasse setState.
   Timer? _postTurnRebuildTimer;
+
+  /// Stato della modalità "Vai dritto" sul banner verde.
+  ///
+  /// Quando l'utente sta percorrendo un tratto rettilineo lungo tra due
+  /// svolte, il banner mostra "Vai dritto" + freccia in alto invece di
+  /// anticipare la prossima manovra. Lo stato è gestito con isteresi
+  /// (entra a >70m dalla prossima svolta, esce a <40m) per evitare
+  /// flicker su jitter GPS attorno alla soglia.
+  ///
+  /// La logica vive interamente nel builder del banner: questo flag
+  /// memorizza il valore tra rebuild consecutivi così la transizione
+  /// ENTER/EXIT può confrontare il nuovo valore con il precedente.
+  bool _showingStraight = false;
+
+  /// Ultimo testo letto dalla voce in sync col banner verde.
+  ///
+  /// Il TTS è guidato da CIÒ CHE È SCRITTO sul banner: ogni volta che il
+  /// banner cambia testo (es. da "Bravo!" a "Vai dritto", o da "Vai dritto"
+  /// a "Vai a sinistra"), la voce ripete esattamente quel testo. Questo
+  /// campo memorizza l'ultimo testo già pronunciato così possiamo emettere
+  /// una nuova frase SOLO sui cambi reali, evitando ripetizioni ad ogni
+  /// rebuild causato da GPS tick (~1/sec).
+  String? _lastSpokenBannerText;
+
+  /// Soglia di velocità (km/h) sotto la quale consideriamo l'utente
+  /// "effettivamente fermo" al momento dell'avanzamento step.
+  ///
+  /// Usata SOLO per decidere se aprire la finestra "Bravo!" post-svolta:
+  /// se l'utente attraversa l'incrocio camminando (anche piano), non
+  /// vogliamo i 4s di pausa, ma passare subito alla prossima istruzione
+  /// del banner.
+  ///
+  /// Distinta da kZeroSpeedThresholdKmH (2.5 km/h) usata altrove: lì
+  /// c'è anche un countdown di 10s che filtra i falsi positivi, qui
+  /// reagiamo istantaneamente quindi serve una soglia più stretta.
+  /// 1.0 km/h ≈ 0.28 m/s = passo strisciato, "fermo davvero".
+  static const double _kStoppedAtTurnThresholdKmH = 1.0;
 
   Future<void> _initTts() async {
     await _tts.setLanguage('it-IT');
@@ -240,10 +272,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
     _pendingSpeech = null;
     _lastSpokenText = null;
     _lastSpokenAt = null;
-    _lastAnnouncedStep = -1;
     _lastStepAdvanceAt = null;
     _postTurnRebuildTimer?.cancel();
     _postTurnRebuildTimer = null;
+    _showingStraight = false;
+    _lastSpokenBannerText = null;
     await _tts.stop();
     _isSpeaking = false;
   }
@@ -871,14 +904,36 @@ class _NavigationScreenState extends State<NavigationScreen> {
       // FIX BUG 4 (B4.5): apre la finestra di rinforzo post-svolta.
       // Il banner userà _lastStepAdvanceAt per decidere se mostrare la
       // versione "Bravo! <step corrente>" o la versione classica
-      // (prossima manovra). Programmiamo un rebuild a fine finestra così
-      // il banner torna a mostrare la prossima manovra senza dover
-      // attendere un altro evento (GPS update, overlay change, ...).
-      _lastStepAdvanceAt = DateTime.now();
-      _postTurnRebuildTimer?.cancel();
-      _postTurnRebuildTimer = Timer(_kPostTurnReinforcementWindow, () {
-        if (mounted) setState(() {});
-      });
+      // (prossima manovra).
+      //
+      // La finestra "Bravo!" si apre SOLO se l'utente era fermo (o quasi)
+      // al momento dell'avanzamento step: quando attraversa l'incrocio
+      // camminando fluidamente vogliamo passare subito a "Vai dritto"
+      // sul tratto rettilineo successivo, senza la pausa di 4s "Bravo!".
+      // Se invece si è fermato per controllare la mappa, il rinforzo
+      // positivo è utile.
+      //
+      // Soglia _kStoppedAtTurnThresholdKmH (1.0 km/h) molto più stretta
+      // di kZeroSpeedThresholdKmH (2.5 km/h) usata altrove: l'EMA della
+      // velocità può scendere brevemente sotto 2.5 anche quando l'utente
+      // sta solo rallentando in curva senza fermarsi davvero — userebbe
+      // i 4s di "Bravo!" indebitamente. A 1.0 km/h serve un quasi-arresto
+      // reale per attivare la finestra.
+      final bool stoppedAtTurn = _currentSpeed < _kStoppedAtTurnThresholdKmH;
+      if (stoppedAtTurn) {
+        _lastStepAdvanceAt = DateTime.now();
+        _postTurnRebuildTimer?.cancel();
+        _postTurnRebuildTimer = Timer(_kPostTurnReinforcementWindow, () {
+          if (mounted) setState(() {});
+        });
+      } else {
+        // Niente finestra di rinforzo: il banner sceglierà tra "Vai dritto"
+        // (se la prossima svolta è > kStraightEnterMeters) o la prossima
+        // manovra direttamente.
+        _lastStepAdvanceAt = null;
+        _postTurnRebuildTimer?.cancel();
+        _postTurnRebuildTimer = null;
+      }
 
       // FIX BUG 4 (B4.7): se c'è un overlay turnInstruction attivo per la
       // svolta appena consumata, lo dismissiamo. Senza questo, l'utente
@@ -894,45 +949,11 @@ class _NavigationScreenState extends State<NavigationScreen> {
         // Il rebuild causa MapWidget.didUpdateWidget() che ricalcola
         // le polyline con il nuovo currentStepIndex.
       });
-      final steps = _directionsResult?.steps;
-      if (steps == null || steps.isEmpty) return;
-
-      final int idx = _navigationMonitor.currentStepNotifier.value;
-      final int safeIdx = idx < steps.length ? idx : steps.length - 1;
-
-      // FIX BUG 3 (B3.3) — Multi-skip detection.
-      //
-      // Il monitor può avanzare di > 1 step in un solo GPS tick (while loop
-      // su deviazioni o waypoint molto vicini). In quel caso un'istruzione
-      // intermedia (es. "Vai a sinistra") rischierebbe di essere saltata
-      // dall'annuncio vocale, lasciando l'utente confuso. Quando rileviamo
-      // un salto di > 1, premettiamo "Hai svoltato" e aggiungiamo
-      // l'istruzione intermedia che era stata saltata.
-      final bool isLastStep = safeIdx + 1 >= steps.length;
-      final String nextInstruction =
-          isLastStep ? 'Stai arrivando' : steps[safeIdx + 1].instruction;
-
-      String text = nextInstruction;
-      if (_lastAnnouncedStep >= 0 && safeIdx - _lastAnnouncedStep > 1) {
-        // Multi-skip: l'utente ha attraversato più waypoint senza che
-        // l'avessimo annunciato. Diciamo cosa è appena successo + cosa
-        // fare ora, in una frase sola.
-        final int missedIdx = _lastAnnouncedStep + 1;
-        if (missedIdx < steps.length) {
-          final String missed = steps[missedIdx].instruction;
-          text = 'Hai svoltato. $missed. Ora $nextInstruction';
-        }
-      }
-
-      // FIX BUG 3 (B3.1): priorità "important" per le istruzioni di marcia.
-      // dedupKey legato all'indice dello step così la stessa transizione
-      // non viene riannunciata se lo stato si ricostruisce.
-      _enqueueSpeech(
-        text,
-        priority: SpeechPriority.important,
-        dedupKey: 'step-$safeIdx',
-      );
-      _lastAnnouncedStep = safeIdx;
+      // La voce è guidata dal banner: il prossimo build emetterà
+      // _enqueueSpeech con il testo che il banner sta per mostrare
+      // (vedi logica in _buildNavigatingUI). Così voce e banner
+      // restano sempre allineati ("Bravo!", "Vai dritto", o la
+      // prossima manovra) senza disallineamenti.
     }
   }
 
@@ -996,6 +1017,15 @@ class _NavigationScreenState extends State<NavigationScreen> {
         destLat: _allRoutesResult?.destLat ?? _directionsResult?.destLat ?? 0,
         destLng: _allRoutesResult?.destLng ?? _directionsResult?.destLng ?? 0,
       );
+      // Reset stato dell'isteresi "Vai dritto" e dell'ultimo testo
+      // pronunciato: sul nuovo percorso le distanze cambiano completamente,
+      // partire dallo stato del vecchio percorso provocherebbe un banner
+      // bloccato in modalità dritto se la nuova prima svolta cade nella
+      // zona di isteresi (40-70m). Resettando _lastSpokenBannerText
+      // forziamo anche la voce a riannunciare il testo corretto del
+      // nuovo percorso (anche se per caso coincide con quello del vecchio).
+      _showingStraight = false;
+      _lastSpokenBannerText = null;
     });
 
     // Log per debugging: segnala alla console che la UI è stata aggiornata
@@ -3076,9 +3106,60 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   DateTime.now().difference(_lastStepAdvanceAt!) <
                       _kPostTurnReinforcementWindow;
 
+              // === MODALITÀ "VAI DRITTO" — ISTERESI ANTI-FLICKER ===
+              //
+              // Tra la fine della finestra di rinforzo e l'avvicinamento
+              // alla prossima svolta, l'utente percorre un tratto
+              // rettilineo. Senza un esplicito "Vai dritto" il banner
+              // mostrerebbe già la prossima manovra (es. "Vai a sinistra")
+              // anche per centinaia di metri di tratto dritto, dando
+              // l'impressione che la svolta sia imminente.
+              //
+              // Mostriamo "Vai dritto" quando la prossima svolta è ancora
+              // lontana e torniamo a mostrare la prossima manovra quando
+              // ci avviciniamo. Soglie con isteresi (ENTER 50m / EXIT 25m)
+              // per evitare oscillazioni su jitter GPS attorno alla soglia.
+              //
+              // FIX BUG 3 — INDICAZIONI TROPPO ANTICIPATE:
+              // Le soglie precedenti (70/40) facevano comparire la prossima
+              // svolta nel banner già a 40m dall'incrocio: il ragazzo vedeva
+              // "Vai a destra" mentre era ancora in tratto rettilineo,
+              // confondendolo. Ora la soglia di uscita coincide con il
+              // raggio del waypoint di svolta (kTurnWaypointRadiusMeters,
+              // 25m): il banner passa a "Vai a destra" SOLO quando l'utente
+              // è realmente alla svolta — esattamente quando compare anche
+              // l'overlay arancione di conferma. La logica delle svolte
+              // (sequenza, calcolo, dedup TTS) è completamente intatta:
+              // qui si tocca solo il TIMING di attivazione visiva.
+              const double kStraightEnterMeters = 50.0;
+              const double kStraightExitMeters = 25.0;
+              final double? distanceToNextTurn = _progress?.distanceToNextTurn;
+
+              bool showStraight = _showingStraight;
+              if (isLastStep || inReinforcementWindow ||
+                  distanceToNextTurn == null) {
+                // Mai dritto in questi casi: priorità al messaggio di
+                // arrivo, al rinforzo "Bravo!" o al fallback se manca
+                // ancora il progress.
+                showStraight = false;
+              } else if (!_showingStraight &&
+                  distanceToNextTurn > kStraightEnterMeters) {
+                showStraight = true;
+              } else if (_showingStraight &&
+                  distanceToNextTurn < kStraightExitMeters) {
+                showStraight = false;
+              }
+              // Memorizza per il prossimo build (usato dalla logica di
+              // isteresi al tick successivo). Niente setState: il valore
+              // è solo un'hint stato, viene riusato al prossimo rebuild
+              // che già avviene su _onProgressChanged → setState.
+              _showingStraight = showStraight;
+
               // Lo step da MOSTRARE nel banner è quello successivo al
               // corrente (la prossima svolta), oppure quello corrente
-              // durante la finestra di rinforzo.
+              // durante la finestra di rinforzo. In modalità dritto
+              // referenziamo comunque lo step successivo: ci serve solo
+              // per la distanza alla prossima svolta.
               final DirectionStep bannerStep;
               if (isLastStep) {
                 bannerStep = steps[currentSafeIdx];
@@ -3098,22 +3179,80 @@ class _NavigationScreenState extends State<NavigationScreen> {
               // Nell'ultimo step non c'è una prossima svolta: il banner
               // ospita un messaggio di arrivo imminente. Durante la
               // finestra di rinforzo, prefissiamo "Bravo!" per dare
-              // conferma positiva all'utente.
+              // conferma positiva all'utente. In modalità dritto
+              // mostriamo l'istruzione semplice "Vai dritto".
               final String instructionText;
               if (isLastStep) {
                 instructionText = 'Stai arrivando';
               } else if (inReinforcementWindow) {
                 instructionText = 'Bravo! ${bannerStep.instruction}';
+              } else if (showStraight) {
+                instructionText = 'Vai dritto';
               } else {
                 instructionText = bannerStep.instruction;
               }
 
+              // === TTS SYNC: la voce legge ESATTAMENTE quello che il
+              // banner sta per mostrare, nel momento in cui esce. ===
+              //
+              // Confronta il testo che stiamo per mostrare con l'ultimo
+              // testo già pronunciato. Se è cambiato, programma un
+              // _enqueueSpeech post-frame così la voce annuncia il
+              // nuovo testo del banner appena finito il rebuild.
+              //
+              // Aggiorna il riferimento SUBITO (non dentro il callback)
+              // per evitare doppie schedulazioni se più build con lo
+              // stesso testo si susseguono prima che il post-frame esegua.
+              //
+              // Il dedup interno di _enqueueSpeech (5s, dedupKey legato
+              // al testo) protegge ulteriormente da ripetizioni
+              // ravvicinate (es. transizione "Vai dritto"→"Vai a sinistra"
+              // → "Vai dritto" su jitter GPS, anche se l'isteresi 70/40
+              // dovrebbe già impedirlo).
+              //
+              // GUARDIA AVVIO NAVIGAZIONE:
+              // Al primo build, se _progress è ancora null, il banner mostra
+              // la prossima manovra come fallback (perché non possiamo
+              // ancora calcolare distanceToNextTurn → showStraight resta
+              // false). Pochi millisecondi dopo arriva il primo GPS tick,
+              // _progress si popola, l'isteresi attiva la modalità dritto
+              // e il banner diventa "Vai dritto". Se parlassimo subito al
+              // primo build, la voce direbbe la prima manovra mentre il
+              // banner mostra "Vai dritto" — disallineamento di ~3s
+              // (durata della frase iniziale). Skippiamo quindi il primo
+              // TTS finché il banner non è stabile (cioè finché _progress
+              // non è disponibile).
+              if (instructionText != _lastSpokenBannerText) {
+                final bool isUnstableFirstBuild =
+                    _lastSpokenBannerText == null && _progress == null;
+                if (!isUnstableFirstBuild) {
+                  final String textToSpeak = instructionText;
+                  _lastSpokenBannerText = textToSpeak;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted &&
+                        _appState == NavigationAppState.navigating) {
+                      _enqueueSpeech(
+                        textToSpeak,
+                        priority: SpeechPriority.important,
+                        dedupKey: 'banner:$textToSpeak',
+                      );
+                    }
+                  });
+                }
+              }
+
               // Determina icona e colore in base al tipo di manovra del
               // banner (prossima svolta). Nell'ultimo step usiamo
-              // un'icona di destinazione.
-              final IconData directionIcon = isLastStep
-                  ? Icons.place
-                  : _getManeuverIcon(bannerStep.maneuver);
+              // un'icona di destinazione. In modalità dritto la freccia
+              // punta in alto.
+              final IconData directionIcon;
+              if (isLastStep) {
+                directionIcon = Icons.place;
+              } else if (showStraight) {
+                directionIcon = Icons.arrow_upward;
+              } else {
+                directionIcon = _getManeuverIcon(bannerStep.maneuver);
+              }
               final Color bannerColor = isLastStep
                   ? Colors.green.shade700
                   : _getManeuverColor(bannerStep.maneuver);
@@ -3439,10 +3578,14 @@ class _NavigationScreenState extends State<NavigationScreen> {
 
   /// Bottom sheet BIANCO con animazione progressiva e SCELTA UTENTE.
   ///
-  /// DESIGN — 3 fasi progressive:
+  /// DESIGN — 3 fasi progressive (come da screenshot):
   /// 1. Mascotte mappa + "Va tutto bene." (subito)
-  /// 2. + "Il percorso è cambiato. Cosa vuoi fare?" (dopo 1.5s)
-  /// 3. + Pulsanti "Continua col nuovo" / "Torna al vecchio" (dopo 3s)
+  /// 2. + "Sembra che il percorso sia cambiato." (dopo 1.5s)
+  /// 3. + Pulsante "Mostra il nuovo percorso" + link "torna al vecchio" (dopo 3s)
+  ///
+  /// FIX BUG 1: l'INTERO sheet entra con fade + slide-up (non istantaneo).
+  /// Avvolto in TweenAnimationBuilder con key fissa: parte automaticamente
+  /// da 0 a 1 al primo mount (cioè quando _reroutePhase diventa routeChanged).
   ///
   /// IMPORTANTE: il bottom sheet NON ha maniglia e NON è dismissabile
   /// con swipe/tap esterno. L'utente DEVE fare una scelta esplicita.
@@ -3453,7 +3596,22 @@ class _NavigationScreenState extends State<NavigationScreen> {
       bottom: 0,
       left: 0,
       right: 0,
-      child: Container(
+      child: TweenAnimationBuilder<double>(
+        key: const ValueKey('routeChangedSheetEntry'),
+        tween: Tween(begin: 0.0, end: 1.0),
+        duration: const Duration(milliseconds: 600),
+        curve: Curves.easeOutCubic,
+        builder: (context, t, child) {
+          // t va da 0 a 1: opacity = t, traslazione verso l'alto da 60px → 0
+          return Opacity(
+            opacity: t,
+            child: Transform.translate(
+              offset: Offset(0, (1 - t) * 60),
+              child: child,
+            ),
+          );
+        },
+        child: Container(
         decoration: const BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
@@ -3516,7 +3674,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
             ),
             const SizedBox(height: 8),
 
-            // --- TESTO 2: "Il percorso è cambiato. Cosa vuoi fare?" (step >= 1) ---
+            // --- TESTO 2: "Sembra che il percorso sia cambiato." (step >= 1) ---
             AnimatedOpacity(
               opacity: _routeChangedAnimStep >= 1 ? 1.0 : 0.0,
               duration: const Duration(milliseconds: 500),
@@ -3529,7 +3687,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: Text(
-                    'Il percorso è cambiato.\nCosa vuoi fare?',
+                    'Sembra che il percorso sia cambiato.',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 16,
@@ -3556,56 +3714,54 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: Column(
                     children: [
-                      // Pulsante principale — "Continua col nuovo percorso"
-                      // VERDE: azione positiva, proseguire è la scelta più naturale
+                      // Pulsante principale — "Mostra il nuovo percorso"
+                      // BLU: azione primaria, coerente con lo screenshot di
+                      // riferimento. Conferma il nuovo percorso e fa ripartire
+                      // la navigazione.
                       SizedBox(
                         width: double.infinity,
                         height: 56,
-                        child: ElevatedButton.icon(
+                        child: ElevatedButton(
                           onPressed: _confirmNewRoute,
-                          icon: const Icon(Icons.navigation, size: 24),
-                          label: const Text(
-                            'Continua col nuovo percorso',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.green.shade600,
+                            backgroundColor: Colors.blue.shade600,
                             foregroundColor: Colors.white,
                             shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(28),
+                              borderRadius: BorderRadius.circular(12),
                             ),
                             elevation: 0,
                           ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      // Pulsante secondario — "Torna al vecchio percorso"
-                      // OUTLINED ARANCIONE: azione di ritorno, meno prominente
-                      SizedBox(
-                        width: double.infinity,
-                        height: 56,
-                        child: OutlinedButton.icon(
-                          onPressed: _restorePreviousRoute,
-                          icon: Icon(Icons.undo, size: 24, color: Colors.orange.shade800),
-                          label: Text(
-                            'Torna al vecchio percorso',
+                          child: const Text(
+                            'Mostra il nuovo percorso',
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
-                              color: Colors.orange.shade800,
                             ),
                           ),
-                          style: OutlinedButton.styleFrom(
-                            side: BorderSide(
-                              color: Colors.orange.shade400,
-                              width: 2,
-                            ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(28),
-                            ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      // Link secondario — "torna al vecchio"
+                      // Stile testuale (TextButton) come nello screenshot:
+                      // azione meno prominente che ripristina il vecchio
+                      // percorso e mostra un overlay arancione "torna
+                      // indietro" come guida — NESSUN ricalcolo (vedi
+                      // _restorePreviousRoute, che ripristina il backup
+                      // locale del percorso, non chiama API).
+                      TextButton(
+                        onPressed: _restorePreviousRoute,
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.blue.shade600,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 8,
+                          ),
+                        ),
+                        child: const Text(
+                          'torna al vecchio',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
@@ -3617,6 +3773,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
             SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
           ],
         ),
+      ),
       ),
     );
   }
