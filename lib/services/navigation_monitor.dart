@@ -52,6 +52,8 @@ import 'navigation_session_service.dart';
 ///   Mostra un messaggio di incoraggiamento ("Continua dritto, stai andando bene!").
 /// - [arrivalCelebration]: l'utente ha raggiunto la destinazione.
 ///   Mostra un messaggio di congratulazioni con festa.
+/// - [returnToRoute]: l'utente ha rifiutato il nuovo percorso e torna al
+///   percorso originale. Mostra "torna indietro" con icona U-turn.
 enum OverlayType {
   turnInstruction,
   lateralRoadDetected,
@@ -2278,6 +2280,7 @@ class NavigationMonitor {
     // Se l'utente è sul percorso, tutto OK. Nessuna azione necessaria.
     if (onActiveRoute) {
       _consecutiveOffRouteDetects = 0; // Azzera strike di deviazione
+
       // Se era in fase di ricalcolo (offRoute o rerouting), resetta
       // perché l'utente è tornato da solo. MA se siamo in routeChanged,
       // NON resettiamo: il bottom sheet di scelta deve restare visibile
@@ -2302,14 +2305,13 @@ class NavigationMonitor {
       return;
     }
 
-    // TASK 5 - Strikes System (Verifica su più letture)
-    // FIX BUG 5: strikes adattativi per velocità.
-    // Pedoni (< 10 km/h): 3 strike = 6 secondi. Il GPS pedonale è più
-    // rumoroso e l'utente sul lato opposto della strada non deve scatenare
-    // ricalcoli per un jitter momentaneo.
-    // Veicoli (>= 10 km/h): 2 strike = 4 secondi (comportamento precedente).
-    final int requiredStrikes = _currentSpeed < 10.0 ? 3 : 2;
+    // Anti-jitter: 2 strike consecutivi (4 secondi) prima di confermare la
+    // deviazione. Singolo blip GPS non basta a scatenare il ricalcolo.
+    // Uniforme per pedoni e veicoli: la condizione di "deviato dal percorso"
+    // è l'unica necessaria e sufficiente per partire col rerouting.
+    const int requiredStrikes = 2;
     _consecutiveOffRouteDetects++;
+
     if (_consecutiveOffRouteDetects < requiredStrikes) {
       print(
         '⚠️ Deviazione rilevata (Strike $_consecutiveOffRouteDetects/$requiredStrikes). Attendo conferma...',
@@ -2317,24 +2319,6 @@ class NavigationMonitor {
       return;
     }
     _consecutiveOffRouteDetects = 0; // Azzera prima del varo ricalcolo
-
-    // FIX BUG 5: Tolerance laterale per pedestriani
-    // Se l'utente è a piedi (< 10 km/h) E si sta muovendo nella direzione
-    // generale del percorso, non forzare il ricalcolo.
-    // Questo gestisce il caso di utente sul marciapiede opposto ma che
-    // sta comunque andando nella direzione corretta.
-    if (_currentSpeed < 10.0 && _activeRoute != null) {
-      final bool movingTowardRoute = _isMovingGenerallyTowardRoute(lat, lng);
-      if (movingTowardRoute) {
-        print(
-          '✅ FIX BUG 5: Utente a piedi fuori dal percorso ma direzione corretta. '
-          'Nessun ricalcolo forzato. Velocità: ${_currentSpeed.toStringAsFixed(1)} km/h',
-        );
-        return; // Non considerare off-route, continua navigazione
-      }
-    }
-
-    // Ora controlliamo se è finito su uno dei percorsi alternativi.
 
     // Log per debugging: segnala la deviazione confermata
     print('⚠️ Deviazione confermata! L\'utente è fuori dal percorso attivo.');
@@ -2605,84 +2589,6 @@ class NavigationMonitor {
       // (nessun nuovo ricalcolo verrebbe mai avviato).
       _isRerouting = false;
     }
-  }
-
-  /// FIX BUG 5: Verifica se l'utente si sta muovendo nella direzione
-  /// generale del percorso (invece che nella direzione opposta).
-  ///
-  /// Questo è usato per la tolerance laterale: un pedone sul marciapiede
-  /// opposto che cammina nella direzione del percorso non viene forzato
-  /// al ricalcolo.
-  ///
-  /// LOGICA:
-  /// 1. Trova il punto della polyline più vicino all'utente
-  /// 2. Trova il PROSSIMO punto sulla polyline (direzione di marcia)
-  /// 3. Calcola il bearing da utente → prossimo punto polyline
-  /// 4. Confronta con la direzione di movimento dell'utente (_rawBearing)
-  /// 5. Se la differenza è < 90°, l'utente sta andando verso il percorso
-  bool _isMovingGenerallyTowardRoute(double lat, double lng) {
-    if (_activeRoute == null || _activeRoute!.decodedPolyline.isEmpty) {
-      return false;
-    }
-
-    final polyline = _activeRoute!.decodedPolyline;
-
-    // FIX BUG 5A: trovare il segmento più vicino con proiezione ortogonale,
-    // non il vertice più vicino. La overview_polyline è compressa: un tratto
-    // di 200m può avere solo 2 punti. Il vertice più vicino può essere a
-    // centinaia di metri mentre la proiezione sul segmento è vicina.
-    int nearestSegIdx = 0;
-    double minLateralDist = double.infinity;
-
-    for (int i = 0; i < polyline.length - 1; i++) {
-      final proj = projectPointOnSegment(
-        lat, lng,
-        polyline[i][0], polyline[i][1],
-        polyline[i + 1][0], polyline[i + 1][1],
-      );
-      if (proj.lateralDistanceMeters < minLateralDist) {
-        minLateralDist = proj.lateralDistanceMeters;
-        nearestSegIdx = i;
-      }
-    }
-
-    // Il bearing della direzione di marcia del percorso sul segmento più vicino
-    // (non verso il vertice successivo, ma nella direzione del segmento stesso).
-    final double routeSegBearing = calculateBearing(
-      polyline[nearestSegIdx][0],
-      polyline[nearestSegIdx][1],
-      polyline[nearestSegIdx + 1][0],
-      polyline[nearestSegIdx + 1][1],
-    );
-
-    // FIX BUG 5B: usa _direction (bearing filtrato GPS, aggiornato solo sopra
-    // soglia di velocità) invece di _rawBearing (inaffidabile a bassa velocità).
-    // Se _direction è null (utente mai mosso abbastanza), preferiamo non
-    // ricalcolare: è più probabile che l'utente stia percorrendo il percorso
-    // sul lato sbagliato della strada che non che abbia realmente deviato.
-    final double? userBearing = _direction ?? (_rawBearing != 0.0 ? _rawBearing : null);
-    if (userBearing == null) {
-      print(
-        '🧭 FIX BUG 5: bearing utente sconosciuto — nessun ricalcolo (fail-safe)',
-      );
-      return true; // Fail-safe: senza bearing, non ricalcolare
-    }
-
-    // L'utente è "generalmente nella direzione del percorso" se la sua
-    // direzione di marcia è entro ±90° rispetto alla direzione del segmento.
-    // Usiamo il bearing del SEGMENTO (stabile, geometrico) invece del bearing
-    // verso un vertice (instabile, dipende dalla posizione relativa).
-    double diff = (routeSegBearing - userBearing + 360) % 360;
-    if (diff > 180) diff -= 360;
-    final absDiff = diff.abs();
-
-    final bool movingToward = absDiff < 90.0;
-    print(
-      '🧭 FIX BUG 5: segBearing=${routeSegBearing.toStringAsFixed(1)}°, '
-      'userBearing=${userBearing.toStringAsFixed(1)}°, diff=${absDiff.toStringAsFixed(1)}° '
-      '→ movingTowardRoute=$movingToward (lateralDist=${minLateralDist.toStringAsFixed(1)}m)',
-    );
-    return movingToward;
   }
 
   /// Registra un overlay emesso nella sessione corrente.

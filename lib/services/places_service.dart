@@ -63,8 +63,19 @@ class PlaceSuggestion {
   /// Usato per chiamare Places Details API e ottenere le coordinate.
   final String placeId;
 
-  /// Costruttore — entrambi i campi sono obbligatori.
-  PlaceSuggestion({required this.description, required this.placeId});
+  /// Distanza in metri dalla posizione dell'utente (origine `origin`
+  /// passata alla Autocomplete API). È valorizzato SOLO quando la richiesta
+  /// include il parametro `origin=lat,lng`; altrimenti resta `null`.
+  /// Lo usiamo per ordinare i suggerimenti dal più vicino al più lontano.
+  final int? distanceMeters;
+
+  /// Costruttore — description e placeId sono obbligatori,
+  /// distanceMeters è opzionale (presente solo con location bias attivo).
+  PlaceSuggestion({
+    required this.description,
+    required this.placeId,
+    this.distanceMeters,
+  });
 
   /// Factory constructor che crea un PlaceSuggestion da un oggetto JSON.
   ///
@@ -74,18 +85,22 @@ class PlaceSuggestion {
   ///     {
   ///       "description": "Via Roma 1, Milano, Italia",
   ///       "place_id": "ChIJrTLr-GyuEmsRBfy61i59si0",
+  ///       "distance_meters": 1234,   // presente solo se è stato inviato `origin`
   ///       ...
   ///     }
   ///   ]
   /// }
-  ///
-  /// Questo factory prende un singolo elemento dell'array "predictions".
   factory PlaceSuggestion.fromJson(Map<String, dynamic> json) {
+    // 'distance_meters' è presente solo se la richiesta include `origin`.
+    // Quando assente lasciamo null: questi risultati finiranno in coda
+    // nell'ordinamento per prossimità.
+    final dynamic rawDistance = json['distance_meters'];
     return PlaceSuggestion(
-      // 'description' è il testo leggibile del suggerimento
       description: json['description'] ?? '',
-      // 'place_id' è l'identificatore univoco del luogo
       placeId: json['place_id'] ?? '',
+      distanceMeters: rawDistance is int
+          ? rawDistance
+          : (rawDistance is num ? rawDistance.toInt() : null),
     );
   }
 }
@@ -210,30 +225,64 @@ class PlacesService {
   /// - [sessionToken]: token della sessione corrente di ricerca.
   ///   DEVE essere lo stesso per tutta la sessione (tutte le battiture
   ///   + la successiva chiamata Details)
+  /// - [userLat] / [userLng] (opzionali): posizione GPS attuale dell'utente.
+  ///   Se entrambi sono forniti, la richiesta include:
+  ///     • `location` + `radius` → BIAS GEOGRAFICO: Google privilegia i
+  ///        luoghi vicini all'utente a parità di rilevanza testuale.
+  ///     • `origin` → fa restituire `distance_meters` per ogni prediction,
+  ///        che usiamo poi per ORDINARE i risultati dal più vicino al più
+  ///        lontano lato client (l'API non li ordina automaticamente).
+  ///   Se sono null (es. GPS non ancora pronto / permessi negati), la
+  ///   richiesta è identica al comportamento storico (nessun bias).
   ///
   /// RETURN:
-  /// - Lista di PlaceSuggestion con description e placeId
-  /// - Lista vuota se non ci sono risultati o se si verifica un errore
+  /// - Lista di PlaceSuggestion ordinata per prossimità quando la posizione
+  ///   è disponibile, altrimenti nell'ordine restituito da Google.
+  /// - Lista vuota se non ci sono risultati o se si verifica un errore.
   ///
   /// NOTA: la API restituisce al massimo 5 suggerimenti per default.
   Future<List<PlaceSuggestion>> getAutocompleteSuggestions(
     String input,
-    String sessionToken,
-  ) async {
+    String sessionToken, {
+    double? userLat,
+    double? userLng,
+  }) async {
     try {
-      // Costruisce l'URL della richiesta con i parametri necessari
+      // Parametri "base" sempre presenti: input, key, language, sessiontoken.
+      final Map<String, String> queryParameters = {
+        // Il testo digitato dall'utente (la query di ricerca)
+        'input': input,
+        // La API Key per l'autenticazione
+        'key': apiKey,
+        // Lingua dei risultati: italiano
+        'language': 'it',
+        // Session token per raggruppare le richieste nella stessa sessione
+        // di fatturazione (autocomplete + details = 1 sessione)
+        'sessiontoken': sessionToken,
+      };
+
+      // Se la posizione GPS è disponibile, aggiungiamo i parametri di bias
+      // e di origine. È un *enrichment* opzionale: senza posizione l'URL
+      // resta identico a quello storico (fallback richiesto dalla specifica).
+      if (userLat != null && userLng != null) {
+        final String latLng = '$userLat,$userLng';
+        // `location` + `radius`: location bias verso un cerchio di 50 km
+        // attorno all'utente. Non un hard filter — Google può comunque
+        // proporre risultati fuori area se molto rilevanti.
+        // 50 km è un compromesso ragionevole: cattura POI cittadini e
+        // limitrofi (es. supermercati nei comuni vicini) senza degenerare
+        // su scala nazionale.
+        queryParameters['location'] = latLng;
+        queryParameters['radius'] = '50000';
+        // `origin`: fa restituire `distance_meters` per ogni prediction.
+        // È l'unico modo per ottenere la distanza reale calcolata da Google;
+        // ci servirà per ordinare lato client (l'API NON ordina da sé).
+        queryParameters['origin'] = latLng;
+      }
+
+      // Costruisce l'URL della richiesta con i parametri assemblati sopra
       final uri = Uri.parse(_autocompleteUrl).replace(
-        queryParameters: {
-          // Il testo digitato dall'utente (la query di ricerca)
-          'input': input,
-          // La API Key per l'autenticazione
-          'key': apiKey,
-          // Lingua dei risultati: italiano
-          'language': 'it',
-          // Session token per raggruppare le richieste nella stessa sessione
-          // di fatturazione (autocomplete + details = 1 sessione)
-          'sessiontoken': sessionToken,
-        },
+        queryParameters: queryParameters,
       );
 
       // Esegue la chiamata HTTP GET alla Places Autocomplete API
@@ -270,9 +319,28 @@ class PlacesService {
 
       // Converte ogni oggetto JSON in un PlaceSuggestion Dart
       // usando il factory constructor PlaceSuggestion.fromJson()
-      return predictions
+      final List<PlaceSuggestion> suggestions = predictions
           .map((prediction) => PlaceSuggestion.fromJson(prediction))
           .toList();
+
+      // ORDINAMENTO PER PROSSIMITÀ:
+      // Quando abbiamo inviato `origin` (cioè quando la posizione GPS era
+      // disponibile), ogni prediction porta con sé `distance_meters`.
+      // Google NON garantisce che le predictions arrivino già ordinate per
+      // distanza — il ranking di default mescola rilevanza testuale e
+      // popolarità — quindi facciamo noi il sort dal più vicino al più
+      // lontano. I risultati senza distanza (caso teorico: API non la
+      // restituisce per uno specifico item) finiscono in coda così da non
+      // "sporcare" la testa della lista.
+      if (userLat != null && userLng != null) {
+        suggestions.sort((a, b) {
+          final int da = a.distanceMeters ?? 1 << 30;
+          final int db = b.distanceMeters ?? 1 << 30;
+          return da.compareTo(db);
+        });
+      }
+
+      return suggestions;
     } on SocketException {
       // Nessuna rete o DNS non risolto: fallback alla cronologia nel widget.
       return [];

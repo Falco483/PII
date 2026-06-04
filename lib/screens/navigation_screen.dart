@@ -2669,6 +2669,12 @@ class _NavigationScreenState extends State<NavigationScreen> {
                 onDestinationSelected: _onDestinationSelected,
                 isLoading: _isLoading,
                 recentSearches: _recentSearches,
+                // Posizione GPS "live" (aggiornata dal position-stream a
+                // riga ~1091): viene usata dalla Places Autocomplete API
+                // per il bias geografico e per ordinare i suggerimenti
+                // dal più vicino al più lontano.
+                userLat: _currentLat,
+                userLng: _currentLng,
               ),
             ),
           ),
@@ -2803,6 +2809,10 @@ class _NavigationScreenState extends State<NavigationScreen> {
                   onDestinationSelected: _onDestinationSelected,
                   isLoading: _isLoading,
                   recentSearches: _recentSearches,
+                  // Stesso bias geografico anche per il layout tablet/landscape:
+                  // ordina i suggerimenti per prossimità all'utente.
+                  userLat: _currentLat,
+                  userLng: _currentLng,
                 ),
               ),
 

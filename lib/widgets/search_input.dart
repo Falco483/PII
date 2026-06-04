@@ -28,6 +28,7 @@ library;
 
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import '../models/search_history_item.dart';
 import '../services/places_service.dart';
@@ -56,6 +57,16 @@ class SearchInput extends StatefulWidget {
   /// Passate dalla NavigationScreen che le carica dal SearchHistoryService.
   final List<SearchHistoryItem> recentSearches;
 
+  /// Posizione GPS corrente dell'utente, propagata dal NavigationScreen
+  /// (che mantiene un position-stream sempre attivo). Quando disponibile,
+  /// viene inoltrata alla Places Autocomplete API come bias geografico
+  /// e usata per ordinare i suggerimenti dal più vicino al più lontano.
+  /// Se null (es. permessi negati o primo fix GPS non ancora ottenuto),
+  /// proveremo un fallback su `Geolocator.getLastKnownPosition()`; se anche
+  /// quello fallisce manteniamo il comportamento storico senza bias.
+  final double? userLat;
+  final double? userLng;
+
   /// Costruttore — tutti i parametri tranne isLoading e recentSearches sono obbligatori.
   const SearchInput({
     super.key,
@@ -64,6 +75,8 @@ class SearchInput extends StatefulWidget {
     required this.focusNode,
     this.isLoading = false,
     this.recentSearches = const [],
+    this.userLat,
+    this.userLng,
   });
 
   @override
@@ -170,13 +183,22 @@ class _SearchInputState extends State<SearchInput> {
     if (!_speechEnabled) return;
     await _speechToText.listen(
       onResult: (result) {
+        final String words = result.recognizedWords;
+        // Aggiorna testo + selezione (cursore in fondo) come fa una vera
+        // digitazione, così la UI si comporta in modo identico al caso
+        // tastiera.
+        widget.destinationController.value = TextEditingValue(
+          text: words,
+          selection: TextSelection.collapsed(offset: words.length),
+        );
+        // Innesca l'autocomplete identica alla digitazione: il debounce
+        // di 300ms assorbe i partial result ravvicinati e fa partire UNA
+        // sola fetch quando l'utente fa una pausa o termina la frase.
+        // Su iOS spesso `finalResult` non arriva mai a fine sessione, e
+        // senza questa chiamata sui partial la ricerca non parte mai.
+        _onTextChanged(words);
         if (result.finalResult) {
-          widget.destinationController.text = result.recognizedWords;
-          _onTextChanged(result.recognizedWords);
           setState(() { _isListening = false; });
-        } else {
-          widget.destinationController.text = result.recognizedWords;
-          setState(() {});
         }
       },
       localeId: 'it_IT',
@@ -275,11 +297,38 @@ class _SearchInputState extends State<SearchInput> {
       _isLoadingSuggestions = true;
     });
 
-    // Chiama il servizio Places API con il testo e il session token.
+    // --- RECUPERO POSIZIONE GPS PER ORDINAMENTO PER PROSSIMITÀ ---
+    // Priorità 1: coordinate fornite dal parent (NavigationScreen mantiene
+    //             un position-stream sempre attivo, quindi sono "live").
+    // Priorità 2: getLastKnownPosition() — istantaneo e gratuito, copre il
+    //             caso in cui il parent non abbia ancora ricevuto il primo
+    //             fix (es. SearchInput riusato in altre schermate).
+    // Fallback:   null → l'API verrà chiamata senza bias (comportamento storico).
+    //
+    // NON usiamo `Geolocator.getCurrentPosition()`: bloccherebbe il flusso
+    // per 1-2 secondi ad ogni battitura, vanificando il debounce di 300ms.
+    double? lat = widget.userLat;
+    double? lng = widget.userLng;
+    if (lat == null || lng == null) {
+      try {
+        final Position? last = await Geolocator.getLastKnownPosition();
+        if (last != null) {
+          lat = last.latitude;
+          lng = last.longitude;
+        }
+      } catch (_) {
+        // Permessi negati / servizio off: lasciamo lat/lng null → no bias.
+      }
+    }
+
+    // Chiama il servizio Places API con il testo, il session token e
+    // (se disponibili) le coordinate utente per il bias geografico.
     // Il token è lo STESSO per tutta la sessione di ricerca.
     final suggestions = await _placesService.getAutocompleteSuggestions(
       input,
       _sessionToken,
+      userLat: lat,
+      userLng: lng,
     );
 
     // Aggiorna la UI con i suggerimenti ricevuti (o lista vuota se nessuno)
@@ -356,6 +405,16 @@ class _SearchInputState extends State<SearchInput> {
             : suggestion.description,
       );
     }
+  }
+
+  /// Formatta la distanza (metri → "350 m", "1,2 km", "12 km") per il
+  /// subtitle dei suggerimenti. Stessa convenzione usata altrove nell'app.
+  String _formatDistanceFromUser(int meters) {
+    if (meters < 1000) return '$meters m';
+    if (meters < 10000) {
+      return '${(meters / 1000.0).toStringAsFixed(1).replaceAll('.', ',')} km';
+    }
+    return '${(meters / 1000.0).round()} km';
   }
 
   // ===========================================================================
@@ -475,7 +534,8 @@ class _SearchInputState extends State<SearchInput> {
           // La lista appare direttamente sotto il campo di testo.
           if (_suggestions.isNotEmpty)
             _buildDropdown(
-              children: _suggestions.map((suggestion) {
+              children: _suggestions.take(3).map((suggestion) {
+                final int? meters = suggestion.distanceMeters;
                 return ListTile(
                   leading: const Icon(
                     Icons.location_on_outlined,
@@ -488,6 +548,26 @@ class _SearchInputState extends State<SearchInput> {
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
+                  subtitle: meters != null
+                      ? Row(
+                          children: [
+                            Icon(
+                              Icons.near_me,
+                              size: 14,
+                              color: Colors.grey.shade600,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _formatDistanceFromUser(meters),
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.grey.shade700,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        )
+                      : null,
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: 16,
                     vertical: 8,
