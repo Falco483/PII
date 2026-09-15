@@ -1,3 +1,8 @@
+
+[Documentazione finale](lib/documentazione finale/Documentazione_Progetto_PII.pdf)
+
+
+
 **Guida alla Clonazione e Build dell'App su cellulare Android Fisico**
 
 Prerequisiti necessari
